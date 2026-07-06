@@ -12,6 +12,31 @@ static String getMACClean() {
     return String(macStr);
 }
 
+// Server-level connection diagnostics — logged to Serial so a real connection
+// attempt (from the /provision page) can be told apart from the browser never
+// reaching the device at all. Watch these during `pio device monitor`.
+class ProvisioningServerCallbacks : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) override {
+        Serial.printf("BLEProvisioning: Client connected (conn_handle=%d)\n", desc->conn_handle);
+    }
+    void onDisconnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) override {
+        Serial.printf("BLEProvisioning: Client disconnected (was encrypted=%d, bonded=%d)\n",
+                      desc->sec_state.encrypted, desc->sec_state.bonded);
+        // Resume advertising so a retry from the browser can reconnect without
+        // needing another button-hold — NimBLE doesn't do this automatically.
+        NimBLEDevice::getAdvertising()->start();
+    }
+    void onMTUChange(uint16_t mtu, ble_gap_conn_desc* desc) override {
+        Serial.printf("BLEProvisioning: MTU negotiated: %d\n", mtu);
+    }
+    void onAuthenticationComplete(ble_gap_conn_desc* desc) override {
+        Serial.printf("BLEProvisioning: Authentication complete (encrypted=%d, authenticated=%d)\n",
+                      desc->sec_state.encrypted, desc->sec_state.authenticated);
+    }
+};
+
+static ProvisioningServerCallbacks* g_serverCallbacks = nullptr;
+
 class ProvisioningConfigCallbacks : public NimBLECharacteristicCallbacks {
 public:
     explicit ProvisioningConfigCallbacks(BLEProvisioning* owner) : owner_(owner) {}
@@ -44,34 +69,39 @@ void BLEProvisioning::start() {
 
     NimBLEDevice::init(BLE_DEVICE_NAME);
     NimBLEDevice::setMTU(517);
-    // Bonding + secure connections, no MITM (Web Bluetooth has no passkey-entry UI
-    // to defend against MITM with anyway) — Just Works pairing, encrypting the link
-    // before any characteristic value crosses the air.
-    NimBLEDevice::setSecurityAuth(true, false, true);
-    NimBLEDevice::setSecurityIOCap(ESP_IO_CAP_NONE);
+    // Bond records persist in NVS across reboots/reflashes. An earlier version of
+    // this firmware required bonding (NIMBLE_PROPERTY::*_ENC); a stale bond from
+    // that attempt can make a client (or its OS) keep trying to use encryption
+    // this firmware no longer requests, surfacing as "GATT operation not
+    // permitted" even though no characteristic here demands security anymore.
+    // Config mode is rare and deliberate, so wiping bonds every time it starts
+    // is a cheap way to guarantee a clean slate.
+    NimBLEDevice::deleteAllBonds();
 
     // STA mode without connecting — required for on-demand WiFi scans (see
     // runWifiScanAndNotify()); coexists with BLE advertising on this chip.
     WiFi.mode(WIFI_STA);
 
     server_ = NimBLEDevice::createServer();
+    g_serverCallbacks = new ProvisioningServerCallbacks();
+    server_->setCallbacks(g_serverCallbacks);
     NimBLEService* service = server_->createService(BLE_SERVICE_UUID);
 
     infoChar_ = service->createCharacteristic(
-        BLE_CHAR_INFO_UUID, NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::NOTIFY, 512);
+        BLE_CHAR_INFO_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY, 512);
 
     configWriteChar_ = service->createCharacteristic(
-        BLE_CHAR_CONFIG_UUID, NIMBLE_PROPERTY::WRITE_ENC, 512);
+        BLE_CHAR_CONFIG_UUID, NIMBLE_PROPERTY::WRITE, 512);
     g_configCallbacks = new ProvisioningConfigCallbacks(this);
     configWriteChar_->setCallbacks(g_configCallbacks);
 
     commandChar_ = service->createCharacteristic(
-        BLE_CHAR_COMMAND_UUID, NIMBLE_PROPERTY::WRITE_ENC, 32);
+        BLE_CHAR_COMMAND_UUID, NIMBLE_PROPERTY::WRITE, 32);
     g_commandCallbacks = new ProvisioningCommandCallbacks(this);
     commandChar_->setCallbacks(g_commandCallbacks);
 
     scanResultsChar_ = service->createCharacteristic(
-        BLE_CHAR_SCAN_RESULTS_UUID, NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::NOTIFY, 512);
+        BLE_CHAR_SCAN_RESULTS_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY, 512);
 
     service->start();
 

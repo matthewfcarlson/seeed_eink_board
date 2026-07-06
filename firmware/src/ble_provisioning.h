@@ -38,11 +38,15 @@
  *   SCAN_RESULTS  (read, notify)  — JSON array of {ssid, rssi, secure} from the most
  *                                   recent scan.
  *
- * Characteristics are encryption-required (NIMBLE_PROPERTY::*_ENC), so the OS pairs
- * (Just Works — no PIN, matching Web Bluetooth's lack of a pairing-code UI) before
- * any value crosses the air, protecting the WiFi password from passive BLE sniffing.
- * This is the same "encrypted but not authenticated" tradeoff already accepted for
- * WiFiClientSecure::setInsecure() elsewhere in this firmware.
+ * Characteristics are plain READ/WRITE, not encryption-required. An earlier version
+ * used NIMBLE_PROPERTY::*_ENC to force BLE bonding before any value (notably the
+ * WiFi password) crossed the air, but Web Bluetooth has no API to initiate that
+ * pairing itself — a browser GATT read/write against an encrypted characteristic
+ * with no existing bond just fails outright ("GATT operation not permitted"),
+ * making the feature unusable from a browser rather than making it secure. So the
+ * WiFi password does cross the air in the clear during the brief provisioning
+ * window; the mitigating factor is that config mode only runs for as long as it
+ * takes to provision (button-hold triggered, or first boot), not indefinitely.
  */
 class BLEProvisioning {
 public:

@@ -94,10 +94,14 @@ the device anymore (that approach, and `config_server.h/.cpp`, were removed).
 
 All of this is exchanged as JSON over a custom GATT service
 (`firmware/src/ble_provisioning.h` documents the exact characteristic schema);
-the browser-side implementation is `worker/src/provision-ui.ts`. The GATT link
-requires BLE bonding (Just Works — Web Bluetooth has no passkey-entry UI) before
-any value crosses the air, so the WiFi password isn't sent in the clear.
-Configuration is stored in NVS and persists across reboots and OTA updates.
+the browser-side implementation is `worker/src/provision-ui.ts`. Characteristics
+are plain (not encryption-required) — an earlier version required BLE bonding,
+but Web Bluetooth has no API to trigger that pairing itself, so a browser
+read/write against an encrypted characteristic with no existing bond just fails
+("GATT operation not permitted"). So the WiFi password does cross the air in the
+clear during the brief provisioning window (config mode only runs long enough to
+provision, not indefinitely). Configuration is stored in NVS and persists across
+reboots and OTA updates.
 
 ### Building and Flashing
 
