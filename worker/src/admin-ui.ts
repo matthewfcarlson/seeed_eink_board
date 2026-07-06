@@ -68,20 +68,12 @@ export function renderAdminPage(): string {
   </div>
 
   <div class="tab-panel active" id="panel-login">
-    <p class="hint">Log in with the passkey you registered for your account.</p>
-    <div class="row">
-      <label for="login-email-input">Email</label>
-      <input type="text" id="login-email-input" placeholder="you@example.com">
-    </div>
+    <p class="hint">Log in with the passkey you registered for your account. Your browser/OS will show a picker — there's no username to type.</p>
     <button id="passkey-login-btn">Log in with passkey</button>
   </div>
 
   <div class="tab-panel" id="panel-signup">
-    <p class="hint">No public signup form other than this — creating an account requires registering a passkey (Face ID, Touch ID, Windows Hello, or a security key).</p>
-    <div class="row">
-      <label for="signup-email-input">Email</label>
-      <input type="text" id="signup-email-input" placeholder="you@example.com">
-    </div>
+    <p class="hint">No signup form, no email, no password — creating an account just means registering a passkey (Face ID, Touch ID, Windows Hello, or a security key). The passkey is the whole account.</p>
     <button id="passkey-signup-btn">Create account with passkey</button>
   </div>
 
@@ -193,17 +185,15 @@ function passkeysSupported() {
 }
 
 document.getElementById("passkey-signup-btn").addEventListener("click", async () => {
-  const email = document.getElementById("signup-email-input").value.trim();
-  if (!email) return;
   if (!passkeysSupported()) {
     showMessage("login-message", "This browser doesn't support passkeys. Try an up-to-date Chrome, Safari, or Firefox.", "error");
     return;
   }
   try {
-    const options = await publicFetch("/auth/register/options", { email });
+    const { attemptId, options } = await publicFetch("/auth/register/options", {});
     const creationOptions = PublicKeyCredential.parseCreationOptionsFromJSON(options);
     const credential = await navigator.credentials.create({ publicKey: creationOptions });
-    const result = await publicFetch("/auth/register/verify", { email, response: credential.toJSON() });
+    const result = await publicFetch("/auth/register/verify", { attemptId, response: credential.toJSON() });
     setApiKey(result.api_key);
     alert("Account created! Your API key (also saved to this browser, shown once):\\n\\n" + result.api_key);
     await tryLogin(true);
@@ -213,17 +203,15 @@ document.getElementById("passkey-signup-btn").addEventListener("click", async ()
 });
 
 document.getElementById("passkey-login-btn").addEventListener("click", async () => {
-  const email = document.getElementById("login-email-input").value.trim();
-  if (!email) return;
   if (!passkeysSupported()) {
     showMessage("login-message", "This browser doesn't support passkeys. Try an up-to-date Chrome, Safari, or Firefox, or use an API key below.", "error");
     return;
   }
   try {
-    const options = await publicFetch("/auth/login/options", { email });
+    const { attemptId, options } = await publicFetch("/auth/login/options", {});
     const requestOptions = PublicKeyCredential.parseRequestOptionsFromJSON(options);
     const credential = await navigator.credentials.get({ publicKey: requestOptions });
-    const result = await publicFetch("/auth/login/verify", { email, response: credential.toJSON() });
+    const result = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
     setApiKey(result.api_key);
     await tryLogin(true);
   } catch (err) {
@@ -236,7 +224,7 @@ async function tryLogin(showError) {
   if (!key) return false;
   try {
     const me = await apiFetch("/admin/me");
-    document.getElementById("whoami").textContent = me.email;
+    document.getElementById("whoami").textContent = "Account " + me.id.slice(0, 8);
     document.getElementById("login").style.display = "none";
     document.getElementById("app").style.display = "block";
     await renderApp();

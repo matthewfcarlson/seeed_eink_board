@@ -3,12 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --env local",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
     "test": "vitest run",
-    "db:migrate:local": "wrangler d1 migrations apply eink-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply eink --remote --env production"
+    "db:migrate:local": "wrangler d1 migrations apply eink-local --local --env local",
+    "db:migrate:remote": "wrangler d1 migrations apply eink --remote"
   },
   "dependencies": {
     "@cf-wasm/photon": "^0.3.6",

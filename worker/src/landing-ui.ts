@@ -69,15 +69,14 @@ export function renderLandingPage(): string {
 <div class="card">
   <h2>Setting up a new user</h2>
   <p>
-    Accounts are created entirely from the dashboard &mdash; there's no separate
-    sign-up form or database script. Creating an account requires registering a
-    <strong>passkey</strong> (Face ID, Touch ID, Windows Hello, or a security key),
-    which is what proves you're allowed to make one; there's no email/password
-    signup at all.
+    Accounts are created entirely from the dashboard &mdash; there's no signup
+    form, no email, no password. Creating an account is just registering a
+    <strong>passkey</strong> (Face ID, Touch ID, Windows Hello, or a security key);
+    the passkey <em>is</em> the account.
   </p>
   <ol>
-    <li>Go to <a href="/admin">/admin</a> and open the &quot;Create account&quot; tab.</li>
-    <li>Enter your email and follow your browser/OS prompt to create a passkey.</li>
+    <li>Go to <a href="/admin">/admin</a>, open the &quot;Create account&quot; tab, and click the button.</li>
+    <li>Follow your browser/OS prompt to create a passkey.</li>
     <li>Save the API key shown once after signup if you also want scripted (non-browser) access.</li>
     <li>Register your board's MAC address (shown when the board enters config mode) to start managing its images and schedule.</li>
   </ol>

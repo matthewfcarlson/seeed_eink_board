@@ -14,35 +14,43 @@ cpu_ms = 30000
 # Non-secret config. Secrets (none yet) go via `wrangler secret put`.
 ENVIRONMENT = "development"
 
-# database_id/id below are placeholders for local dev: `wrangler dev` (no --remote)
-# simulates D1/KV against local Miniflare storage keyed off these ids and never
-# contacts the Cloudflare API. Production needs its own real bindings — configured
-# separately in [env.production] once `wrangler d1 create` / `wrangler kv namespace
-# create` have been run against a logged-in account — do not reuse these ids there.
+# Real Cloudflare resources (created via dashboard). This is the single deploy
+# environment — Cloudflare's Git-connected Workers Build runs plain `npx wrangler
+# deploy` with no --env flag, so it always deploys this top-level config to the
+# "eink-worker" script. Local dev should NOT use this block — use `npm run dev`
+# (wrangler dev --env local), which points at [env.local]'s dummy ids instead, so
+# there's no way to accidentally read/write the real production data locally.
 [[d1_databases]]
-binding = "DB"
-database_name = "eink-db"
-database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "src/db/migrations"
-
-[[kv_namespaces]]
-binding = "KV"
-id = "eink-kv-local"
-
-[env.production]
-name = "eink-worker-prod"
-
-[[env.production.d1_databases]]
 binding = "DB"
 database_name = "eink"
 database_id = "1a096c38-f384-4228-a3e4-d767e6efc9a8"
+migrations_dir = "src/db/migrations"
 
 # NOTE: dashboard currently has this binding named "KV_BINDING" — rename it to "KV"
-# in the Cloudflare dashboard (Workers > eink-worker-prod > Settings > Bindings) to
-# match `env.KV` used throughout the code, or env.KV will be undefined in prod.
-[[env.production.kv_namespaces]]
+# in the Cloudflare dashboard (Workers > eink-worker > Settings > Bindings) to match
+# `env.KV` used throughout the code, or env.KV will be undefined at runtime.
+[[kv_namespaces]]
 binding = "KV"
 id = "239dca4bf22e40cd98e0d058b356d145"
+
+# Local development only. Deliberately distinct dummy ids from the real resources
+# above — `wrangler dev --env local` (default local/Miniflare mode, no --remote)
+# never contacts the Cloudflare API for these, so any id works, but keeping them
+# different from prod means a stray --remote flag fails loudly instead of touching
+# real data.
+[env.local]
+[env.local.vars]
+ENVIRONMENT = "development"
+
+[[env.local.d1_databases]]
+binding = "DB"
+database_name = "eink-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "src/db/migrations"
+
+[[env.local.kv_namespaces]]
+binding = "KV"
+id = "eink-kv-local"
 
 [observability]
 enabled = false
