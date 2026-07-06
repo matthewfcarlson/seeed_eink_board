@@ -1,0 +1,37 @@
+name: Release firmware
+
+# Push a tag matching vX.Y.Z (matching FIRMWARE_VERSION in firmware/src/version.h,
+# with a leading 'v') to build and publish a GitHub release. The eink-worker
+# Cloudflare Worker picks releases up from here — see worker/src/lib/github-release.ts
+# and CLAUDE.md's OTA section. It only catalogs the release; rollout to devices is a
+# separate, explicit admin action.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        working-directory: firmware
+        run: pio run
+
+      - name: Rename build artifact
+        run: cp firmware/.pio/build/seeed_xiao_esp32s3/firmware.bin firmware.bin
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware.bin
+          generate_release_notes: true
