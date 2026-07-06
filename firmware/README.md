@@ -7,7 +7,7 @@ Custom firmware for the Seeed Studio XIAO ePaper Display Board (EE02) driving a 
 - Fetches images from a configurable HTTP server
 - **Hash-based change detection** - only downloads and refreshes when the image changes
 - Deep sleep between refreshes for battery conservation
-- Runtime configuration via web interface (no reflashing needed)
+- Runtime configuration via Bluetooth LE (no reflashing needed)
 - Support for the 6-color Spectra 6 palette (Black, White, Yellow, Red, Blue, Green)
 
 ## Prerequisites
@@ -18,22 +18,12 @@ Custom firmware for the Seeed Studio XIAO ePaper Display Board (EE02) driving a 
 
 ## Quick Start
 
-### 1. Configure WiFi Credentials
+WiFi credentials aren't compiled into the firmware — `config.h` only holds pin
+definitions and non-secret defaults, so there's nothing to edit or copy before
+your first build. WiFi is provisioned after flashing, over Bluetooth (see
+"Changing Configuration at Runtime" below).
 
-Copy the example config and edit with your credentials:
-
-```bash
-cp src/config.h.example src/config.h
-```
-
-Edit `src/config.h` and set your WiFi credentials:
-
-```cpp
-#define WIFI_SSID "YourNetworkName"
-#define WIFI_PASSWORD "YourPassword"
-```
-
-### 2. Set Default Server Address (Optional)
+### 1. Set Default Server Address (Optional)
 
 Edit `src/config_manager.h` to set the default image server:
 
@@ -47,14 +37,14 @@ Edit `src/config_manager.h` to set the default image server:
 #define DEFAULT_TIMEZONE_OFFSET_MINUTES 0
 ```
 
-### 3. Build the Firmware
+### 2. Build the Firmware
 
 ```bash
 cd firmware
 uv run pio run
 ```
 
-### 4. Flash the Firmware
+### 3. Flash the Firmware
 
 Connect the EE02 board via USB. If the device is in deep sleep, press the reset button to wake it.
 
@@ -65,6 +55,12 @@ uv run pio run -t upload --upload-port /dev/ttyACM0
 **Note:** The USB port may vary. On Linux it's typically `/dev/ttyACM0`, on macOS `/dev/cu.usbmodem*`, on Windows `COM3` or similar.
 
 If the device isn't detected, try a different USB cable - many cables are charge-only and lack data lines.
+
+### 4. Provision WiFi
+
+A freshly flashed device has no WiFi credentials, so it boots straight into
+Bluetooth configuration mode — see "Changing Configuration at Runtime" below to
+pair with it from `/provision` and set your WiFi network and server address.
 
 ### 5. Start the Image Server
 
@@ -88,7 +84,7 @@ The server runs on `http://0.0.0.0:5000` with these endpoints:
 
 ### 6. Test
 
-Press the reset button on the EE02 board. The display should:
+Press the reset button on the EE02 board. Once WiFi is provisioned, the display should:
 1. Connect to WiFi
 2. Sync current time and optional schedule overrides from `/device_config`
 3. Skip work and go back to sleep if it is currently in quiet hours
@@ -208,7 +204,9 @@ Entering deep sleep for 660 minutes 0 seconds...
 
 ## Changing Configuration at Runtime
 
-The firmware supports runtime configuration without reflashing.
+The firmware supports runtime configuration without reflashing, including WiFi
+credentials — provisioning happens over Bluetooth LE, not a device-hosted web
+server (there's no AP mode / captive portal / IP address to visit anymore).
 
 ### Entering Configuration Mode
 
@@ -218,36 +216,31 @@ The firmware supports runtime configuration without reflashing.
 3. Continue holding Button 1 for an additional second
 4. Release Button 1
 
-The device will enter configuration mode and either:
-- **STA mode**: Connect to your WiFi and show its IP address
-- **AP mode**: Create a WiFi network called "EInk-Setup" if WiFi fails
+A device that has never been provisioned (no WiFi credentials saved yet) enters
+configuration mode automatically on boot — no button needed for first-time setup.
 
-### Web Configuration Interface
+Either way, the device starts advertising over Bluetooth as `EInk-Setup`.
 
-1. Open a browser to the device's IP address (shown in serial output)
-   - Or connect to "EInk-Setup" WiFi and go to `http://192.168.4.1`
+### Bluetooth Configuration Interface
 
-2. Configure these settings:
-   - **Server Host**: IP address or domain name (e.g., `192.168.86.34`)
-   - **Server Port**: Usually `5000`
-   - **Image Endpoint**: Path to the image (e.g., `/image_packed`)
+1. From Chrome or Edge (desktop or Android — Web Bluetooth isn't supported in
+   Safari/iOS), open the worker's `/provision` page (linked from its home page).
+2. Click "Connect to device" and select `EInk-Setup` from the browser's picker.
+3. Configure WiFi (use "Scan" to list nearby networks) plus:
+   - **Server Host**: IP address or domain name (e.g., `eink.example.com`)
+   - **Server Port**, **Use HTTPS**, **Image Endpoint**
    - **Refresh Interval**: Minutes between wakeups during active hours (1-1440)
-   - **Active Start Hour**: Local hour when image checks begin (0-23)
-   - **Active End Hour**: Local hour when quiet hours begin (0-23)
+   - **Active Start/End Hour**: Local hours bounding the active window (0-23)
    - **Timezone Offset**: Minutes from UTC used for local wall-clock scheduling
-
-3. Click "Save Configuration"
-
-4. Click "Reboot Device" to start normal operation
+4. Click "Save & Reboot". The device saves to NVS and restarts into normal
+   operation, connecting to the WiFi network you just gave it.
 
 ### Configuration Persistence
 
-Settings are stored in NVS (Non-Volatile Storage) and persist across:
-- Reboots
-- Deep sleep cycles
-- Power loss
-
-To reset to defaults, use the "Reset Defaults" button in the web interface.
+Settings — including WiFi credentials — are stored in NVS (Non-Volatile Storage)
+and persist across reboots, deep sleep cycles, power loss, and OTA firmware
+updates (NVS is a separate flash partition from the app image, so an update can
+never overwrite them).
 
 ### Remote Schedule Overrides
 
@@ -282,10 +275,9 @@ If you prefer not to edit JSON by hand, start `image_server.py` and open the mai
 
 ### WiFi connection fails
 
-- Verify SSID and password in your `src/config.h`
-- Make sure you copied `config.h.example` to `config.h`
+- Re-enter Bluetooth config mode (hold Button 1 during reset) and re-provision the
+  SSID/password from `/provision` — WiFi credentials live in NVS, not `config.h`
 - Check that your network is 2.4GHz (ESP32 doesn't support 5GHz)
-- Rebuild and reflash after changing credentials
 
 ### HTTP requests fail (code: -1)
 
@@ -313,14 +305,15 @@ firmware/
 ├── platformio.ini          # PlatformIO project configuration
 ├── README.md               # This file
 └── src/
-    ├── config.h.example    # WiFi config template (copy to config.h)
-    ├── config_manager.h    # Default server settings
-    ├── config_manager.cpp  # NVS-based configuration storage
-    ├── config_server.h     # Web configuration interface
-    ├── config_server.cpp   # HTTP server for configuration
-    ├── display.h           # Display driver interface
-    ├── display.cpp         # Spectra 6 display driver
-    └── main.cpp            # Main application logic
+    ├── config.h              # Pin definitions and non-secret defaults (no WiFi credentials)
+    ├── config_manager.h      # Default server settings
+    ├── config_manager.cpp    # NVS-based configuration storage (incl. WiFi credentials)
+    ├── ble_provisioning.h    # Bluetooth LE configuration interface
+    ├── ble_provisioning.cpp  # NimBLE GATT server for configuration
+    ├── version.h             # Compiled-in FIRMWARE_VERSION, bumped per OTA release
+    ├── display.h             # Display driver interface
+    ├── display.cpp           # Spectra 6 display driver
+    └── main.cpp              # Main application logic
 ```
 
 ## Hardware Reference

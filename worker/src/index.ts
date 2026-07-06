@@ -13,6 +13,7 @@ import { registerAdminFirmwareRoutes, syncLatestFirmwareRelease } from "./routes
 import { registerAuthPasskeyRoutes } from "./routes/auth-passkey";
 import { renderAdminPage } from "./admin-ui";
 import { renderLandingPage } from "./landing-ui";
+import { renderProvisionPage } from "./provision-ui";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -21,6 +22,10 @@ app.get("/", (c) => c.html(renderLandingPage()));
 // Static shell for the admin single-page app — no secrets server-side, the API
 // key lives in the browser's localStorage and is sent per-request to /admin/*.
 app.get("/admin", (c) => c.html(renderAdminPage()));
+
+// Static Web Bluetooth pairing page — talks directly to the board over BLE,
+// nothing device-specific happens on this worker. See ble_provisioning.h.
+app.get("/provision", (c) => c.html(renderProvisionPage()));
 
 // Device-facing — contract-critical, must match firmware/src/main.cpp exactly.
 registerDeviceConfigRoute(app);

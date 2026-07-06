@@ -67,6 +67,17 @@ export function renderLandingPage(): string {
 </div>
 
 <div class="card">
+  <h2>Set up a new device</h2>
+  <p>
+    Hold Button 1 during boot (or just power it on for the first time, before any
+    WiFi is configured) to enter setup mode, then pair with it over Bluetooth here
+    &mdash; no need to join a temporary WiFi network first.
+  </p>
+  <p><a class="btn" href="/provision">Open Device Setup &rarr;</a></p>
+  <p class="hint">Requires Chrome or Edge (desktop or Android) &mdash; Web Bluetooth isn't supported in Safari/iOS.</p>
+</div>
+
+<div class="card">
   <h2>Setting up a new user</h2>
   <p>
     Accounts are created entirely from the dashboard &mdash; there's no signup

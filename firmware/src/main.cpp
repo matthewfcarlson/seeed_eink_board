@@ -11,7 +11,7 @@
 #include "config.h"
 #include "display.h"
 #include "config_manager.h"
-#include "config_server.h"
+#include "ble_provisioning.h"
 #include "version.h"
 
 #ifndef IMAGE_INITIAL_RESPONSE_TIMEOUT_MS
@@ -33,7 +33,7 @@
 // Global instances
 Spectra6Display display;
 ConfigManager configManager;
-ConfigServer configServer(configManager);
+BLEProvisioning bleProvisioning(configManager);
 
 // Boot count stored in RTC memory (survives deep sleep)
 RTC_DATA_ATTR int bootCount = 0;
@@ -580,10 +580,15 @@ bool checkConfigButton() {
 }
 
 bool connectWiFi() {
-    Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+    String ssid = configManager.getWifiSsid();
+    if (ssid.length() == 0) {
+        Serial.println("No WiFi credentials configured - skipping connect attempt");
+        return false;
+    }
+    Serial.printf("Connecting to WiFi: %s\n", ssid.c_str());
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(ssid.c_str(), configManager.getWifiPassword().c_str());
 
     uint32_t startTime = millis();
     while (WiFi.status() != WL_CONNECTED) {
@@ -791,23 +796,19 @@ void enterDeepSleep(uint32_t sleepSeconds) {
 
 void runConfigMode() {
     Serial.println("\n========================================");
-    Serial.println("CONFIGURATION MODE");
+    Serial.println("CONFIGURATION MODE (Bluetooth)");
     Serial.println("========================================\n");
 
-    // Try to connect to WiFi first for STA mode config
-    if (connectWiFi()) {
-        Serial.println("\nWiFi connected - starting config server in STA mode");
-        Serial.printf("Open http://%s in your browser to configure\n", WiFi.localIP().toString().c_str());
-        configServer.startSTAMode();
-    } else {
-        Serial.println("\nWiFi connection failed - starting AP mode");
-        Serial.printf("Connect to WiFi network '%s' and open http://192.168.4.1\n", CONFIG_AP_SSID);
-        configServer.startAPMode();
-    }
+    bleProvisioning.start();
+    // getBaseURL() reflects whatever server is currently configured (the compiled-in
+    // default on a never-provisioned device) — this is where /provision is served
+    // from, not something the device itself hosts.
+    Serial.printf("Pair over Bluetooth (device name 'EInk-Setup') from %s/provision to configure WiFi/server settings\n",
+                  getBaseURL().c_str());
 
-    // Run config server indefinitely until user reboots
+    // Runs until BLEProvisioning triggers a reboot (see handleCommand("save")).
     while (true) {
-        configServer.handleClient();
+        bleProvisioning.loop();
         delay(10);
     }
 }
@@ -900,6 +901,15 @@ void setup() {
 
     // Check if config button (Button 1 / GPIO2) is held to enter config mode
     if (checkConfigButton()) {
+        runConfigMode();
+        // runConfigMode never returns
+    }
+
+    // First boot (or after an NVS reset) has no WiFi credentials yet, so there's
+    // nothing useful runNormalMode() can do — go straight to provisioning instead
+    // of silently failing to connect every wake cycle until someone notices.
+    if (configManager.getWifiSsid().length() == 0) {
+        Serial.println("No WiFi credentials configured - entering config mode automatically");
         runConfigMode();
         // runConfigMode never returns
     }

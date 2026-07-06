@@ -42,6 +42,16 @@ public:
     // Initialize and load config from NVS
     void begin();
 
+    // WiFi credentials (NVS-backed, set via BLE provisioning — see ble_provisioning.h).
+    // No compile-time default: an empty SSID means "never provisioned," which
+    // main.cpp's setup() treats as "force config mode" rather than attempting to
+    // connect. Deliberately NOT touched by OTA firmware updates (NVS is a separate
+    // flash partition from the app image) so a firmware update can never disconnect
+    // a device from its WiFi network.
+    String getWifiSsid();
+    String getWifiPassword();
+    void setWifiCredentials(const String& ssid, const String& password);
+
     // Get current configuration
     String getServerHost();
     uint16_t getServerPort();
@@ -92,6 +102,8 @@ public:
 
 private:
     Preferences prefs_;
+    String wifiSsid_;
+    String wifiPassword_;
     String serverHost_;
     uint16_t serverPort_;
     bool useHttps_;

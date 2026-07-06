@@ -1,10 +1,13 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// WiFi Configuration
-// Copy this file to config.h and update with your network credentials
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+// WiFi credentials are NOT compiled in here — they live in NVS, set via Bluetooth
+// provisioning (see ble_provisioning.h/.cpp and ConfigManager::setWifiCredentials()).
+// This keeps them out of the firmware binary entirely, so an OTA update (which
+// replaces the app partition but never touches NVS) can never disconnect a device
+// from its WiFi network by overwriting them with whatever was in this file at
+// build time. To (re)provision WiFi, hold Button 1 during boot to enter config
+// mode and pair over Bluetooth from /provision.
 
 // Image Server Configuration
 // NOTE: These are now configurable at runtime via the web interface!

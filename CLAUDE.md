@@ -60,44 +60,57 @@ The 13.3" Spectra 6 display uses dual UC8179 controllers in master/slave configu
 ### Files
 
 - `firmware/platformio.ini` - PlatformIO project configuration
-- `firmware/src/config.h` - WiFi credentials and pin definitions
-- `firmware/src/config_manager.h/.cpp` - Persistent configuration storage (NVS)
-- `firmware/src/config_server.h/.cpp` - Web-based configuration interface
+- `firmware/src/config.h` - Pin definitions and non-secret defaults (no WiFi credentials — see below)
+- `firmware/src/config_manager.h/.cpp` - Persistent configuration storage (NVS), including WiFi credentials
+- `firmware/src/ble_provisioning.h/.cpp` - Bluetooth LE GATT configuration interface (NimBLE)
 - `firmware/src/display.h/.cpp` - Spectra 6 display driver (ported from esphome-bigink)
 - `firmware/src/main.cpp` - Main loop: WiFi, fetch, display, deep sleep, config mode
 - `image_server.py` - Flask server with image rotation and `/image_packed` endpoint
 - `.eink_rotation_state.json` - Persisted rotation state (auto-generated, gitignored)
 
-### Runtime Configuration
+### Runtime Configuration (Bluetooth Provisioning)
 
-The server endpoint is configurable at runtime without reflashing:
+WiFi credentials and the server endpoint are both configurable at runtime without
+reflashing, over Bluetooth LE — there is no AP-mode/captive-portal HTTP server on
+the device anymore (that approach, and `config_server.h/.cpp`, were removed).
 
 **To enter configuration mode:**
-1. Press the reset button twice quickly (within 2 seconds)
-2. The device will either:
-   - Connect to your WiFi and show its IP address (open in browser)
-   - Or create a WiFi network called "EInk-Setup" (connect and go to http://192.168.4.1)
+1. Hold Button 1 (GPIO2) during boot, or just power on a device that has never
+   been provisioned (empty WiFi SSID auto-enters config mode).
+2. The device advertises itself over Bluetooth as `EInk-Setup`.
+3. From a Chrome/Edge browser (desktop or Android — Web Bluetooth isn't supported
+   in Safari/iOS), open the worker's `/provision` page (linked from its home page)
+   and click "Connect to device" to pair.
 
 **Configurable settings:**
-- Server host (IP or domain name, e.g., "192.168.86.100" or "myserver.linode.com")
-- Server port
-- Use HTTPS (checkbox; required for a Cloudflare Workers backend, leave unchecked for a plain-HTTP local dev server). Uses `WiFiClientSecure::setInsecure()` — encrypts traffic but does not validate the server's certificate.
-- Image endpoint path
-- Sleep interval (how often to refresh)
+- WiFi SSID/password — stored in NVS via `ConfigManager::setWifiCredentials()`,
+  deliberately **not** part of the firmware image, so an OTA update (see below)
+  can never disconnect a device from its network by overwriting them.
+- Server host, port, and HTTPS flag (HTTPS required for a Cloudflare Workers
+  backend, unchecked for a plain-HTTP local dev server; uses
+  `WiFiClientSecure::setInsecure()` — encrypts traffic but does not validate the
+  server's certificate)
+- Image endpoint path, refresh interval, active-hours window, timezone offset
 
-Configuration is stored in NVS (Non-Volatile Storage) and persists across reboots.
+All of this is exchanged as JSON over a custom GATT service
+(`firmware/src/ble_provisioning.h` documents the exact characteristic schema);
+the browser-side implementation is `worker/src/provision-ui.ts`. The GATT link
+requires BLE bonding (Just Works — Web Bluetooth has no passkey-entry UI) before
+any value crosses the air, so the WiFi password isn't sent in the clear.
+Configuration is stored in NVS and persists across reboots and OTA updates.
 
 ### Building and Flashing
 
 1. Install PlatformIO (VSCode extension or CLI)
-2. Edit `firmware/src/config.h` with your WiFi credentials (WIFI_SSID and WIFI_PASSWORD)
-3. Optionally edit `firmware/src/config_manager.h` to change default server settings
-4. Connect EE02 board via USB
-5. Build and upload:
+2. Optionally edit `firmware/src/config_manager.h` to change default server settings
+3. Connect EE02 board via USB
+4. Build and upload:
    ```bash
    cd firmware
    pio run -t upload
    ```
+5. Provision WiFi over Bluetooth (see "Runtime Configuration" above) — a fresh
+   flash has no WiFi credentials, so the device boots straight into config mode.
 
 ### Running the Image Server
 

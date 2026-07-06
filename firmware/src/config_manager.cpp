@@ -3,6 +3,8 @@
 
 // NVS namespace and keys
 static const char* NVS_NAMESPACE = "eink_config";
+static const char* KEY_WIFI_SSID = "wifi_ssid";
+static const char* KEY_WIFI_PASSWORD = "wifi_pass";
 static const char* KEY_HOST = "host";
 static const char* KEY_PORT = "port";
 static const char* KEY_USE_HTTPS = "use_https";
@@ -15,7 +17,9 @@ static const char* KEY_DEVICE_SECRET = "dev_secret";
 static const char* KEY_DEVICE_REGISTERED = "dev_reg";
 
 ConfigManager::ConfigManager()
-    : serverHost_(DEFAULT_SERVER_HOST),
+    : wifiSsid_(""),
+      wifiPassword_(""),
+      serverHost_(DEFAULT_SERVER_HOST),
       serverPort_(DEFAULT_SERVER_PORT),
       useHttps_(DEFAULT_USE_HTTPS),
       imageEndpoint_(DEFAULT_IMAGE_ENDPOINT),
@@ -37,6 +41,8 @@ void ConfigManager::loadFromNVS() {
     prefs_.begin(NVS_NAMESPACE, true);  // Read-only mode
 
     // Load with defaults if not present
+    wifiSsid_ = prefs_.getString(KEY_WIFI_SSID, "");
+    wifiPassword_ = prefs_.getString(KEY_WIFI_PASSWORD, "");
     serverHost_ = prefs_.getString(KEY_HOST, DEFAULT_SERVER_HOST);
     serverPort_ = prefs_.getUShort(KEY_PORT, DEFAULT_SERVER_PORT);
     useHttps_ = prefs_.getBool(KEY_USE_HTTPS, DEFAULT_USE_HTTPS);
@@ -65,6 +71,25 @@ void ConfigManager::saveToNVS() {
 
     prefs_.end();
     Serial.println("ConfigManager: Saved to NVS");
+}
+
+String ConfigManager::getWifiSsid() {
+    return wifiSsid_;
+}
+
+String ConfigManager::getWifiPassword() {
+    return wifiPassword_;
+}
+
+void ConfigManager::setWifiCredentials(const String& ssid, const String& password) {
+    if (ssid.length() == 0) return;
+    wifiSsid_ = ssid;
+    wifiPassword_ = password;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putString(KEY_WIFI_SSID, wifiSsid_);
+    prefs_.putString(KEY_WIFI_PASSWORD, wifiPassword_);
+    prefs_.end();
+    Serial.println("ConfigManager: WiFi credentials updated");
 }
 
 String ConfigManager::getServerHost() {
@@ -269,6 +294,7 @@ void ConfigManager::setDeviceRegistered(bool registered) {
 
 void ConfigManager::printConfig() {
     Serial.println("Current Configuration:");
+    Serial.printf("  WiFi: %s\n", wifiSsid_.length() > 0 ? wifiSsid_.c_str() : "(not configured)");
     Serial.printf("  Server: %s:%d (%s)\n", serverHost_.c_str(), serverPort_, useHttps_ ? "https" : "http");
     Serial.printf("  Endpoint: %s\n", imageEndpoint_.c_str());
     Serial.printf("  Full URL: %s\n", getFullURL().c_str());

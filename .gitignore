@@ -12,9 +12,6 @@ wheels/
 # PlatformIO build artifacts
 .pio/
 
-# Config file with credentials (use config.h.example as template)
-config.h
-
 # User images (users provide their own)
 *.jpg
 *.jpeg

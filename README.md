@@ -54,25 +54,12 @@ uv sync
 
 This may take a few minutes the first time as it downloads PlatformIO and the ESP32 toolchain.
 
-### Step 4: Configure Your WiFi Credentials
+### Step 4: WiFi Credentials
 
-Copy the example config file and edit it with your credentials:
-
-```bash
-cd firmware/src
-cp config.h.example config.h
-```
-
-Edit `config.h` and change these lines to match your WiFi network:
-
-```cpp
-#define WIFI_SSID "YourNetworkName"
-#define WIFI_PASSWORD "YourPassword"
-```
-
-**Note:**
-- The ESP32 only supports **2.4GHz WiFi** (not 5GHz)
-- Make sure to keep the quotes around the values
+Nothing to configure here before building — WiFi isn't compiled into the
+firmware. You'll provision it over Bluetooth after flashing (Step 6), since a
+freshly flashed board boots straight into Bluetooth setup mode with no WiFi
+credentials saved yet. Note the ESP32 only supports **2.4GHz WiFi** (not 5GHz).
 
 ### Step 5: Find Your Computer's IP Address
 
@@ -163,6 +150,14 @@ You should see progress bars and finally:
 ```
 ========================= [SUCCESS] Took XX.XX seconds =========================
 ```
+
+**Provision WiFi over Bluetooth (required before the board can do anything):**
+A freshly flashed board has no WiFi credentials, so it boots straight into
+Bluetooth setup mode. From Chrome or Edge (desktop or Android — Web Bluetooth
+isn't supported in Safari/iOS), open your worker's `/provision` page, click
+"Connect to device", pick `EInk-Setup` from the browser's device picker, and
+fill in your WiFi network plus server address. See `firmware/README.md`'s
+"Changing Configuration at Runtime" section for details.
 
 ### Step 10: Prepare Images
 
@@ -324,7 +319,9 @@ Entering deep sleep for 15 minutes...
 
 ## Changing Settings Without Reflashing
 
-You can change the server address, sleep interval, and other settings without reflashing the firmware!
+You can change WiFi credentials, the server address, sleep interval, and other
+settings without reflashing the firmware — over Bluetooth LE, not a web server
+hosted by the board.
 
 ### Entering Configuration Mode
 
@@ -333,30 +330,26 @@ You can change the server address, sleep interval, and other settings without re
 3. Continue holding Button 1 for an additional second
 4. Release Button 1 - the device will enter configuration mode
 
-### Using the Web Configuration Interface to the EE02 Board
+A device with no WiFi credentials saved yet (e.g. right after first flashing)
+enters configuration mode automatically — no button needed.
 
-The on-board firmware includes a simple web server for configuration when in config mode. It is generally easier to use the image server to make configuration changes but one reason to use the web interface to the EEO2 board is if you move the image server or change the port, you can enter the new values through this interface. 
+### Using the Bluetooth Configuration Interface
 
-1. Connect to your WiFi network
-2. The serial monitor will show the device's IP address
-3. Open a web browser and go to that IP address (e.g., `http://192.168.86.24`)
-4. You'll see a configuration page where you can change:
-   - **Server Host:** The IP address of your image server
+The board advertises itself as **"EInk-Setup"** over Bluetooth in config mode —
+open your worker's `/provision` page from Chrome or Edge (desktop or Android;
+Web Bluetooth isn't supported in Safari/iOS) and click "Connect to device" to
+pair with it.
+
+1. Select `EInk-Setup` from the browser's device picker
+2. You'll see a configuration form where you can change:
+   - **WiFi Network / Password:** use "Scan" to list nearby networks
+   - **Server Host:** The IP address or domain of your image server
    - **Server Port:** Usually 5000
    - **Image Endpoint:** Usually `/image_packed`
    - **Refresh Interval:** How often to check for new images during active hours (1-1440 minutes)
    - **Active Start / End Hour:** Local wall-clock active window
    - **Timezone Offset:** Minutes from UTC for local scheduling
-5. Click **Save Configuration**
-6. Click **Reboot Device**
-
-### If WiFi Connection Fails
-
-If the device can't connect to your WiFi in config mode:
-1. It will create its own WiFi network called **"EInk-Setup"**
-2. Connect your phone or computer to "EInk-Setup"
-3. Open a browser to `http://192.168.4.1`
-4. Configure the settings
+3. Click **Save & Reboot**
 
 ---
 
@@ -423,9 +416,9 @@ The device isn't detected. Try:
 ### WiFi won't connect
 
 - Make sure your network is **2.4GHz**
-- Make sure you copied `config.h.example` to `config.h`
-- Double-check the SSID and password in your `firmware/src/config.h`
-- Rebuild and reflash after changing: `uv run pio run -t upload`
+- Re-enter Bluetooth config mode (hold Button 1 during reset) and re-provision
+  the SSID/password from `/provision` — WiFi credentials live in NVS, set over
+  Bluetooth, not in `firmware/src/config.h`
 
 ### "HTTP GET failed, code: -1"
 
@@ -462,9 +455,10 @@ seeed_eink_board/
 │   ├── platformio.ini     # Build configuration
 │   ├── README.md          # Detailed firmware documentation
 │   └── src/
-│       ├── config.h.example  # WiFi config template (copy to config.h)
-│       ├── config_manager.h  # Default server settings
-│       └── ...            # Other source files
+│       ├── config.h          # Pin definitions and non-secret defaults
+│       ├── config_manager.h  # Default server settings; WiFi creds live in NVS
+│       ├── ble_provisioning.h  # Bluetooth LE configuration interface
+│       └── ...             # Other source files
 └── pyproject.toml         # Python project configuration
 ```
 
