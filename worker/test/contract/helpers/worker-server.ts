@@ -29,27 +29,31 @@ export async function startWorkerServer(port: number): Promise<WorkerServerHandl
 
   execFileSync(
     WRANGLER_BIN,
-    ["d1", "migrations", "apply", "eink-db", "--local", "--persist-to", persistTo],
+    ["d1", "migrations", "apply", "eink-local", "--env", "local", "--local", "--persist-to", persistTo],
     { cwd: WORKER_ROOT, stdio: "pipe" }
   );
 
   const apiKeyHash = crypto.createHash("sha256").update(TEST_API_KEY).digest("hex");
   const userId = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
-  const sql = `INSERT INTO users (id, email, api_key_hash, created_at) VALUES ('${userId}', 'contract-test@example.com', '${apiKeyHash}', ${now});`;
+  const sql = `INSERT INTO users (id, api_key_hash, created_at) VALUES ('${userId}', '${apiKeyHash}', ${now});`;
   execFileSync(
     WRANGLER_BIN,
-    ["d1", "execute", "eink-db", "--local", "--persist-to", persistTo, "--command", sql],
+    ["d1", "execute", "eink-local", "--env", "local", "--local", "--persist-to", persistTo, "--command", sql],
     { cwd: WORKER_ROOT, stdio: "pipe" }
   );
 
   // `detached: true` puts wrangler dev (and whatever it forks internally) in its
   // own process group so stop() can reliably kill the whole tree in one shot.
-  const child = spawn(WRANGLER_BIN, ["dev", "--port", String(port), "--persist-to", persistTo], {
-    cwd: WORKER_ROOT,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: true,
-  });
+  const child = spawn(
+    WRANGLER_BIN,
+    ["dev", "--env", "local", "--port", String(port), "--persist-to", persistTo],
+    {
+      cwd: WORKER_ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    }
+  );
 
   let log = "";
   child.stdout?.on("data", (d) => (log += d.toString()));

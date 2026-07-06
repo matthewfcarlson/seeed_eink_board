@@ -8,19 +8,27 @@ const DEVICE_CACHE_TTL_SECONDS = 60 * 60 * 24; // 24h; correctness-critical chan
  * Resolve a normalized MAC to the device_key its requests should be served under.
  * Unregistered MACs fall back to the shared 'default' bucket (matches image_server.py's
  * directory-fallback behavior) rather than being rejected — see plan §Auth.
+ *
+ * A row with no secret is treated the same as no row at all: deviceKey stays
+ * 'default'. That's what forces devices claimed before the secret column existed
+ * (or any row an admin created without one) back through the QR registration flow
+ * — see plan §device auth. Once deviceKey resolves to an actual mac, callers MUST
+ * still verify a signature (lib/device-signature.ts) before trusting it; this
+ * function alone does not authenticate the request.
  */
 export async function resolveDeviceKey(env: Env, mac: string): Promise<DeviceLookup> {
   const cacheKey = kvKeys.device(mac);
   const cached = await env.KV.get<DeviceLookup>(cacheKey, "json");
   if (cached) return cached;
 
-  const row = await env.DB.prepare("SELECT mac, user_id FROM devices WHERE mac = ?")
+  const row = await env.DB.prepare("SELECT mac, user_id, secret FROM devices WHERE mac = ?")
     .bind(mac)
-    .first<{ mac: string; user_id: string | null }>();
+    .first<{ mac: string; user_id: string | null; secret: string | null }>();
 
-  const lookup: DeviceLookup = row
-    ? { deviceKey: row.mac, userId: row.user_id }
-    : { deviceKey: DEFAULT_DEVICE_KEY, userId: null };
+  const lookup: DeviceLookup =
+    row && row.secret
+      ? { deviceKey: row.mac, userId: row.user_id, secret: row.secret }
+      : { deviceKey: DEFAULT_DEVICE_KEY, userId: null, secret: null };
 
   await env.KV.put(cacheKey, JSON.stringify(lookup), { expirationTtl: DEVICE_CACHE_TTL_SECONDS });
   return lookup;

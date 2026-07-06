@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <Update.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/md.h>
 #include <sys/time.h>
 #include <time.h>
 #include "config.h"
@@ -126,16 +127,6 @@ float readBatteryVoltage() {
     return voltage;
 }
 
-void addCommonHeaders(HTTPClient& http) {
-    String macAddress = getMACAddressClean();
-    http.addHeader("X-Device-MAC", macAddress);
-    Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
-
-    if (batteryVoltage > 0) {
-        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
-    }
-}
-
 String bytesToHex(const uint8_t* bytes, size_t len) {
     static const char* hexChars = "0123456789abcdef";
     String result;
@@ -145,6 +136,65 @@ String bytesToHex(const uint8_t* bytes, size_t len) {
         result += hexChars[bytes[i] & 0x0F];
     }
     return result;
+}
+
+void hexToBytes(const String& hex, uint8_t* out, size_t outLen) {
+    for (size_t i = 0; i < outLen; i++) {
+        out[i] = static_cast<uint8_t>(strtoul(hex.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16));
+    }
+}
+
+/**
+ * HMAC-SHA256 over `message`, keyed by the device's own secret (see
+ * ConfigManager::ensureDeviceSecret()). This — not the mac address, which is
+ * public and trivially spoofable — is what proves a request actually came from
+ * this device. Mirrors worker/src/lib/device-signature.ts's verification exactly.
+ */
+String computeDeviceSignature(const String& secretHex, const String& message) {
+    uint8_t secretBytes[32];
+    size_t secretLen = min(secretHex.length() / 2, sizeof(secretBytes));
+    hexToBytes(secretHex, secretBytes, secretLen);
+
+    uint8_t hmacResult[32];
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1 /* HMAC */);
+    mbedtls_md_hmac_starts(&ctx, secretBytes, secretLen);
+    mbedtls_md_hmac_update(&ctx, reinterpret_cast<const uint8_t*>(message.c_str()), message.length());
+    mbedtls_md_hmac_finish(&ctx, hmacResult);
+    mbedtls_md_free(&ctx);
+
+    return bytesToHex(hmacResult, sizeof(hmacResult));
+}
+
+/**
+ * Adds identity/auth headers common to every request. `path` must match the
+ * route being called (e.g. "/hash", "/image_packed") — it's folded into the
+ * signature so a captured signature for one endpoint can't be replayed against
+ * another. X-Device-Secret is only sent pre-registration, to bootstrap the
+ * registration QR (see qr-registration.ts) — after the server confirms this
+ * device is claimed (device_config's device_id field), it's never sent again.
+ */
+void addCommonHeaders(HTTPClient& http, const String& path) {
+    String macAddress = getMACAddressClean();
+    http.addHeader("X-Device-MAC", macAddress);
+    Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
+
+    if (batteryVoltage > 0) {
+        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
+    }
+
+    String secret = configManager.getDeviceSecret();
+    char timestampBuf[24];
+    snprintf(timestampBuf, sizeof(timestampBuf), "%lld", static_cast<long long>(time(nullptr)));
+    String timestamp(timestampBuf);
+    String message = macAddress + "|" + path + "|" + timestamp;
+    http.addHeader("X-Device-Timestamp", timestamp);
+    http.addHeader("X-Device-Signature", computeDeviceSignature(secret, message));
+
+    if (!configManager.getDeviceRegistered()) {
+        http.addHeader("X-Device-Secret", secret);
+    }
 }
 
 /**
@@ -168,7 +218,7 @@ bool performFirmwareOTA(const String& version, const String& expectedSha256Hex) 
     WiFiClientSecure secureClient;
     beginRequest(http, secureClient, url);
     http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
-    addCommonHeaders(http);
+    addCommonHeaders(http, "/firmware_bin");
 
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
@@ -382,7 +432,7 @@ bool syncRemoteConfigAndTime() {
     WiFiClientSecure secureClient;
     beginRequest(http, secureClient, configUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
-    addCommonHeaders(http);
+    addCommonHeaders(http, DEVICE_CONFIG_ENDPOINT);
 
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
@@ -409,6 +459,17 @@ bool syncRemoteConfigAndTime() {
     time_t serverEpoch = static_cast<time_t>(doc["server_time_epoch"].as<int64_t>());
     setClockFromEpoch(serverEpoch);
     Serial.printf("Clock synchronized from server epoch: %lld\n", static_cast<long long>(serverEpoch));
+
+    // device_id echoes back our own mac once the server has bound a secret to
+    // it (see resolveDeviceKey() in auth-device.ts); it's 'default' otherwise.
+    // Flipping this both ways keeps us self-healing if an admin deletes the
+    // device server-side — we start advertising X-Device-Secret again so it
+    // can be reclaimed via the registration QR.
+    const char* deviceId = doc["device_id"] | "";
+    bool nowRegistered = strcasecmp(deviceId, getMACAddressClean().c_str()) == 0;
+    if (nowRegistered != configManager.getDeviceRegistered()) {
+        configManager.setDeviceRegistered(nowRegistered);
+    }
 
     uint16_t refreshMinutes = configManager.getSleepMinutes();
     uint8_t activeStart = configManager.getActiveStartHour();
@@ -562,7 +623,7 @@ bool checkImageChanged() {
     WiFiClientSecure secureClient;
     beginRequest(http, secureClient, hashUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
-    addCommonHeaders(http);
+    addCommonHeaders(http, "/hash");
 
     int httpCode = http.GET();
 
@@ -613,7 +674,7 @@ bool fetchAndDisplayImage() {
     WiFiClientSecure secureClient;
     beginRequest(http, secureClient, url);
     http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
-    addCommonHeaders(http);
+    addCommonHeaders(http, configManager.getImageEndpoint());
 
     int httpCode = http.GET();
 
@@ -835,6 +896,7 @@ void setup() {
 
     // Initialize configuration manager
     configManager.begin();
+    configManager.ensureDeviceSecret();
 
     // Check if config button (Button 1 / GPIO2) is held to enter config mode
     if (checkConfigButton()) {

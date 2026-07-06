@@ -177,6 +177,9 @@ export function renderAdminPage(): string {
 <script>
 const KEY_STORAGE = "eink_admin_api_key";
 const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
+// Set by renderClaimBanner() from ?secret= when arriving via a device's QR scan;
+// consumed once by the Register click handler. See lib/registration-url.ts.
+let pendingClaimSecret = null;
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -311,14 +314,22 @@ document.getElementById("register-device-btn").addEventListener("click", async (
   const label = document.getElementById("new-device-label").value.trim();
   if (!mac) return;
   try {
+    const body = { mac, label };
+    // Only attach the secret when this MAC is exactly the one it was scanned for —
+    // guards against silently binding a stale secret if the user edits the MAC
+    // field after scanning (or types one in by hand).
+    if (pendingClaimSecret && mac === new URLSearchParams(location.search).get("claim")) {
+      body.secret = pendingClaimSecret;
+    }
     await apiFetch("/admin/devices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mac, label }),
+      body: JSON.stringify(body),
     });
     document.getElementById("new-device-mac").value = "";
     document.getElementById("new-device-label").value = "";
     if (new URLSearchParams(location.search).get("claim")) {
+      pendingClaimSecret = null;
       history.replaceState(null, "", location.pathname);
     }
     await renderApp();
@@ -640,12 +651,18 @@ function renderFirmwareTargetForm(targetOptions, releases) {
 }
 
 function renderClaimBanner() {
-  const claimMac = new URLSearchParams(location.search).get("claim");
+  const params = new URLSearchParams(location.search);
+  const claimMac = params.get("claim");
   const el = document.getElementById("claim-banner");
   if (!claimMac) {
     el.innerHTML = "";
+    pendingClaimSecret = null;
     return;
   }
+  // The device's own HMAC secret, carried here only because it was scanned off
+  // that device's physical display (see lib/registration-url.ts) — stashed so
+  // the Register click below can bind it, never re-displayed or re-editable.
+  pendingClaimSecret = params.get("secret");
   el.innerHTML =
     '<div class="message success">' +
     "Scanned from a new device: <code>" + escapeHtml(claimMac) + "</code>. " +

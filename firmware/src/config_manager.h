@@ -76,6 +76,20 @@ public:
     // Print current config to Serial
     void printConfig();
 
+    // Per-device HMAC secret (hex string), used to sign requests so a device's
+    // mac address alone isn't enough to impersonate it — see main.cpp's
+    // computeDeviceSignature() and worker/src/lib/device-signature.ts. Generated
+    // once on first boot and persisted; never regenerated automatically.
+    String getDeviceSecret();
+    void ensureDeviceSecret();
+
+    // Whether the server has confirmed (via device_config's device_id field)
+    // that this device is claimed. While false, requests include the raw secret
+    // (X-Device-Secret) so the registration QR can be built; once true, the
+    // secret itself is never sent again, only signatures derived from it.
+    bool getDeviceRegistered();
+    void setDeviceRegistered(bool registered);
+
 private:
     Preferences prefs_;
     String serverHost_;
@@ -86,6 +100,8 @@ private:
     uint8_t activeStartHour_;
     uint8_t activeEndHour_;
     int16_t timezoneOffsetMinutes_;
+    String deviceSecret_;
+    bool deviceRegistered_;
 
     void loadFromNVS();
     void saveToNVS();

@@ -1,6 +1,6 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
--- migrations/0001_init.sql, 0002_firmware.sql, and 0003_include_default_images.sql
--- (wrangler d1 migrations tracks applied state per-database).
+-- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql, and
+-- 0004_device_secret.sql (wrangler d1 migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -21,7 +21,12 @@ CREATE TABLE devices (
   last_battery_at         INTEGER,
   -- Whether this device's rotation merges in the shared 'default' bucket's
   -- images alongside its own. Defaults to on (see migrations/0003).
-  include_default_images  INTEGER NOT NULL DEFAULT 1
+  include_default_images  INTEGER NOT NULL DEFAULT 1,
+  -- Per-device HMAC secret (hex), minted on-device and delivered out-of-band via
+  -- the registration QR code. NULL means "not registered" for auth purposes even
+  -- if a row exists — see migrations/0004 and lib/device-signature.ts.
+  secret                     TEXT,
+  last_signature_timestamp   INTEGER NOT NULL DEFAULT 0
 );
 
 -- Durable mirror of the live rotation cursor. KV is the hot path; this table is

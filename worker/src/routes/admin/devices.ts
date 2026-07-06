@@ -5,10 +5,19 @@ import { invalidateDeviceCache } from "../../lib/auth-device";
 import { invalidateRotationCache } from "../../lib/rotation";
 import { requireAdmin } from "../../lib/admin-middleware";
 
+// The device's self-generated HMAC key (hex), scanned off its own display via the
+// registration QR — see lib/device-signature.ts. Loose length bound since the
+// firmware picks the byte count, not this validator; just guards against empty/
+// junk values getting stored as a secret.
+const SECRET_PATTERN = /^[0-9a-f]{16,64}$/i;
+
 export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/devices", requireAdmin, async (c) => {
-    const body = await c.req.json<{ mac?: string; label?: string }>().catch(() => ({}) as never);
+    const body = await c.req.json<{ mac?: string; label?: string; secret?: string }>().catch(() => ({}) as never);
     if (!body.mac) return c.json({ error: "mac is required" }, 400);
+    if (body.secret !== undefined && !SECRET_PATTERN.test(body.secret)) {
+      return c.json({ error: "secret must be a hex string" }, 400);
+    }
 
     const mac = normalizeMac(body.mac);
     const user = c.var.user;
@@ -21,11 +30,13 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     }
 
     const now = Math.floor(Date.now() / 1000);
+    // COALESCE keeps any existing secret when the caller doesn't send one (e.g. an
+    // admin editing just the label) rather than accidentally locking the device out.
     await c.env.DB.prepare(
-      `INSERT INTO devices (mac, user_id, label, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(mac) DO UPDATE SET label = excluded.label`
+      `INSERT INTO devices (mac, user_id, label, secret, created_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(mac) DO UPDATE SET label = excluded.label, secret = COALESCE(excluded.secret, devices.secret)`
     )
-      .bind(mac, user.id, body.label ?? null, now)
+      .bind(mac, user.id, body.label ?? null, body.secret ?? null, now)
       .run();
 
     await invalidateDeviceCache(c.env, mac);

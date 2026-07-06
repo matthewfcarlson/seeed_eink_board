@@ -1,4 +1,5 @@
 #include "config_manager.h"
+#include <esp_system.h>
 
 // NVS namespace and keys
 static const char* NVS_NAMESPACE = "eink_config";
@@ -10,6 +11,8 @@ static const char* KEY_SLEEP = "sleep_min";
 static const char* KEY_ACTIVE_START = "active_st";
 static const char* KEY_ACTIVE_END = "active_end";
 static const char* KEY_TZ_OFFSET = "tz_offset";
+static const char* KEY_DEVICE_SECRET = "dev_secret";
+static const char* KEY_DEVICE_REGISTERED = "dev_reg";
 
 ConfigManager::ConfigManager()
     : serverHost_(DEFAULT_SERVER_HOST),
@@ -19,7 +22,9 @@ ConfigManager::ConfigManager()
       sleepMinutes_(DEFAULT_SLEEP_MINUTES),
       activeStartHour_(DEFAULT_ACTIVE_START_HOUR),
       activeEndHour_(DEFAULT_ACTIVE_END_HOUR),
-      timezoneOffsetMinutes_(DEFAULT_TIMEZONE_OFFSET_MINUTES) {
+      timezoneOffsetMinutes_(DEFAULT_TIMEZONE_OFFSET_MINUTES),
+      deviceSecret_(""),
+      deviceRegistered_(false) {
 }
 
 void ConfigManager::begin() {
@@ -40,6 +45,8 @@ void ConfigManager::loadFromNVS() {
     activeStartHour_ = prefs_.getUChar(KEY_ACTIVE_START, DEFAULT_ACTIVE_START_HOUR);
     activeEndHour_ = prefs_.getUChar(KEY_ACTIVE_END, DEFAULT_ACTIVE_END_HOUR);
     timezoneOffsetMinutes_ = prefs_.getShort(KEY_TZ_OFFSET, DEFAULT_TIMEZONE_OFFSET_MINUTES);
+    deviceSecret_ = prefs_.getString(KEY_DEVICE_SECRET, "");
+    deviceRegistered_ = prefs_.getBool(KEY_DEVICE_REGISTERED, false);
 
     prefs_.end();
 }
@@ -220,6 +227,44 @@ void ConfigManager::resetToDefaults() {
     timezoneOffsetMinutes_ = DEFAULT_TIMEZONE_OFFSET_MINUTES;
     saveToNVS();
     Serial.println("ConfigManager: Reset to defaults");
+}
+
+String ConfigManager::getDeviceSecret() {
+    return deviceSecret_;
+}
+
+void ConfigManager::ensureDeviceSecret() {
+    if (deviceSecret_.length() > 0) return;
+
+    uint8_t randomBytes[16];
+    esp_fill_random(randomBytes, sizeof(randomBytes));
+
+    static const char* hexChars = "0123456789abcdef";
+    String secret;
+    secret.reserve(sizeof(randomBytes) * 2);
+    for (size_t i = 0; i < sizeof(randomBytes); i++) {
+        secret += hexChars[randomBytes[i] >> 4];
+        secret += hexChars[randomBytes[i] & 0x0F];
+    }
+
+    deviceSecret_ = secret;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putString(KEY_DEVICE_SECRET, deviceSecret_);
+    prefs_.end();
+    Serial.println("ConfigManager: Generated new device secret");
+}
+
+bool ConfigManager::getDeviceRegistered() {
+    return deviceRegistered_;
+}
+
+void ConfigManager::setDeviceRegistered(bool registered) {
+    if (registered == deviceRegistered_) return;
+    deviceRegistered_ = registered;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putBool(KEY_DEVICE_REGISTERED, registered);
+    prefs_.end();
+    Serial.printf("ConfigManager: Device registered = %s\n", registered ? "true" : "false");
 }
 
 void ConfigManager::printConfig() {

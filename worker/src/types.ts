@@ -33,8 +33,9 @@ export interface ScheduleConfig {
 }
 
 export interface DeviceLookup {
-  deviceKey: string; // mac if registered, else 'default'
+  deviceKey: string; // mac if registered (i.e. has a secret), else 'default'
   userId: string | null;
+  secret: string | null; // hex HMAC key; present iff deviceKey !== 'default'
 }
 
 export interface FirmwareRelease {

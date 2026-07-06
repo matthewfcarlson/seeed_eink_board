@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,8 +16,26 @@ const SCHEDULE_FIXTURE = JSON.parse(
 const asJson = (res: Response): Promise<any> => res.json();
 
 const DEVICE_MAC = "aabbccddeeff";
+// Only exercised against the Worker (lib/device-signature.ts) — Python has no such
+// concept and ignores these headers entirely, so it's safe to always send them.
+const DEVICE_SECRET = "aabbccddeeff00112233445566778899";
 const PYTHON_PORT = 8899;
 const WORKER_PORT = 8898;
+
+/** Builds the X-Device-Timestamp/X-Device-Signature headers lib/device-signature.ts
+ *  requires for a registered device's requests, alongside X-Device-MAC. */
+function signedHeaders(requestPath: string): Record<string, string> {
+  const timestamp = Date.now();
+  const signature = crypto
+    .createHmac("sha256", Buffer.from(DEVICE_SECRET, "hex"))
+    .update(`${DEVICE_MAC}|${requestPath}|${timestamp}`)
+    .digest("hex");
+  return {
+    "X-Device-MAC": DEVICE_MAC,
+    "X-Device-Timestamp": String(timestamp),
+    "X-Device-Signature": signature,
+  };
+}
 
 let python: PythonServerHandle;
 let worker: WorkerServerHandle;
@@ -49,7 +68,18 @@ beforeAll(async () => {
   await fetch(`${worker.baseUrl}/admin/devices`, {
     method: "POST",
     headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ mac: DEVICE_MAC, label: "Contract test device" }),
+    body: JSON.stringify({ mac: DEVICE_MAC, label: "Contract test device", secret: DEVICE_SECRET }),
+  });
+
+  // Python's rotation is fallback-only (device dir if present, else 'default' —
+  // never both). The Worker's include_default_images merge (migrations/0003)
+  // defaults to on, which would double-count this device's own images against
+  // the shared 'default' bucket seeded below — disable it to keep the two
+  // backends comparable for this parity suite.
+  await fetch(`${worker.baseUrl}/admin/devices/${DEVICE_MAC}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ include_default_images: false }),
   });
 
   await fetch(`${worker.baseUrl}/admin/schedule/${DEVICE_MAC}`, {
@@ -74,9 +104,10 @@ afterAll(async () => {
 
 describe("GET /device_config", () => {
   it("returns identical schedule values on both backends (pure config passthrough)", async () => {
+    const headers = signedHeaders("/device_config");
     const [pyRes, workerRes] = await Promise.all([
-      fetch(`${python.baseUrl}/device_config`, { headers: { "X-Device-MAC": DEVICE_MAC } }),
-      fetch(`${worker.baseUrl}/device_config`, { headers: { "X-Device-MAC": DEVICE_MAC } }),
+      fetch(`${python.baseUrl}/device_config`, { headers }),
+      fetch(`${worker.baseUrl}/device_config`, { headers }),
     ]);
     expect(pyRes.status).toBe(200);
     expect(workerRes.status).toBe(200);
@@ -112,23 +143,24 @@ describe.each([
 ] as const)("GET /hash and /image_packed on %s", (_name, getServer) => {
   it("hash is a stable 16-char plain-text value until image_packed advances rotation", async () => {
     const server = getServer();
-    const headers = { "X-Device-MAC": DEVICE_MAC };
 
     // Content-Type is intentionally not asserted here: firmware's checkImageChanged()
     // only requires status 200 and a 16-char body (http.getString() ignores the
     // declared type) — Python's Flask defaults plain-string returns to text/html,
     // the Worker returns text/plain; both satisfy the actual firmware contract.
-    const hash1Res = await fetch(`${server.baseUrl}/hash`, { headers });
+    const hash1Res = await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") });
     expect(hash1Res.status).toBe(200);
     const hash1 = await hash1Res.text();
     expect(hash1).toHaveLength(16);
 
     // Calling /hash again must not advance rotation.
-    const hash1Again = await (await fetch(`${server.baseUrl}/hash`, { headers })).text();
+    const hash1Again = await (
+      await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })
+    ).text();
     expect(hash1Again).toBe(hash1);
 
     // /image_packed must serve the exact same pending image /hash described.
-    const packedRes = await fetch(`${server.baseUrl}/image_packed`, { headers });
+    const packedRes = await fetch(`${server.baseUrl}/image_packed`, { headers: signedHeaders("/image_packed") });
     expect(packedRes.status).toBe(200);
     const body = new Uint8Array(await packedRes.arrayBuffer());
     expect(body.byteLength).toBe(960000);
@@ -138,16 +170,16 @@ describe.each([
     expect(returnedHash).toBe(hash1);
 
     // Now rotation must have advanced: /hash reflects the next image (2 images in this bucket).
-    const hash2 = await (await fetch(`${server.baseUrl}/hash`, { headers })).text();
+    const hash2 = await (await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })).text();
     expect(hash2).not.toBe(hash1);
     expect(hash2).toHaveLength(16);
 
-    const packed2Res = await fetch(`${server.baseUrl}/image_packed`, { headers });
+    const packed2Res = await fetch(`${server.baseUrl}/image_packed`, { headers: signedHeaders("/image_packed") });
     const returnedHash2 = packed2Res.headers.get("x-image-hash");
     expect(returnedHash2).toBe(hash2);
 
     // With exactly 2 images, a third fetch wraps back around to the first image.
-    const hash3 = await (await fetch(`${server.baseUrl}/hash`, { headers })).text();
+    const hash3 = await (await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })).text();
     expect(hash3).toBe(hash1);
   });
 });

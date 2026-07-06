@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { DEFAULT_DEVICE_KEY, type Env } from "../types";
 import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
+import { verifyDeviceSignature } from "../lib/device-signature";
 import { getRotationSnapshot, markServed, peekPendingImage } from "../lib/rotation";
 import { getPackedImage } from "../lib/image-store";
 import { renderRegistrationBuffer } from "../lib/qr-registration";
@@ -20,14 +21,33 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     let mac: string | null = null;
     if (macHeader) {
       mac = normalizeMac(macHeader);
-      deviceKey = (await resolveDeviceKey(c.env, mac)).deviceKey;
+      const lookup = await resolveDeviceKey(c.env, mac);
+      deviceKey = lookup.deviceKey;
+
+      // A registered device's mac isn't enough on its own — see lib/device-signature.ts.
+      // Without this, anyone who knows/guesses a registered mac could impersonate that
+      // device just by sending X-Device-MAC.
+      if (deviceKey !== DEFAULT_DEVICE_KEY) {
+        const valid = await verifyDeviceSignature(
+          c.env,
+          mac,
+          lookup.secret!,
+          "/image_packed",
+          c.req.header("X-Device-Timestamp"),
+          c.req.header("X-Device-Signature")
+        );
+        if (!valid) return c.text("Invalid or missing device signature", 401);
+      }
     }
 
     // A real (but unregistered) MAC gets a "scan to register" QR instead of the
     // shared default rotation — see plan §QR registration. Never touches
     // rotation state, since it isn't part of any device's image rotation.
     if (mac && deviceKey === DEFAULT_DEVICE_KEY) {
-      const { packed, hash } = await renderRegistrationBuffer(mac, registrationUrl(c.req.url, mac));
+      const { packed, hash } = await renderRegistrationBuffer(
+        mac,
+        registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret"))
+      );
       return new Response(packed, {
         status: 200,
         headers: {

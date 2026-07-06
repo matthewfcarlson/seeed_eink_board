@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { DEFAULT_DEVICE_KEY, type Env } from "../types";
 import { normalizeMac } from "../lib/mac";
 import { recordDeviceSeen, resolveDeviceKey } from "../lib/auth-device";
+import { verifyDeviceSignature } from "../lib/device-signature";
 import { resolveScheduleConfig } from "../lib/schedule";
 import { resolveFirmwareTarget } from "../lib/firmware-target";
 
@@ -25,7 +26,21 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
     let deviceKey: string = DEFAULT_DEVICE_KEY;
     if (macHeader) {
       const mac = normalizeMac(macHeader);
-      deviceKey = (await resolveDeviceKey(c.env, mac)).deviceKey;
+      const lookup = await resolveDeviceKey(c.env, mac);
+      deviceKey = lookup.deviceKey;
+
+      if (deviceKey !== DEFAULT_DEVICE_KEY) {
+        const valid = await verifyDeviceSignature(
+          c.env,
+          mac,
+          lookup.secret!,
+          "/device_config",
+          c.req.header("X-Device-Timestamp"),
+          c.req.header("X-Device-Signature")
+        );
+        if (!valid) return c.text("Invalid or missing device signature", 401);
+      }
+
       // Fire-and-forget: last-seen/battery tracking must never delay the response.
       // No-ops for unregistered MACs (no devices row to update) — matches Python's
       // in-memory tracking being effectively per-known-device only in practice.
