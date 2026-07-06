@@ -10,7 +10,8 @@ import { requireAdmin } from "../../lib/admin-middleware";
 import { invalidateRotationCache } from "../../lib/rotation";
 import { decodeToLandscapeBuffer, isHeic, isSupportedImageType } from "../../lib/decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../../lib/dither";
-import { deleteImageBlobs, putPackedImage, putRawImage } from "../../lib/image-store";
+import { deleteImageBlobs, getThumbnailDataUrl, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
+import { makeThumbnailJpeg } from "../../lib/thumbnail";
 
 const DEFAULT_BRIGHTNESS = 1.0;
 const DEFAULT_CONTRAST = 1.2;
@@ -74,6 +75,11 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       return c.json({ error: `Failed to decode image: ${(err as Error).message}` }, 422);
     }
 
+    // Generated from the pre-enhance, pre-dither portrait crop so the dashboard
+    // preview shows true color and the exact framing the firmware will display —
+    // this is also the easiest way to see how a non-native aspect ratio got cropped.
+    const thumbnail = makeThumbnailJpeg(landscape.portrait.rgba, landscape.portrait.width, landscape.portrait.height);
+
     enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
     const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherParam);
     const packed = packToNibbles(indices);
@@ -94,6 +100,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     await Promise.all([
       putPackedImage(c.env, deviceKey, id, packed),
       putRawImage(c.env, deviceKey, id, rawBytes),
+      putThumbnail(c.env, deviceKey, id, thumbnail),
     ]);
 
     const now = Math.floor(Date.now() / 1000);
@@ -129,8 +136,15 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       "SELECT id, filename, dither_algorithm, packed_hash, packed_bytes, raw_bytes, created_at FROM images WHERE device_key = ? ORDER BY filename ASC"
     )
       .bind(deviceKey)
-      .all();
-    return c.json({ images: rows.results });
+      .all<{ id: string; filename: string; dither_algorithm: string; packed_hash: string; packed_bytes: number; raw_bytes: number; created_at: number }>();
+
+    const images = await Promise.all(
+      rows.results.map(async (row) => ({
+        ...row,
+        thumbnail_data_url: await getThumbnailDataUrl(c.env, deviceKey, row.id),
+      }))
+    );
+    return c.json({ images });
   });
 
   app.delete("/admin/images/:id", requireAdmin, async (c) => {

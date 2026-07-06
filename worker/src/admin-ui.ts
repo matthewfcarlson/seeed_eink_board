@@ -36,6 +36,7 @@ export function renderAdminPage(): string {
   table { width: 100%; border-collapse: collapse; margin-top: 8px; }
   th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; vertical-align: top; font-size: 0.9em; }
   code { background: #eef1f4; border-radius: 4px; padding: 2px 5px; font-size: 0.85em; }
+  img.thumb { display: block; border-radius: 3px; border: 1px solid #ddd; object-fit: cover; }
   .hint { color: #666; font-size: 0.85em; margin-top: 4px; }
   .message { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9em; }
   .success { background: #e7f6ea; border: 1px solid #9bd0a7; }
@@ -403,20 +404,23 @@ function bucketCardHtml(deviceKey, label, images, override) {
   const rows = images.length
     ? images.map((img) =>
         "<tr>" +
+        "<td>" + (img.thumbnail_data_url
+          ? '<img class="thumb" src="' + img.thumbnail_data_url + '" alt="" width="45" height="60">'
+          : '<span class="hint">n/a</span>') + "</td>" +
         "<td><code>" + escapeHtml(img.filename) + "</code></td>" +
         '<td><span class="pill">' + escapeHtml(img.dither_algorithm) + "</span></td>" +
         "<td>" + new Date(img.created_at * 1000).toLocaleDateString() + "</td>" +
         '<td><button class="danger" onclick="deleteImage(\\'' + img.id + '\\')">Delete</button></td>' +
         "</tr>"
       ).join("")
-    : '<tr><td colspan="4" class="hint">No images yet.</td></tr>';
+    : '<tr><td colspan="5" class="hint">No images yet.</td></tr>';
 
   const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
 
   return (
     '<div class="card">' +
       "<h3>" + escapeHtml(label) + "</h3>" +
-      "<table><thead><tr><th>Filename</th><th>Dither</th><th>Uploaded</th><th></th></tr></thead>" +
+      "<table><thead><tr><th></th><th>Filename</th><th>Dither</th><th>Uploaded</th><th></th></tr></thead>" +
       "<tbody>" + rows + "</tbody></table>" +
       '<div class="inline-form" style="margin-top:12px;">' +
         '<div class="row"><label>Image file</label><input type="file" id="upload-file-' + deviceKey + '" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp"></div>' +

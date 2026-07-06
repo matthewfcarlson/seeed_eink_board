@@ -49,11 +49,14 @@ export function rotate90CW(
 
 /**
  * Decode -> EXIF-correct -> cover-fit to portrait 1200x1600 (centered horizontally,
- * anchored to the top, matching PIL's `ImageOps.fit(centering=(0.5, 0.0))`) -> rotate
- * 90° CW to the final 1600x1200 landscape buffer. Mirrors image_server.py's geometry
- * exactly; enhancement/dithering/packing happen separately (see dither.ts).
+ * anchored to the top, matching PIL's `ImageOps.fit(centering=(0.5, 0.0))`). This is
+ * the shared first half of the pipeline: any source aspect ratio (square, 16:10,
+ * panorama, ...) gets scaled up until it fully covers the 1200x1600 box, then the
+ * excess is cropped off — never letterboxed/stretched. Exported on its own so the
+ * dashboard thumbnail (see lib/thumbnail.ts) can preview the exact crop a user's
+ * photo will get, in its natural upright orientation, before the 90° rotation below.
  */
-export async function decodeToLandscapeBuffer(
+async function decodeToPortraitBuffer(
   bytes: Uint8Array
 ): Promise<{ rgba: Uint8ClampedArray; width: number; height: number }> {
   let orientation = 1;
@@ -86,13 +89,26 @@ export async function decodeToLandscapeBuffer(
 
   const portraitRgba = new Uint8ClampedArray(cropped.get_raw_pixels());
 
+  return { rgba: portraitRgba, width: PORTRAIT_WIDTH, height: PORTRAIT_HEIGHT };
+}
+
+export async function decodeToLandscapeBuffer(
+  bytes: Uint8Array
+): Promise<{
+  rgba: Uint8ClampedArray;
+  width: number;
+  height: number;
+  portrait: { rgba: Uint8ClampedArray; width: number; height: number };
+}> {
+  const portrait = await decodeToPortraitBuffer(bytes);
+
   // Hand-rolled rather than trusting a generic WASM rotate for an orthogonal
   // rotation, where exact output dimensions matter for the firmware's fixed buffer.
-  const landscape = rotate90CW(portraitRgba, PORTRAIT_WIDTH, PORTRAIT_HEIGHT);
+  const landscape = rotate90CW(portrait.rgba, portrait.width, portrait.height);
 
   if (landscape.width !== BUFFER_WIDTH || landscape.height !== BUFFER_HEIGHT) {
     throw new Error(`Unexpected buffer size after rotation: ${landscape.width}x${landscape.height}`);
   }
 
-  return landscape;
+  return { ...landscape, portrait };
 }

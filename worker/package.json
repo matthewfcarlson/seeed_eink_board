@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "wrangler d1 migrations apply eink-local --local --env local",
     "dev": "wrangler dev --env local",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
