@@ -45,7 +45,7 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     const pending = peekPendingImage(snapshot);
     if (!pending) return c.text("No images available", 404);
 
-    const bytes = await getPackedImage(c.env, deviceKey, pending.image.id);
+    const bytes = await getPackedImage(c.env, pending.image.sourceDeviceKey, pending.image.id);
     if (!bytes) return c.text("Failed to process image", 500);
 
     const writeback = await markServed(c.env, deviceKey, snapshot, pending.index, pending.image.id);

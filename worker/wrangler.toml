@@ -11,8 +11,16 @@ compatibility_flags = ["nodejs_compat"]
 cpu_ms = 30000
 
 [vars]
-# Non-secret config. Secrets (none yet) go via `wrangler secret put`.
+# Non-secret config. Secrets (GITHUB_TOKEN, optional) go via `wrangler secret put`.
 ENVIRONMENT = "development"
+# Source repo for OTA firmware releases — see lib/github-release.ts.
+GITHUB_REPO = "matthewfcarlson/seeed_eink_board"
+
+# Periodically catalogs new GitHub firmware releases (D1 + KV) so they're available
+# to target without a manual "Sync from GitHub" click — see index.ts's scheduled()
+# and routes/admin/firmware.ts. This never rolls anything out to devices by itself.
+[triggers]
+crons = ["0 */6 * * *"]
 
 # Real Cloudflare resources (created via dashboard). This is the single deploy
 # environment — Cloudflare's Git-connected Workers Build runs plain `npx wrangler
@@ -41,6 +49,7 @@ id = "239dca4bf22e40cd98e0d058b356d145"
 [env.local]
 [env.local.vars]
 ENVIRONMENT = "development"
+GITHUB_REPO = "matthewfcarlson/seeed_eink_board"
 
 [[env.local.d1_databases]]
 binding = "DB"

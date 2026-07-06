@@ -1,5 +1,6 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
--- migrations/0001_init.sql (wrangler d1 migrations tracks applied state per-database).
+-- migrations/0001_init.sql, 0002_firmware.sql, and 0003_include_default_images.sql
+-- (wrangler d1 migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -10,14 +11,17 @@ CREATE TABLE users (
 );
 
 CREATE TABLE devices (
-  mac                   TEXT PRIMARY KEY,
-  user_id               TEXT REFERENCES users(id),
-  label                 TEXT,
-  created_at            INTEGER NOT NULL,
-  last_seen_at          INTEGER,
-  last_seen_ip          TEXT,
-  last_battery_voltage  REAL,
-  last_battery_at       INTEGER
+  mac                     TEXT PRIMARY KEY,
+  user_id                 TEXT REFERENCES users(id),
+  label                   TEXT,
+  created_at              INTEGER NOT NULL,
+  last_seen_at            INTEGER,
+  last_seen_ip            TEXT,
+  last_battery_voltage    REAL,
+  last_battery_at         INTEGER,
+  -- Whether this device's rotation merges in the shared 'default' bucket's
+  -- images alongside its own. Defaults to on (see migrations/0003).
+  include_default_images  INTEGER NOT NULL DEFAULT 1
 );
 
 -- Durable mirror of the live rotation cursor. KV is the hot path; this table is
@@ -67,3 +71,21 @@ CREATE TABLE credentials (
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX idx_credentials_user_id ON credentials(user_id);
+
+-- Firmware OTA: releases Cloudflare has fetched from GitHub, and which version
+-- each target (mac | 'default' | 'global') should be running. Mirrors the
+-- schedule_overrides fallback-chain pattern in lib/schedule.ts.
+CREATE TABLE firmware_releases (
+  version     TEXT PRIMARY KEY, -- e.g. "1.2.0" (tag_name with leading 'v' stripped)
+  tag         TEXT NOT NULL,    -- raw GitHub tag_name, e.g. "v1.2.0"
+  sha256      TEXT NOT NULL,
+  size_bytes  INTEGER NOT NULL,
+  source_url  TEXT NOT NULL,    -- GitHub release asset download URL, for reference/debugging
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE firmware_targets (
+  target      TEXT PRIMARY KEY, -- mac | 'default' | 'global'
+  version     TEXT NOT NULL REFERENCES firmware_releases(version),
+  updated_at  INTEGER NOT NULL
+);

@@ -8,4 +8,6 @@ export const kvKeys = {
   // credential) too. Short TTL (see lib/webauthn.ts) — these never need to outlive a
   // single browser round trip.
   passkeyAttempt: (attemptId: string) => `passkey_attempt:${attemptId}`,
+  firmwareTarget: (target: string) => `firmware_target:${target}`,
+  firmwareBin: (version: string) => `firmware:bin:${version}`,
 };

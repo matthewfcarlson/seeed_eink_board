@@ -22,9 +22,9 @@
  */
 
 // Default values (used on first boot or after NVS reset)
-#define DEFAULT_SERVER_HOST "192.168.155.63"
-#define DEFAULT_SERVER_PORT 5000
-#define DEFAULT_USE_HTTPS false
+#define DEFAULT_SERVER_HOST "eink.matthewc.dev"
+#define DEFAULT_SERVER_PORT 443
+#define DEFAULT_USE_HTTPS true
 #define DEFAULT_IMAGE_ENDPOINT "/image_packed"
 #define DEFAULT_SLEEP_MINUTES 60
 #define DEFAULT_ACTIVE_START_HOUR 8

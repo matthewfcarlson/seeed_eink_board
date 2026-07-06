@@ -2,6 +2,11 @@ export interface Env {
   DB: D1Database;
   KV: KVNamespace;
   ENVIRONMENT: string;
+  // "owner/repo" that firmware releases are published from — see lib/github-release.ts.
+  GITHUB_REPO: string;
+  // Optional: raises the unauthenticated GitHub API rate limit (60/hr) and would be
+  // required if GITHUB_REPO were ever made private. Set via `wrangler secret put`.
+  GITHUB_TOKEN?: string;
 }
 
 export interface ImageMeta {
@@ -9,6 +14,9 @@ export interface ImageMeta {
   filename: string;
   packedHash: string;
   packedBytes: number;
+  // The device_key bucket this image's KV blobs actually live under (its own
+  // key, or 'default' when merged in from the shared bucket) — see rotation.ts.
+  sourceDeviceKey: string;
 }
 
 export interface RotationSnapshot {
@@ -27,6 +35,15 @@ export interface ScheduleConfig {
 export interface DeviceLookup {
   deviceKey: string; // mac if registered, else 'default'
   userId: string | null;
+}
+
+export interface FirmwareRelease {
+  version: string; // e.g. "1.2.0"
+  tag: string; // e.g. "v1.2.0"
+  sha256: string;
+  size_bytes: number;
+  source_url: string;
+  created_at: number;
 }
 
 export const DEFAULT_DEVICE_KEY = "default";

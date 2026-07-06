@@ -22,6 +22,20 @@ export function isHeic(contentType: string | null, filename: string): boolean {
   return /\.(heic|heif)$/i.test(filename);
 }
 
+/**
+ * Sniffs the raw-image magic bytes rather than trusting a stored Content-Type
+ * (upload doesn't persist one) — used only when serving the original back out
+ * for the dashboard's hover-to-enlarge preview.
+ */
+export function sniffImageContentType(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) return "image/webp";
+  return "application/octet-stream";
+}
+
 export function rotate90CW(
   rgba: Uint8ClampedArray,
   width: number,

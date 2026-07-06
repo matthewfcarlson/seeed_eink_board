@@ -37,6 +37,15 @@ export function renderAdminPage(): string {
   th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; vertical-align: top; font-size: 0.9em; }
   code { background: #eef1f4; border-radius: 4px; padding: 2px 5px; font-size: 0.85em; }
   img.thumb { display: block; border-radius: 3px; border: 1px solid #ddd; object-fit: cover; }
+  .thumb-wrap { position: relative; display: inline-block; }
+  .thumb-popup {
+    display: none; position: absolute; z-index: 30; top: 0; left: 55px;
+    background: white; border: 1px solid #ccc; border-radius: 6px; padding: 5px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+  }
+  .thumb-wrap:hover .thumb-popup { display: block; }
+  .thumb-popup img { display: block; max-width: 45vw; max-height: 70vh; border-radius: 3px; }
+  .thumb-popup .hint { padding: 10px; margin: 0; }
   .hint { color: #666; font-size: 0.85em; margin-top: 4px; }
   .message { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9em; }
   .success { background: #e7f6ea; border: 1px solid #9bd0a7; }
@@ -93,7 +102,6 @@ export function renderAdminPage(): string {
     E-Ink Admin
     <span class="top-bar">
       <span id="whoami"></span>
-      <button class="ghost" id="rotate-key-btn">Rotate API Key</button>
       <button class="ghost" id="logout-btn">Log out</button>
     </span>
   </h1>
@@ -103,7 +111,7 @@ export function renderAdminPage(): string {
   <div class="card">
     <h2>Devices</h2>
     <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Last seen</th><th>Battery</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th>Label</th><th>Last seen</th><th>Battery</th><th>Default images</th><th></th></tr></thead>
       <tbody id="devices-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -121,12 +129,18 @@ export function renderAdminPage(): string {
 
   <div class="card">
     <h3>Global fallback schedule</h3>
-    <p class="hint">Used when a device (or the default bucket) has no schedule override of its own.</p>
+    <p class="hint">Used when a device has no schedule override of its own.</p>
     <div id="bucket-global"></div>
   </div>
 
   <h2>Image Buckets</h2>
   <div class="bucket-grid" id="buckets"></div>
+
+  <div class="card">
+    <h3>API Key</h3>
+    <p class="hint">Rotating your key immediately invalidates the old one — anything using it (scripts, the firmware config page) will need the new value.</p>
+    <button class="ghost" id="rotate-key-btn">Rotate API Key</button>
+  </div>
 </div>
 
 <script>
@@ -293,10 +307,24 @@ async function deleteDevice(mac) {
 }
 window.deleteDevice = deleteDevice;
 
+async function toggleIncludeDefaultImages(mac, checked) {
+  try {
+    await apiFetch("/admin/devices/" + encodeURIComponent(mac), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ include_default_images: checked }),
+    });
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to update " + mac + ": " + err.message, "error");
+  }
+}
+window.toggleIncludeDefaultImages = toggleIncludeDefaultImages;
+
 function renderDevicesTable(devices) {
   const tbody = document.getElementById("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="hint">No devices registered yet.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -311,6 +339,8 @@ function renderDevicesTable(devices) {
       "<td>" + escapeHtml(d.label || "") + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
+      '<td><input type="checkbox" ' + (d.include_default_images ? "checked" : "") +
+        ' onchange="toggleIncludeDefaultImages(\\'' + escapeHtml(d.mac) + '\\', this.checked)"></td>' +
       '<td><button class="danger" onclick="deleteDevice(\\'' + escapeHtml(d.mac) + '\\')">Remove</button></td>' +
       "</tr>";
   }).join("");
@@ -364,6 +394,35 @@ async function clearSchedule(target) {
 }
 window.clearSchedule = clearSchedule;
 
+const fullImageUrlCache = {};
+
+// Lazy-loaded on first hover (the raw endpoint re-checks ownership per request,
+// so there's no point prefetching every thumbnail's full image up front). Cached
+// by object URL per image id so repeat hovers in the same session are instant.
+async function loadFullImage(id) {
+  const popup = document.getElementById("full-" + id);
+  if (!popup || popup.dataset.loaded) return;
+  if (fullImageUrlCache[id]) {
+    popup.innerHTML = '<img src="' + fullImageUrlCache[id] + '" alt="">';
+    popup.dataset.loaded = "1";
+    return;
+  }
+  try {
+    const res = await fetch("/admin/images/" + encodeURIComponent(id) + "/raw", {
+      headers: { Authorization: "Bearer " + getApiKey() },
+    });
+    if (!res.ok) throw new Error(res.status + " " + res.statusText);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    fullImageUrlCache[id] = url;
+    popup.innerHTML = '<img src="' + url + '" alt="">';
+    popup.dataset.loaded = "1";
+  } catch (err) {
+    popup.innerHTML = '<p class="hint">Failed to load: ' + escapeHtml(err.message) + "</p>";
+  }
+}
+window.loadFullImage = loadFullImage;
+
 async function deleteImage(id) {
   if (!confirm("Delete this image? This cannot be undone.")) return;
   try {
@@ -405,7 +464,10 @@ function bucketCardHtml(deviceKey, label, images, override) {
     ? images.map((img) =>
         "<tr>" +
         "<td>" + (img.thumbnail_data_url
-          ? '<img class="thumb" src="' + img.thumbnail_data_url + '" alt="" width="45" height="60">'
+          ? '<div class="thumb-wrap" onmouseenter="loadFullImage(\\'' + img.id + '\\')">' +
+              '<img class="thumb" src="' + img.thumbnail_data_url + '" alt="" width="45" height="60">' +
+              '<div class="thumb-popup" id="full-' + img.id + '"><p class="hint">Loading…</p></div>' +
+            "</div>"
           : '<span class="hint">n/a</span>') + "</td>" +
         "<td><code>" + escapeHtml(img.filename) + "</code></td>" +
         '<td><span class="pill">' + escapeHtml(img.dither_algorithm) + "</span></td>" +

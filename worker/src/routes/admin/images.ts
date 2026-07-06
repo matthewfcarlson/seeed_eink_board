@@ -7,10 +7,17 @@ import {
   type Env,
 } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { invalidateRotationCache } from "../../lib/rotation";
-import { decodeToLandscapeBuffer, isHeic, isSupportedImageType } from "../../lib/decode";
+import { invalidateRotationCache, invalidateRotationCacheForDefaultConsumers } from "../../lib/rotation";
+import { decodeToLandscapeBuffer, isHeic, isSupportedImageType, sniffImageContentType } from "../../lib/decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../../lib/dither";
-import { deleteImageBlobs, getThumbnailDataUrl, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
+import {
+  deleteImageBlobs,
+  getRawImage,
+  getThumbnailDataUrl,
+  putPackedImage,
+  putRawImage,
+  putThumbnail,
+} from "../../lib/image-store";
 import { makeThumbnailJpeg } from "../../lib/thumbnail";
 
 const DEFAULT_BRIGHTNESS = 1.0;
@@ -30,6 +37,14 @@ async function assertDeviceKeyOwnership(env: Env, deviceKey: string, userId: str
 
 function isValidDitherAlgorithm(value: string): value is DitherAlgorithm {
   return (DITHER_ALGORITHMS as string[]).includes(value);
+}
+
+/** Shared by the delete and raw-image routes. */
+async function findImageDeviceKey(env: Env, id: string): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT device_key FROM images WHERE id = ?")
+    .bind(id)
+    .first<{ device_key: string }>();
+  return row?.device_key ?? null;
 }
 
 /**
@@ -118,6 +133,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       .run();
 
     await invalidateRotationCache(c.env, deviceKey);
+    if (deviceKey === DEFAULT_DEVICE_KEY) await invalidateRotationCacheForDefaultConsumers(c.env);
 
     return c.json(
       { id, device_key: deviceKey, filename, dither_algorithm: ditherParam, packed_hash: packedHash, packed_bytes: packed.byteLength },
@@ -151,19 +167,44 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     const id = c.req.param("id");
     if (!id) return c.json({ error: "id is required" }, 400);
 
-    const row = await c.env.DB.prepare("SELECT device_key FROM images WHERE id = ?")
-      .bind(id)
-      .first<{ device_key: string }>();
-
-    if (!row) return c.json({ error: "Not found" }, 404);
-    if (!(await assertDeviceKeyOwnership(c.env, row.device_key, c.var.user.id))) {
+    const deviceKey = await findImageDeviceKey(c.env, id);
+    if (!deviceKey) return c.json({ error: "Not found" }, 404);
+    if (!(await assertDeviceKeyOwnership(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
     await c.env.DB.prepare("DELETE FROM images WHERE id = ?").bind(id).run();
-    await deleteImageBlobs(c.env, row.device_key, id);
-    await invalidateRotationCache(c.env, row.device_key);
+    await deleteImageBlobs(c.env, deviceKey, id);
+    await invalidateRotationCache(c.env, deviceKey);
+    if (deviceKey === DEFAULT_DEVICE_KEY) await invalidateRotationCacheForDefaultConsumers(c.env);
 
     return c.json({ deleted: id });
+  });
+
+  // Serves the original as-uploaded bytes for the dashboard's hover-to-enlarge
+  // preview. Not cacheable by device_key/filename like the catalog list — callers
+  // only know the image id — so ownership is re-checked per request same as delete.
+  app.get("/admin/images/:id/raw", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id is required" }, 400);
+
+    const deviceKey = await findImageDeviceKey(c.env, id);
+    if (!deviceKey) return c.json({ error: "Not found" }, 404);
+    if (!(await assertDeviceKeyOwnership(c.env, deviceKey, c.var.user.id))) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+
+    const raw = await getRawImage(c.env, deviceKey, id);
+    if (!raw) return c.json({ error: "Not found" }, 404);
+
+    // Not long-cacheable: re-uploading the same filename reuses this id (see the
+    // upload handler above), so the bytes at this URL can change over time.
+    const bytes = new Uint8Array(raw);
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": sniffImageContentType(bytes),
+        "Cache-Control": "private, no-cache",
+      },
+    });
   });
 }

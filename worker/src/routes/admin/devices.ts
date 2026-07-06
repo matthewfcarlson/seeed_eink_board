@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import type { Env } from "../../types";
 import { normalizeMac } from "../../lib/mac";
 import { invalidateDeviceCache } from "../../lib/auth-device";
+import { invalidateRotationCache } from "../../lib/rotation";
 import { requireAdmin } from "../../lib/admin-middleware";
 
 export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
@@ -33,11 +34,42 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.get("/admin/devices", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at FROM devices WHERE user_id = ?"
+      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at, include_default_images FROM devices WHERE user_id = ?"
     )
       .bind(c.var.user.id)
-      .all();
-    return c.json({ devices: rows.results });
+      .all<Record<string, unknown> & { include_default_images: number }>();
+    const devices = rows.results.map((row) => ({
+      ...row,
+      include_default_images: row.include_default_images === 1,
+    }));
+    return c.json({ devices });
+  });
+
+  app.patch("/admin/devices/:mac", requireAdmin, async (c) => {
+    const macParam = c.req.param("mac");
+    if (!macParam) return c.json({ error: "mac is required" }, 400);
+    const mac = normalizeMac(macParam);
+    const body = await c.req
+      .json<{ label?: string; include_default_images?: boolean }>()
+      .catch(() => ({}) as never);
+
+    const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
+      .bind(mac)
+      .first<{ user_id: string | null }>();
+    if (!row) return c.json({ error: "Not found" }, 404);
+    if (row.user_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
+
+    if (body.label !== undefined) {
+      await c.env.DB.prepare("UPDATE devices SET label = ? WHERE mac = ?").bind(body.label, mac).run();
+    }
+    if (body.include_default_images !== undefined) {
+      await c.env.DB.prepare("UPDATE devices SET include_default_images = ? WHERE mac = ?")
+        .bind(body.include_default_images ? 1 : 0, mac)
+        .run();
+      await invalidateRotationCache(c.env, mac);
+    }
+
+    return c.json({ mac, label: body.label, include_default_images: body.include_default_images });
   });
 
   app.delete("/admin/devices/:mac", requireAdmin, async (c) => {

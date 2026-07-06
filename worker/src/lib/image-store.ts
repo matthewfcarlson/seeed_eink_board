@@ -61,6 +61,15 @@ export async function putRawImage(
   await env.KV.put(imageStoreKeys.raw(deviceKey, imageId), rawBytes);
 }
 
+/** Original as-uploaded bytes, served back for the dashboard's hover-to-enlarge preview. */
+export async function getRawImage(
+  env: Env,
+  deviceKey: string,
+  imageId: string
+): Promise<ArrayBuffer | null> {
+  return env.KV.get(imageStoreKeys.raw(deviceKey, imageId), "arrayBuffer");
+}
+
 /** Thumbnails are tiny JPEGs (a few KB) so, unlike raw/packed, they're stored
  *  uncompressed — gzip wouldn't meaningfully shrink already-compressed JPEG bytes. */
 export async function putThumbnail(
