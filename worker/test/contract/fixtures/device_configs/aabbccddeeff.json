@@ -1,0 +1,6 @@
+{
+  "refresh_interval_minutes": 30,
+  "active_start_hour": 7,
+  "active_end_hour": 22,
+  "timezone_offset_minutes": -480
+}

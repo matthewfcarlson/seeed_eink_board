@@ -81,6 +81,7 @@ The server endpoint is configurable at runtime without reflashing:
 **Configurable settings:**
 - Server host (IP or domain name, e.g., "192.168.86.100" or "myserver.linode.com")
 - Server port
+- Use HTTPS (checkbox; required for a Cloudflare Workers backend, leave unchecked for a plain-HTTP local dev server). Uses `WiFiClientSecure::setInsecure()` — encrypts traffic but does not validate the server's certificate.
 - Image endpoint path
 - Sleep interval (how often to refresh)
 

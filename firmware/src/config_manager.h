@@ -13,6 +13,8 @@
  * Stored configuration:
  *   - Server host (e.g., "192.168.86.100" or "myserver.example.com")
  *   - Server port (e.g., 5000)
+ *   - Whether to use HTTPS (e.g., for a Cloudflare Worker backend) or plain HTTP
+ *     (e.g., for a local Flask dev server with no TLS)
  *   - Image endpoint path (e.g., "/image_packed")
  *   - Refresh interval in minutes
  *   - Active window start/end hour (0-23, local time)
@@ -20,13 +22,14 @@
  */
 
 // Default values (used on first boot or after NVS reset)
-#define DEFAULT_SERVER_HOST "192.168.86.34"
+#define DEFAULT_SERVER_HOST "192.168.155.63"
 #define DEFAULT_SERVER_PORT 5000
+#define DEFAULT_USE_HTTPS false
 #define DEFAULT_IMAGE_ENDPOINT "/image_packed"
-#define DEFAULT_SLEEP_MINUTES 15
+#define DEFAULT_SLEEP_MINUTES 60
 #define DEFAULT_ACTIVE_START_HOUR 8
 #define DEFAULT_ACTIVE_END_HOUR 20
-#define DEFAULT_TIMEZONE_OFFSET_MINUTES 0
+#define DEFAULT_TIMEZONE_OFFSET_MINUTES -360
 
 // Maximum string lengths
 #define MAX_HOST_LENGTH 128
@@ -42,6 +45,7 @@ public:
     // Get current configuration
     String getServerHost();
     uint16_t getServerPort();
+    bool getUseHttps();
     String getImageEndpoint();
     uint16_t getSleepMinutes();
     uint8_t getActiveStartHour();
@@ -54,6 +58,7 @@ public:
     // Set configuration (automatically saves to NVS)
     void setServerHost(const String& host);
     void setServerPort(uint16_t port);
+    void setUseHttps(bool useHttps);
     void setImageEndpoint(const String& endpoint);
     void setSleepMinutes(uint16_t minutes);
     void setActiveStartHour(uint8_t hour);
@@ -61,7 +66,7 @@ public:
     void setTimezoneOffsetMinutes(int16_t minutes);
 
     // Set all at once
-    void setConfig(const String& host, uint16_t port, const String& endpoint,
+    void setConfig(const String& host, uint16_t port, bool useHttps, const String& endpoint,
                    uint16_t sleepMinutes, uint8_t activeStartHour,
                    uint8_t activeEndHour, int16_t timezoneOffsetMinutes);
 
@@ -75,6 +80,7 @@ private:
     Preferences prefs_;
     String serverHost_;
     uint16_t serverPort_;
+    bool useHttps_;
     String imageEndpoint_;
     uint16_t sleepMinutes_;
     uint8_t activeStartHour_;

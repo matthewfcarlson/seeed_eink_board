@@ -4,6 +4,7 @@
 static const char* NVS_NAMESPACE = "eink_config";
 static const char* KEY_HOST = "host";
 static const char* KEY_PORT = "port";
+static const char* KEY_USE_HTTPS = "use_https";
 static const char* KEY_ENDPOINT = "endpoint";
 static const char* KEY_SLEEP = "sleep_min";
 static const char* KEY_ACTIVE_START = "active_st";
@@ -13,6 +14,7 @@ static const char* KEY_TZ_OFFSET = "tz_offset";
 ConfigManager::ConfigManager()
     : serverHost_(DEFAULT_SERVER_HOST),
       serverPort_(DEFAULT_SERVER_PORT),
+      useHttps_(DEFAULT_USE_HTTPS),
       imageEndpoint_(DEFAULT_IMAGE_ENDPOINT),
       sleepMinutes_(DEFAULT_SLEEP_MINUTES),
       activeStartHour_(DEFAULT_ACTIVE_START_HOUR),
@@ -32,6 +34,7 @@ void ConfigManager::loadFromNVS() {
     // Load with defaults if not present
     serverHost_ = prefs_.getString(KEY_HOST, DEFAULT_SERVER_HOST);
     serverPort_ = prefs_.getUShort(KEY_PORT, DEFAULT_SERVER_PORT);
+    useHttps_ = prefs_.getBool(KEY_USE_HTTPS, DEFAULT_USE_HTTPS);
     imageEndpoint_ = prefs_.getString(KEY_ENDPOINT, DEFAULT_IMAGE_ENDPOINT);
     sleepMinutes_ = prefs_.getUShort(KEY_SLEEP, DEFAULT_SLEEP_MINUTES);
     activeStartHour_ = prefs_.getUChar(KEY_ACTIVE_START, DEFAULT_ACTIVE_START_HOUR);
@@ -46,6 +49,7 @@ void ConfigManager::saveToNVS() {
 
     prefs_.putString(KEY_HOST, serverHost_);
     prefs_.putUShort(KEY_PORT, serverPort_);
+    prefs_.putBool(KEY_USE_HTTPS, useHttps_);
     prefs_.putString(KEY_ENDPOINT, imageEndpoint_);
     prefs_.putUShort(KEY_SLEEP, sleepMinutes_);
     prefs_.putUChar(KEY_ACTIVE_START, activeStartHour_);
@@ -62,6 +66,10 @@ String ConfigManager::getServerHost() {
 
 uint16_t ConfigManager::getServerPort() {
     return serverPort_;
+}
+
+bool ConfigManager::getUseHttps() {
+    return useHttps_;
 }
 
 String ConfigManager::getImageEndpoint() {
@@ -85,7 +93,7 @@ int16_t ConfigManager::getTimezoneOffsetMinutes() {
 }
 
 String ConfigManager::getFullURL() {
-    return String("http://") + serverHost_ + ":" + String(serverPort_) + imageEndpoint_;
+    return String(useHttps_ ? "https://" : "http://") + serverHost_ + ":" + String(serverPort_) + imageEndpoint_;
 }
 
 void ConfigManager::setServerHost(const String& host) {
@@ -100,6 +108,11 @@ void ConfigManager::setServerPort(uint16_t port) {
         serverPort_ = port;
         saveToNVS();
     }
+}
+
+void ConfigManager::setUseHttps(bool useHttps) {
+    useHttps_ = useHttps;
+    saveToNVS();
 }
 
 void ConfigManager::setImageEndpoint(const String& endpoint) {
@@ -142,7 +155,7 @@ void ConfigManager::setTimezoneOffsetMinutes(int16_t minutes) {
     }
 }
 
-void ConfigManager::setConfig(const String& host, uint16_t port, const String& endpoint,
+void ConfigManager::setConfig(const String& host, uint16_t port, bool useHttps, const String& endpoint,
                               uint16_t sleepMinutes, uint8_t activeStartHour,
                               uint8_t activeEndHour, int16_t timezoneOffsetMinutes) {
     bool changed = false;
@@ -154,6 +167,11 @@ void ConfigManager::setConfig(const String& host, uint16_t port, const String& e
 
     if (port > 0) {
         serverPort_ = port;
+        changed = true;
+    }
+
+    if (useHttps != useHttps_) {
+        useHttps_ = useHttps;
         changed = true;
     }
 
@@ -194,6 +212,7 @@ void ConfigManager::setConfig(const String& host, uint16_t port, const String& e
 void ConfigManager::resetToDefaults() {
     serverHost_ = DEFAULT_SERVER_HOST;
     serverPort_ = DEFAULT_SERVER_PORT;
+    useHttps_ = DEFAULT_USE_HTTPS;
     imageEndpoint_ = DEFAULT_IMAGE_ENDPOINT;
     sleepMinutes_ = DEFAULT_SLEEP_MINUTES;
     activeStartHour_ = DEFAULT_ACTIVE_START_HOUR;
@@ -205,7 +224,7 @@ void ConfigManager::resetToDefaults() {
 
 void ConfigManager::printConfig() {
     Serial.println("Current Configuration:");
-    Serial.printf("  Server: %s:%d\n", serverHost_.c_str(), serverPort_);
+    Serial.printf("  Server: %s:%d (%s)\n", serverHost_.c_str(), serverPort_, useHttps_ ? "https" : "http");
     Serial.printf("  Endpoint: %s\n", imageEndpoint_.c_str());
     Serial.printf("  Full URL: %s\n", getFullURL().c_str());
     Serial.printf("  Refresh interval: %d minutes\n", sleepMinutes_);

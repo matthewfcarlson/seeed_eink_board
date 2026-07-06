@@ -89,11 +89,17 @@ HARDWARE_MAP = {
 DEFAULT_IMAGE_PATH = "image.jpg"
 
 # Image rotation configuration
+# IMAGES_DIR/STATE_FILE/GLOBAL_DEVICE_CONFIG_PATH/PORT are env-overridable so the
+# worker/test/contract dual-run harness can point this server at isolated fixture
+# data instead of the real images/ directory and rotation state file.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-IMAGES_DIR = os.path.join(SCRIPT_DIR, "images")
-STATE_FILE = os.path.join(SCRIPT_DIR, ".eink_rotation_state.json")
+IMAGES_DIR = os.environ.get("EINK_IMAGES_DIR", os.path.join(SCRIPT_DIR, "images"))
+STATE_FILE = os.environ.get("EINK_STATE_FILE", os.path.join(SCRIPT_DIR, ".eink_rotation_state.json"))
 DEVICE_CONFIG_FILENAME = "device_config.json"
-GLOBAL_DEVICE_CONFIG_PATH = os.path.join(SCRIPT_DIR, DEVICE_CONFIG_FILENAME)
+GLOBAL_DEVICE_CONFIG_PATH = os.environ.get(
+    "EINK_GLOBAL_CONFIG", os.path.join(SCRIPT_DIR, DEVICE_CONFIG_FILENAME)
+)
+PORT = int(os.environ.get("EINK_PORT", "5000"))
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.heic', '.webp'}
 DEFAULT_DEVICE_ID = "default"
 GLOBAL_SCHEDULE_TARGET = "global"
@@ -1358,4 +1364,5 @@ if __name__ == "__main__":
     if known_devices:
         print(f"Known devices from state: {', '.join(known_devices)}")
 
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    debug_mode = os.environ.get("EINK_DEBUG", "1") != "0"
+    app.run(debug=debug_mode, host='0.0.0.0', port=PORT)

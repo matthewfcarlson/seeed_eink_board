@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <sys/time.h>
 #include <time.h>
@@ -48,7 +49,25 @@ float batteryVoltage = -1.0;
 #define VALID_UNIX_TIME 1704067200LL  // 2024-01-01 00:00:00 UTC
 
 String getBaseURL() {
-    return "http://" + configManager.getServerHost() + ":" + String(configManager.getServerPort());
+    String scheme = configManager.getUseHttps() ? "https://" : "http://";
+    return scheme + configManager.getServerHost() + ":" + String(configManager.getServerPort());
+}
+
+/**
+ * Starts an HTTP(S) request, choosing a plain or TLS transport based on config.
+ * TLS certificate validation is intentionally skipped (setInsecure()): this still
+ * encrypts traffic against passive eavesdropping, but does not authenticate the
+ * server, so it does not protect against an active MITM. That tradeoff is accepted
+ * for now to avoid depending on a CA bundle that may not build cleanly on this
+ * platform/board without hardware access to verify; hardening to setCACert()/
+ * setCACertBundle() is a follow-up, not a blocker for moving off plain HTTP.
+ */
+bool beginRequest(HTTPClient& http, WiFiClientSecure& secureClient, const String& url) {
+    if (configManager.getUseHttps()) {
+        secureClient.setInsecure();
+        return http.begin(secureClient, url);
+    }
+    return http.begin(url);
 }
 
 /**
@@ -229,7 +248,8 @@ bool syncRemoteConfigAndTime() {
     Serial.printf("Fetching device config from: %s\n", configUrl.c_str());
 
     HTTPClient http;
-    http.begin(configUrl);
+    WiFiClientSecure secureClient;
+    beginRequest(http, secureClient, configUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
     addCommonHeaders(http);
 
@@ -300,6 +320,7 @@ bool syncRemoteConfigAndTime() {
     if (scheduleChanged) {
         configManager.setConfig(configManager.getServerHost(),
                                 configManager.getServerPort(),
+                                configManager.getUseHttps(),
                                 configManager.getImageEndpoint(),
                                 refreshMinutes,
                                 activeStart,
@@ -396,7 +417,8 @@ bool checkImageChanged() {
     Serial.printf("Last known hash: %s\n", lastImageHash[0] ? lastImageHash : "(none)");
 
     HTTPClient http;
-    http.begin(hashUrl);
+    WiFiClientSecure secureClient;
+    beginRequest(http, secureClient, hashUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
     addCommonHeaders(http);
 
@@ -446,7 +468,8 @@ bool fetchAndDisplayImage() {
     Serial.printf("Fetching image from: %s\n", url.c_str());
 
     HTTPClient http;
-    http.begin(url);
+    WiFiClientSecure secureClient;
+    beginRequest(http, secureClient, url);
     http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
     addCommonHeaders(http);
 

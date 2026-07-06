@@ -1,0 +1,56 @@
+-- Reference copy of the full schema. The authoritative, applied version lives in
+-- migrations/0001_init.sql (wrangler d1 migrations tracks applied state per-database).
+
+CREATE TABLE users (
+  id            TEXT PRIMARY KEY,
+  email         TEXT NOT NULL UNIQUE,
+  api_key_hash  TEXT NOT NULL,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE devices (
+  mac                   TEXT PRIMARY KEY,
+  user_id               TEXT REFERENCES users(id),
+  label                 TEXT,
+  created_at            INTEGER NOT NULL,
+  last_seen_at          INTEGER,
+  last_seen_ip          TEXT,
+  last_battery_voltage  REAL,
+  last_battery_at       INTEGER
+);
+
+-- Durable mirror of the live rotation cursor. KV is the hot path; this table is
+-- written async (ctx.waitUntil) and used for recovery + the /current status view.
+CREATE TABLE rotation_state (
+  device_key    TEXT PRIMARY KEY, -- mac, or the literal string 'default'
+  current_index INTEGER NOT NULL DEFAULT 0,
+  last_returned TEXT,
+  updated_at    INTEGER NOT NULL
+);
+
+-- Catalog of processed images per device bucket. Rotation order is
+-- `ORDER BY filename ASC`, computed once here rather than re-listing KV per request.
+-- The actual image bytes live in KV under deterministic keys derived from
+-- (device_key, id) — see lib/image-store.ts — not stored as columns here.
+CREATE TABLE images (
+  id                TEXT PRIMARY KEY,
+  device_key        TEXT NOT NULL,
+  filename          TEXT NOT NULL,
+  dither_algorithm  TEXT NOT NULL DEFAULT 'floyd_steinberg',
+  packed_hash       TEXT NOT NULL,
+  packed_bytes      INTEGER NOT NULL,
+  raw_bytes         INTEGER NOT NULL,
+  created_at        INTEGER NOT NULL,
+  UNIQUE(device_key, filename)
+);
+CREATE INDEX idx_images_device_key_filename ON images(device_key, filename);
+
+-- Three-tier schedule override fallback: exact mac -> 'default' -> 'global'.
+CREATE TABLE schedule_overrides (
+  target                    TEXT PRIMARY KEY, -- mac | 'default' | 'global'
+  refresh_interval_minutes  INTEGER,
+  active_start_hour         INTEGER,
+  active_end_hour           INTEGER,
+  timezone_offset_minutes   INTEGER,
+  updated_at                INTEGER NOT NULL
+);

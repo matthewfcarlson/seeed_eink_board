@@ -1,0 +1,37 @@
+name = "eink-worker"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Image ingestion (decode/resize/dither) runs in-Worker on /admin/images/upload and is
+# CPU-heavy (hand-rolled Floyd-Steinberg/Atkinson dithering over ~1.9M pixels). The
+# default free-tier CPU limit (10ms) is nowhere near enough — this requires a paid
+# Workers plan where higher `cpu_ms` limits are honored.
+[limits]
+cpu_ms = 30000
+
+[[d1_databases]]
+binding = "DB"
+database_name = "eink-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID" # fill in after: wrangler d1 create eink-db
+migrations_dir = "src/db/migrations"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID" # fill in after: wrangler kv namespace create eink-kv
+
+[vars]
+# Non-secret config. Secrets (none yet) go via `wrangler secret put`.
+ENVIRONMENT = "development"
+
+[env.production]
+name = "eink-worker-prod"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "eink-db-prod"
+database_id = "REPLACE_WITH_PROD_D1_DATABASE_ID"
+
+[[env.production.kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_PROD_KV_NAMESPACE_ID"

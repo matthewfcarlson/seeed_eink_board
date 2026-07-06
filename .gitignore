@@ -23,6 +23,17 @@ config.h
 *.JPEG
 *.PNG
 
+# ...except the worker's contract-test fixtures, which must be checked in for
+# the dual-run test harness to be reproducible on a fresh clone.
+!worker/test/contract/fixtures/images/**/*.jpg
+!worker/test/contract/fixtures/images/**/*.jpeg
+!worker/test/contract/fixtures/images/**/*.png
+
+# Node / Cloudflare Workers (worker/)
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+
 # IDE/editor files
 .vscode/
 .idea/
