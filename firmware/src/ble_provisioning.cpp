@@ -118,7 +118,8 @@ void BLEProvisioning::start() {
     pendingActiveEndHour_ = -1;
     pendingTimezoneOffsetMinutes_ = 9999;
     rebootPending_ = false;
-    scanPending_ = false;
+    scanRequested_ = false;
+    scanInProgress_ = false;
 
     refreshInfoCharacteristic("idle");
 
@@ -140,15 +141,20 @@ void BLEProvisioning::stop() {
     scanResultsChar_ = nullptr;
     delete g_configCallbacks;
     delete g_commandCallbacks;
+    delete g_serverCallbacks;
     g_configCallbacks = nullptr;
     g_commandCallbacks = nullptr;
+    g_serverCallbacks = nullptr;
     Serial.println("BLEProvisioning: Stopped");
 }
 
 void BLEProvisioning::loop() {
-    if (scanPending_) {
-        scanPending_ = false;
-        runWifiScanAndNotify();
+    if (scanRequested_) {
+        scanRequested_ = false;
+        startWifiScan();
+    }
+    if (scanInProgress_) {
+        pollWifiScan();
     }
     if (rebootPending_ && millis() >= rebootAtMs_) {
         Serial.println("BLEProvisioning: Rebooting into normal mode...");
@@ -234,7 +240,7 @@ void BLEProvisioning::handleCommand(const String& command) {
         rebootPending_ = true;
         rebootAtMs_ = millis() + 400;  // let the notify flush before the connection drops
     } else if (command == "scan") {
-        scanPending_ = true;
+        scanRequested_ = true;
         refreshInfoCharacteristic("scanning");
     } else if (command == "reset") {
         config_.resetToDefaults();
@@ -244,17 +250,76 @@ void BLEProvisioning::handleCommand(const String& command) {
     }
 }
 
-void BLEProvisioning::runWifiScanAndNotify() {
+void BLEProvisioning::startWifiScan() {
     Serial.println("BLEProvisioning: Scanning for WiFi networks...");
-    int count = WiFi.scanNetworks();
+    // Async (non-blocking): WiFi.scanNetworks() without this blocks for several
+    // seconds solid, which starves the RTOS task watchdog (and the BLE host task)
+    // long enough to panic-reset the device — observed on hardware. Polled from
+    // pollWifiScan() via WiFi.scanComplete() instead of blocking here.
+    WiFi.scanNetworks(true);
+    scanInProgress_ = true;
+}
+
+void BLEProvisioning::pollWifiScan() {
+    int result = WiFi.scanComplete();
+    if (result == WIFI_SCAN_RUNNING) return;
+
+    scanInProgress_ = false;
+    int count = (result == WIFI_SCAN_FAILED) ? 0 : result;
+
+    // A single BLE notification can't span multiple ATT packets — unlike GATT
+    // reads, there's no "long notify" reassembly — and a GATT attribute value is
+    // hard-capped at 512 bytes regardless. 25+ nearby networks won't fit, so keep
+    // only the strongest unique SSIDs and use short keys to stay well under that
+    // cap (see BLE_CHAR_SCAN_RESULTS_UUID's max_len in start()).
+    const int MAX_NETWORKS = 8;
+    int order[MAX_NETWORKS];
+    int orderedCount = 0;
+
+    for (int i = 0; i < count; i++) {
+        String ssid = WiFi.SSID(i);
+        if (ssid.length() == 0) continue;
+
+        bool isDuplicate = false;
+        for (int j = 0; j < orderedCount; j++) {
+            if (WiFi.SSID(order[j]) == ssid) {
+                isDuplicate = true;
+                if (WiFi.RSSI(i) > WiFi.RSSI(order[j])) order[j] = i;  // keep the stronger AP
+                break;
+            }
+        }
+        if (isDuplicate) continue;
+
+        if (orderedCount < MAX_NETWORKS) {
+            order[orderedCount++] = i;
+        } else {
+            // Replace the weakest kept entry if this one is stronger.
+            int weakestIdx = 0;
+            for (int j = 1; j < orderedCount; j++) {
+                if (WiFi.RSSI(order[j]) < WiFi.RSSI(order[weakestIdx])) weakestIdx = j;
+            }
+            if (WiFi.RSSI(i) > WiFi.RSSI(order[weakestIdx])) order[weakestIdx] = i;
+        }
+    }
+
+    // Sort kept entries strongest-first (simple insertion sort — at most 8 items).
+    for (int i = 1; i < orderedCount; i++) {
+        int key = order[i];
+        int j = i - 1;
+        while (j >= 0 && WiFi.RSSI(order[j]) < WiFi.RSSI(key)) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = key;
+    }
 
     JsonDocument doc;
     JsonArray networks = doc.to<JsonArray>();
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < orderedCount; i++) {
         JsonObject net = networks.add<JsonObject>();
-        net["ssid"] = WiFi.SSID(i);
-        net["rssi"] = WiFi.RSSI(i);
-        net["secure"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+        net["s"] = WiFi.SSID(order[i]);
+        net["r"] = WiFi.RSSI(order[i]);
+        net["o"] = WiFi.encryptionType(order[i]) == WIFI_AUTH_OPEN;  // "open" (unsecured)
     }
     WiFi.scanDelete();
 
@@ -263,6 +328,6 @@ void BLEProvisioning::runWifiScanAndNotify() {
     scanResultsChar_->setValue(json);
     scanResultsChar_->notify();
 
-    Serial.printf("BLEProvisioning: Found %d networks\n", count);
+    Serial.printf("BLEProvisioning: Found %d networks (kept %d unique, strongest first)\n", count, orderedCount);
     refreshInfoCharacteristic("idle");
 }

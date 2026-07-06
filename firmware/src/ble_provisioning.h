@@ -33,10 +33,17 @@
  *                                   timezone_offset_minutes. Buffered in RAM only —
  *                                   nothing touches NVS until COMMAND "save".
  *   COMMAND       (write)         — plain string: "save" (persist buffered config,
- *                                   then reboot), "scan" (trigger a WiFi scan; results
- *                                   arrive via SCAN_RESULTS), or "reset" (defaults).
- *   SCAN_RESULTS  (read, notify)  — JSON array of {ssid, rssi, secure} from the most
- *                                   recent scan.
+ *                                   then reboot), "scan" (trigger an async WiFi scan;
+ *                                   results arrive via SCAN_RESULTS), or "reset"
+ *                                   (defaults). Scanning is async (WiFi.scanNetworks(true),
+ *                                   polled from loop()) — a blocking scan starves the
+ *                                   RTOS watchdog long enough to panic-reset the device.
+ *   SCAN_RESULTS  (read, notify)  — JSON array of {s: ssid, r: rssi, o: open} for the
+ *                                   strongest ~8 unique networks (short keys, capped
+ *                                   count — a GATT attribute value is hard-capped at
+ *                                   512 bytes, and a notification can't span multiple
+ *                                   ATT packets the way a long read can, so an
+ *                                   unfiltered scan of 20+ nearby networks won't fit).
  *
  * Characteristics are plain READ/WRITE, not encryption-required. An earlier version
  * used NIMBLE_PROPERTY::*_ENC to force BLE bonding before any value (notably the
@@ -81,12 +88,18 @@ private:
 
     bool rebootPending_ = false;
     uint32_t rebootAtMs_ = 0;
-    bool scanPending_ = false;
+
+    // WiFi scans run asynchronously (WiFi.scanNetworks(true)) and are polled from
+    // loop() via WiFi.scanComplete() — a blocking scan can starve the RTOS task
+    // watchdog long enough to panic-reset the device (observed on hardware).
+    bool scanRequested_ = false;
+    bool scanInProgress_ = false;
 
     void refreshInfoCharacteristic(const char* state);
     void handleConfigWrite(const String& json);
     void handleCommand(const String& command);
-    void runWifiScanAndNotify();
+    void startWifiScan();
+    void pollWifiScan();
 
     friend class ProvisioningConfigCallbacks;
     friend class ProvisioningCommandCallbacks;

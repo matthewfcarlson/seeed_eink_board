@@ -168,8 +168,8 @@ function applyScanResults(networks) {
   select.innerHTML = '<option value="">(scan or type below)</option>' +
     networks
       .slice()
-      .sort((a, b) => b.rssi - a.rssi)
-      .map((n) => '<option value="' + escapeHtml(n.ssid) + '">' + escapeHtml(n.ssid) + (n.secure ? "" : " (open)") + "</option>")
+      .sort((a, b) => b.r - a.r)
+      .map((n) => '<option value="' + escapeHtml(n.s) + '">' + escapeHtml(n.s) + (n.o ? " (open)" : "") + "</option>")
       .join("");
 }
 
@@ -199,8 +199,18 @@ async function connect() {
     });
 
     await scanResultsChar.startNotifications();
-    scanResultsChar.addEventListener("characteristicvaluechanged", (e) => {
-      applyScanResults(JSON.parse(textFromValue(e.target.value)));
+    // Deliberately re-read rather than trust the notification's own payload: a
+    // single notification can't span multiple BLE packets, so if it's cut short
+    // by a smaller-than-expected negotiated MTU the delivered value would be
+    // truncated. A read supports the GATT "long read" procedure (multiple
+    // request/response round trips), so it reliably retrieves the full value.
+    scanResultsChar.addEventListener("characteristicvaluechanged", async () => {
+      try {
+        const value = await scanResultsChar.readValue();
+        applyScanResults(JSON.parse(textFromValue(value)));
+      } catch (err) {
+        showMessage("Failed to read scan results: " + err.message, "error");
+      }
     });
 
     const initialInfo = JSON.parse(textFromValue(await infoChar.readValue()));
