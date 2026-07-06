@@ -10,16 +10,6 @@ compatibility_flags = ["nodejs_compat"]
 [limits]
 cpu_ms = 30000
 
-[[d1_databases]]
-binding = "DB"
-database_name = "eink-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID" # fill in after: wrangler d1 create eink-db
-migrations_dir = "src/db/migrations"
-
-[[kv_namespaces]]
-binding = "KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID" # fill in after: wrangler kv namespace create eink-kv
-
 [vars]
 # Non-secret config. Secrets (none yet) go via `wrangler secret put`.
 ENVIRONMENT = "development"
@@ -27,11 +17,17 @@ ENVIRONMENT = "development"
 [env.production]
 name = "eink-worker-prod"
 
-[[env.production.d1_databases]]
-binding = "DB"
-database_name = "eink-db-prod"
-database_id = "REPLACE_WITH_PROD_D1_DATABASE_ID"
+[observability]
+enabled = false
+head_sampling_rate = 1
 
-[[env.production.kv_namespaces]]
-binding = "KV"
-id = "REPLACE_WITH_PROD_KV_NAMESPACE_ID"
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
