@@ -10,6 +10,12 @@ on:
     tags:
       - "v*.*.*"
 
+permissions:
+  # softprops/action-gh-release needs this to create the release and generate
+  # notes with the default GITHUB_TOKEN — without it the API call 403s with
+  # "Resource not accessible by integration" (repo/org default is read-only).
+  contents: write
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
