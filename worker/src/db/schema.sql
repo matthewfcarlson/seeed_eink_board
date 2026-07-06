@@ -1,9 +1,10 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
 -- migrations/0001_init.sql (wrangler d1 migrations tracks applied state per-database).
 
+-- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
+-- way to create a row here, and a passkey needs nothing but the credential itself.
 CREATE TABLE users (
   id            TEXT PRIMARY KEY,
-  email         TEXT NOT NULL UNIQUE,
   api_key_hash  TEXT NOT NULL,
   created_at    INTEGER NOT NULL
 );
@@ -54,3 +55,15 @@ CREATE TABLE schedule_overrides (
   timezone_offset_minutes   INTEGER,
   updated_at                INTEGER NOT NULL
 );
+
+-- Passkey (WebAuthn) credentials. Account creation requires registering one of
+-- these — see routes/auth-passkey.ts — there is no other way to create a user.
+CREATE TABLE credentials (
+  id          TEXT PRIMARY KEY, -- base64url credential ID from the authenticator
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  public_key  TEXT NOT NULL,    -- base64url-encoded COSE public key
+  counter     INTEGER NOT NULL DEFAULT 0,
+  transports  TEXT,             -- JSON array of AuthenticatorTransportFuture, or null
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX idx_credentials_user_id ON credentials(user_id);

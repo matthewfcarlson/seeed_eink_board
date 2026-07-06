@@ -2,8 +2,9 @@
  * Self-contained admin single-page app: no build step, vanilla JS, calls the
  * JSON admin API (Authorization: Bearer <api_key>) client-side. The API key is
  * kept in localStorage only — this route itself serves no secrets and needs no
- * server-side auth (matches the "no public signup, script-issued key" model in
- * the plan; this page is just a client for the same API a script could call).
+ * server-side auth. Accounts are created and re-authenticated via a passkey
+ * ceremony (see routes/auth-passkey.ts); a successful ceremony just mints an
+ * API key, which is then used exactly like any Bearer-token API client.
  */
 export function renderAdminPage(): string {
   return `<!DOCTYPE html>
@@ -44,20 +45,54 @@ export function renderAdminPage(): string {
   .top-bar { display: flex; gap: 8px; align-items: center; }
   .top-bar span { font-size: 0.85em; color: #555; }
   #app { display: none; }
-  #login { max-width: 420px; margin: 80px auto; }
+  #login { max-width: 420px; margin: 60px auto; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid #ddd; }
+  .tab { padding: 8px 14px; cursor: pointer; font-size: 0.9em; font-weight: bold; color: #666; border-bottom: 2px solid transparent; }
+  .tab.active { color: #0b67d0; border-bottom-color: #0b67d0; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  details.api-key-fallback { margin-top: 18px; font-size: 0.9em; }
+  details.api-key-fallback summary { cursor: pointer; color: #666; }
+  details.api-key-fallback .row { margin-top: 10px; }
 </style>
 </head>
 <body>
 
 <div id="login" class="card">
   <h2>E-Ink Admin</h2>
-  <p class="hint">Paste the API key printed by <code>scripts/bootstrap-user.mjs</code> (or a rotated key).</p>
   <div id="login-message"></div>
-  <div class="row">
-    <label for="api-key-input">API Key</label>
-    <input type="password" id="api-key-input" placeholder="eink_...">
+
+  <div class="tabs">
+    <div class="tab active" id="tab-login" onclick="switchTab('login')">Log in</div>
+    <div class="tab" id="tab-signup" onclick="switchTab('signup')">Create account</div>
   </div>
-  <button id="login-btn">Log in</button>
+
+  <div class="tab-panel active" id="panel-login">
+    <p class="hint">Log in with the passkey you registered for your account.</p>
+    <div class="row">
+      <label for="login-email-input">Email</label>
+      <input type="text" id="login-email-input" placeholder="you@example.com">
+    </div>
+    <button id="passkey-login-btn">Log in with passkey</button>
+  </div>
+
+  <div class="tab-panel" id="panel-signup">
+    <p class="hint">No public signup form other than this — creating an account requires registering a passkey (Face ID, Touch ID, Windows Hello, or a security key).</p>
+    <div class="row">
+      <label for="signup-email-input">Email</label>
+      <input type="text" id="signup-email-input" placeholder="you@example.com">
+    </div>
+    <button id="passkey-signup-btn">Create account with passkey</button>
+  </div>
+
+  <details class="api-key-fallback">
+    <summary>Use an API key instead</summary>
+    <div class="row">
+      <label for="api-key-input">API Key</label>
+      <input type="password" id="api-key-input" placeholder="eink_...">
+    </div>
+    <button id="login-btn">Log in with API key</button>
+  </details>
 </div>
 
 <div id="app">
@@ -132,6 +167,69 @@ function showMessage(elId, text, kind) {
   const el = document.getElementById(elId);
   el.innerHTML = text ? '<div class="message ' + kind + '">' + escapeHtml(text) + "</div>" : "";
 }
+
+async function publicFetch(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));
+  return data;
+}
+
+function switchTab(name) {
+  showMessage("login-message", "", "");
+  for (const tab of ["login", "signup"]) {
+    document.getElementById("tab-" + tab).classList.toggle("active", tab === name);
+    document.getElementById("panel-" + tab).classList.toggle("active", tab === name);
+  }
+}
+window.switchTab = switchTab;
+
+function passkeysSupported() {
+  return !!(window.PublicKeyCredential && PublicKeyCredential.parseCreationOptionsFromJSON && PublicKeyCredential.parseRequestOptionsFromJSON);
+}
+
+document.getElementById("passkey-signup-btn").addEventListener("click", async () => {
+  const email = document.getElementById("signup-email-input").value.trim();
+  if (!email) return;
+  if (!passkeysSupported()) {
+    showMessage("login-message", "This browser doesn't support passkeys. Try an up-to-date Chrome, Safari, or Firefox.", "error");
+    return;
+  }
+  try {
+    const options = await publicFetch("/auth/register/options", { email });
+    const creationOptions = PublicKeyCredential.parseCreationOptionsFromJSON(options);
+    const credential = await navigator.credentials.create({ publicKey: creationOptions });
+    const result = await publicFetch("/auth/register/verify", { email, response: credential.toJSON() });
+    setApiKey(result.api_key);
+    alert("Account created! Your API key (also saved to this browser, shown once):\\n\\n" + result.api_key);
+    await tryLogin(true);
+  } catch (err) {
+    showMessage("login-message", "Failed to create account: " + err.message, "error");
+  }
+});
+
+document.getElementById("passkey-login-btn").addEventListener("click", async () => {
+  const email = document.getElementById("login-email-input").value.trim();
+  if (!email) return;
+  if (!passkeysSupported()) {
+    showMessage("login-message", "This browser doesn't support passkeys. Try an up-to-date Chrome, Safari, or Firefox, or use an API key below.", "error");
+    return;
+  }
+  try {
+    const options = await publicFetch("/auth/login/options", { email });
+    const requestOptions = PublicKeyCredential.parseRequestOptionsFromJSON(options);
+    const credential = await navigator.credentials.get({ publicKey: requestOptions });
+    const result = await publicFetch("/auth/login/verify", { email, response: credential.toJSON() });
+    setApiKey(result.api_key);
+    await tryLogin(true);
+  } catch (err) {
+    showMessage("login-message", "Failed to log in: " + err.message, "error");
+  }
+});
 
 async function tryLogin(showError) {
   const key = getApiKey();

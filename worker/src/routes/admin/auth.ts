@@ -4,9 +4,9 @@ import { requireAdmin } from "../../lib/admin-middleware";
 import { generateApiKey, hashApiKey } from "../../lib/auth-admin";
 
 export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
-  // Lets the admin UI verify a pasted API key and show which account is logged in.
+  // Lets the admin UI verify a pasted API key / minted session is still valid.
   app.get("/admin/me", requireAdmin, async (c) => {
-    return c.json({ id: c.var.user.id, email: c.var.user.email });
+    return c.json({ id: c.var.user.id });
   });
 
   app.post("/admin/keys/rotate", requireAdmin, async (c) => {

@@ -18,7 +18,6 @@ export function generateApiKey(): string {
 
 export interface AuthenticatedUser {
   id: string;
-  email: string;
 }
 
 /** Verifies `Authorization: Bearer <key>` against users.api_key_hash. Returns null if absent/invalid. */
@@ -30,9 +29,9 @@ export async function authenticateAdmin(env: Env, request: Request): Promise<Aut
   if (!key) return null;
 
   const keyHash = await hashApiKey(key);
-  const row = await env.DB.prepare("SELECT id, email FROM users WHERE api_key_hash = ?")
+  const row = await env.DB.prepare("SELECT id FROM users WHERE api_key_hash = ?")
     .bind(keyHash)
-    .first<{ id: string; email: string }>();
+    .first<{ id: string }>();
 
   return row ?? null;
 }

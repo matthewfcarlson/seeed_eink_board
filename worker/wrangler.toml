@@ -14,8 +14,35 @@ cpu_ms = 30000
 # Non-secret config. Secrets (none yet) go via `wrangler secret put`.
 ENVIRONMENT = "development"
 
+# database_id/id below are placeholders for local dev: `wrangler dev` (no --remote)
+# simulates D1/KV against local Miniflare storage keyed off these ids and never
+# contacts the Cloudflare API. Production needs its own real bindings — configured
+# separately in [env.production] once `wrangler d1 create` / `wrangler kv namespace
+# create` have been run against a logged-in account — do not reuse these ids there.
+[[d1_databases]]
+binding = "DB"
+database_name = "eink-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "src/db/migrations"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "eink-kv-local"
+
 [env.production]
 name = "eink-worker-prod"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "eink"
+database_id = "1a096c38-f384-4228-a3e4-d767e6efc9a8"
+
+# NOTE: dashboard currently has this binding named "KV_BINDING" — rename it to "KV"
+# in the Cloudflare dashboard (Workers > eink-worker-prod > Settings > Bindings) to
+# match `env.KV` used throughout the code, or env.KV will be undefined in prod.
+[[env.production.kv_namespaces]]
+binding = "KV"
+id = "239dca4bf22e40cd98e0d058b356d145"
 
 [observability]
 enabled = false

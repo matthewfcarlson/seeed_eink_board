@@ -8,11 +8,13 @@ import { registerAdminDeviceRoutes } from "./routes/admin/devices";
 import { registerAdminImageRoutes } from "./routes/admin/images";
 import { registerAdminScheduleRoutes } from "./routes/admin/schedule";
 import { registerAdminAuthRoutes } from "./routes/admin/auth";
+import { registerAuthPasskeyRoutes } from "./routes/auth-passkey";
 import { renderAdminPage } from "./admin-ui";
+import { renderLandingPage } from "./landing-ui";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/", (c) => c.text("E-Ink Image Server (Worker)"));
+app.get("/", (c) => c.html(renderLandingPage()));
 
 // Static shell for the admin single-page app — no secrets server-side, the API
 // key lives in the browser's localStorage and is sent per-request to /admin/*.
@@ -29,5 +31,8 @@ registerAdminDeviceRoutes(app);
 registerAdminImageRoutes(app);
 registerAdminScheduleRoutes(app);
 registerAdminAuthRoutes(app);
+
+// Public — passkey registration/login. The only way to create an account.
+registerAuthPasskeyRoutes(app);
 
 export default app;

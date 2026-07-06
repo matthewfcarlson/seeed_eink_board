@@ -4,7 +4,7 @@ import { authenticateAdmin } from "./auth-admin";
 
 declare module "hono" {
   interface ContextVariableMap {
-    user: { id: string; email: string };
+    user: { id: string };
   }
 }
 

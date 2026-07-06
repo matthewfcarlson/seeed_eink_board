@@ -10,7 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_ROOT = path.resolve(__dirname, "..", "..", "..");
 const WRANGLER_BIN = path.join(WORKER_ROOT, "node_modules", ".bin", "wrangler");
 
-/** Fixed key so tests don't need to parse bootstrap-user.mjs output — never used outside this harness. */
+/** Fixed key seeded directly into D1 below so tests don't need to drive a passkey ceremony — never used outside this harness. */
 export const TEST_API_KEY = "eink_contract_test_fixed_key_do_not_use_in_prod";
 
 export interface WorkerServerHandle {
