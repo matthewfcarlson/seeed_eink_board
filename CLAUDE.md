@@ -190,6 +190,44 @@ The firmware reads battery voltage once per boot (before WiFi to avoid ADC noise
 
 Typical LiPo voltage range: 3.0V (empty) to 4.2V (full). Readings above 4.2V indicate USB power.
 
+### OTA Firmware Updates
+
+Firmware updates are delivered over the same channel as images/config — the ESP32
+already wakes, connects to WiFi, and talks to the Worker every cycle, so OTA piggybacks
+on that instead of adding a separate update mechanism.
+
+**Flow:**
+1. Bump `FIRMWARE_VERSION` in `firmware/src/version.h`, commit, then `git tag vX.Y.Z`
+   (matching, with a leading `v`) and push the tag.
+2. `.github/workflows/release-firmware.yml` builds the firmware with PlatformIO and
+   attaches `firmware.bin` to a new GitHub release.
+3. The Cloudflare Worker catalogs new releases automatically (a `scheduled()` Cron
+   Trigger polls the GitHub releases API every 6h — see `wrangler.toml`'s `[triggers]`
+   and `worker/src/routes/admin/firmware.ts`), or an admin can click "Sync from GitHub"
+   in `/admin` for it immediately. Either way this only stores the binary (worker KV,
+   byte-exact — no gzip) and its SHA-256 in D1's `firmware_releases` table; it does
+   **not** roll anything out to devices by itself.
+4. An admin explicitly sets a firmware **target** version for a scope — a specific
+   device MAC, the shared `'default'` bucket, or `'global'` — in `/admin`'s Firmware
+   panel. This is the same three-tier fallback chain schedule overrides use (see
+   `worker/src/lib/firmware-target.ts`, mirroring `lib/schedule.ts`). No target ever
+   set means a device's firmware is never touched.
+5. On its next wake, `GET /device_config` includes `firmware_version` /
+   `firmware_sha256` when a target resolves for that device. If it differs from the
+   firmware's own compiled-in `FIRMWARE_VERSION`, the device downloads
+   `GET /firmware_bin?version=X`, verifies the streamed SHA-256 (via mbedtls, before
+   committing), flashes it with the ESP32 `Update` library, and reboots. A failed or
+   corrupt download aborts cleanly and leaves the running firmware untouched.
+
+**Safety model:** this board's stock Arduino/ESP-IDF build does not have automatic
+rollback-on-crash enabled, so a release that flashes clean but bootloops isn't
+self-healing. The mitigation is staged rollout, not automatic recovery: target one
+device's MAC first, confirm it's healthy, then promote to `'default'`/`'global'`.
+The board's default partition table (`default_8MB.csv`, already in place — no
+partition change or one-time USB reflash was needed for this feature) gives each of
+the two OTA app slots 3264KB, versus the ~950KB firmware.bin this project currently
+produces.
+
 ### Color Palette
 
 The Spectra 6 supports 6 colors with these hardware codes:

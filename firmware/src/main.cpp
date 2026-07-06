@@ -3,12 +3,15 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <Update.h>
+#include <mbedtls/sha256.h>
 #include <sys/time.h>
 #include <time.h>
 #include "config.h"
 #include "display.h"
 #include "config_manager.h"
 #include "config_server.h"
+#include "version.h"
 
 #ifndef IMAGE_INITIAL_RESPONSE_TIMEOUT_MS
 #if defined(IMAGE_HTTP_TIMEOUT_MS) && (IMAGE_HTTP_TIMEOUT_MS <= 65535)
@@ -38,6 +41,12 @@ RTC_DATA_ATTR int bootCount = 0;
 // Used to skip download if image hasn't changed
 RTC_DATA_ATTR char lastImageHash[17] = {0};  // 16 chars + null terminator
 char pendingImageHash[17] = {0};
+
+// Firmware target reported by /device_config this wake, if any (see
+// syncRemoteConfigAndTime() and version.h). Empty means "no target set" —
+// never do OTA in that case, not even to re-flash the same version.
+String firmwareTargetVersion = "";
+String firmwareTargetSha256 = "";
 
 // Battery voltage (read once per boot, sent to server with requests)
 float batteryVoltage = -1.0;
@@ -125,6 +134,128 @@ void addCommonHeaders(HTTPClient& http) {
     if (batteryVoltage > 0) {
         http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
     }
+}
+
+String bytesToHex(const uint8_t* bytes, size_t len) {
+    static const char* hexChars = "0123456789abcdef";
+    String result;
+    result.reserve(len * 2);
+    for (size_t i = 0; i < len; i++) {
+        result += hexChars[bytes[i] >> 4];
+        result += hexChars[bytes[i] & 0x0F];
+    }
+    return result;
+}
+
+/**
+ * Downloads /firmware_bin?version=<version>, verifying its SHA-256 against
+ * expectedSha256Hex while streaming — before Update.end() commits to booting it —
+ * then flashes it to the inactive OTA partition. Caller reboots on success.
+ *
+ * A corrupt/incomplete download or hash mismatch aborts the write and leaves the
+ * currently-running firmware untouched, so a bad transfer can't brick the device.
+ * It does NOT protect against a *logically* broken release (one that flashes clean
+ * but crashes or loops on boot) — this board's stock Arduino/ESP-IDF build doesn't
+ * have automatic rollback-on-crash enabled. The safety net for that case is staged
+ * rollout: target one device's MAC in /admin before promoting to 'default'/'global'.
+ */
+bool performFirmwareOTA(const String& version, const String& expectedSha256Hex) {
+    String url = getBaseURL() + "/firmware_bin?version=" + version;
+    Serial.printf("Firmware update available: %s -> %s\n", FIRMWARE_VERSION, version.c_str());
+    Serial.printf("Downloading from: %s\n", url.c_str());
+
+    HTTPClient http;
+    WiFiClientSecure secureClient;
+    beginRequest(http, secureClient, url);
+    http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
+    addCommonHeaders(http);
+
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        Serial.printf("Firmware download failed, HTTP code: %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    int contentLength = http.getSize();
+    if (contentLength <= 0) {
+        Serial.printf("Invalid firmware content length: %d\n", contentLength);
+        http.end();
+        return false;
+    }
+
+    if (!Update.begin(contentLength, U_FLASH)) {
+        Serial.printf("Update.begin() failed: %s\n", Update.errorString());
+        http.end();
+        return false;
+    }
+
+    mbedtls_sha256_context shaCtx;
+    mbedtls_sha256_init(&shaCtx);
+    mbedtls_sha256_starts(&shaCtx, 0);  // 0 = SHA-256 (not the SHA-224 variant)
+
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buf[2048];
+    size_t bytesRead = 0;
+    uint32_t startTime = millis();
+    uint32_t lastDataTime = startTime;
+    bool writeFailed = false;
+
+    while (bytesRead < (size_t)contentLength && http.connected()) {
+        size_t available = stream->available();
+        if (available > 0) {
+            size_t toRead = min(available, sizeof(buf));
+            size_t n = stream->readBytes(buf, toRead);
+            if (n > 0) {
+                mbedtls_sha256_update(&shaCtx, buf, n);
+                if (Update.write(buf, n) != n) {
+                    Serial.printf("Update.write() failed: %s\n", Update.errorString());
+                    writeFailed = true;
+                    break;
+                }
+                bytesRead += n;
+                lastDataTime = millis();
+
+                if ((bytesRead % 102400) == 0) {
+                    Serial.printf("Firmware downloaded: %d / %d bytes\n", bytesRead, contentLength);
+                }
+            }
+        }
+        yield();
+
+        if (millis() - lastDataTime > IMAGE_STALL_TIMEOUT_MS) {
+            Serial.printf("Firmware download stalled - no data for %u ms\n", IMAGE_STALL_TIMEOUT_MS);
+            break;
+        }
+    }
+    http.end();
+
+    if (writeFailed || bytesRead != (size_t)contentLength) {
+        Serial.printf("Incomplete/failed firmware download: %d / %d bytes\n", bytesRead, contentLength);
+        mbedtls_sha256_free(&shaCtx);
+        Update.abort();
+        return false;
+    }
+
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&shaCtx, digest);
+    mbedtls_sha256_free(&shaCtx);
+    String actualSha256Hex = bytesToHex(digest, sizeof(digest));
+
+    if (!actualSha256Hex.equalsIgnoreCase(expectedSha256Hex)) {
+        Serial.printf("Firmware SHA-256 mismatch! expected=%s actual=%s\n",
+                      expectedSha256Hex.c_str(), actualSha256Hex.c_str());
+        Update.abort();
+        return false;
+    }
+
+    if (!Update.end(true)) {
+        Serial.printf("Update.end() failed: %s\n", Update.errorString());
+        return false;
+    }
+
+    Serial.printf("Firmware update verified and flashed in %lu ms\n", millis() - startTime);
+    return true;
 }
 
 bool isClockValid(time_t now = time(nullptr)) {
@@ -332,6 +463,17 @@ bool syncRemoteConfigAndTime() {
 
     const char* configSource = doc["config_source"] | "none";
     Serial.printf("Remote config source: %s\n", configSource);
+
+    // Only set when an admin has explicitly targeted a firmware version somewhere
+    // in the fallback chain (device MAC -> 'default' -> 'global') — see
+    // lib/firmware-target.ts. Missing fields here mean "leave firmware alone."
+    firmwareTargetVersion = "";
+    firmwareTargetSha256 = "";
+    if (doc["firmware_version"].is<const char*>() && doc["firmware_sha256"].is<const char*>()) {
+        firmwareTargetVersion = doc["firmware_version"].as<String>();
+        firmwareTargetSha256 = doc["firmware_sha256"].as<String>();
+    }
+
     return true;
 }
 
@@ -627,6 +769,19 @@ void runNormalMode() {
 
     syncRemoteConfigAndTime();
     printClockStatus();
+
+    // Firmware OTA check happens regardless of quiet hours — it's rare and the
+    // device is already awake and connected. firmwareTargetVersion is only ever
+    // non-empty when an admin explicitly set a target (see syncRemoteConfigAndTime).
+    if (firmwareTargetVersion.length() > 0 && firmwareTargetVersion != FIRMWARE_VERSION) {
+        if (performFirmwareOTA(firmwareTargetVersion, firmwareTargetSha256)) {
+            Serial.println("Rebooting into new firmware...");
+            disconnectWiFi();
+            ESP.restart();
+        } else {
+            Serial.println("Firmware OTA failed - continuing with current firmware this cycle");
+        }
+    }
 
     if (isClockValid() &&
         !isWithinActiveWindow(time(nullptr),

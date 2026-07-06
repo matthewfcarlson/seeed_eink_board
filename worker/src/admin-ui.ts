@@ -39,7 +39,7 @@ export function renderAdminPage(): string {
   img.thumb { display: block; border-radius: 3px; border: 1px solid #ddd; object-fit: cover; }
   .thumb-wrap { position: relative; display: inline-block; }
   .thumb-popup {
-    display: none; position: absolute; z-index: 30; top: 0; left: 55px;
+    display: none; position: fixed; z-index: 30;
     background: white; border: 1px solid #ccc; border-radius: 6px; padding: 5px;
     box-shadow: 0 6px 20px rgba(0,0,0,0.3);
   }
@@ -135,6 +135,37 @@ export function renderAdminPage(): string {
 
   <h2>Image Buckets</h2>
   <div class="bucket-grid" id="buckets"></div>
+
+  <div class="card">
+    <h2>Firmware (OTA)</h2>
+    <p class="hint">Devices only ever update their firmware when a target version is set below — syncing a release from GitHub just makes it available to target.</p>
+    <table>
+      <thead><tr><th>Version</th><th>Tag</th><th>Size</th><th>SHA-256</th><th>Synced</th></tr></thead>
+      <tbody id="firmware-releases-table"></tbody>
+    </table>
+    <div class="inline-form" style="margin-top:14px;">
+      <button id="firmware-sync-btn">Sync from GitHub</button>
+      <span class="hint">Also runs automatically every 6 hours.</span>
+    </div>
+
+    <h3 style="margin-top:22px;">Targets</h3>
+    <p class="hint">Resolution order per device: exact MAC override &rarr; 'default' &rarr; 'global'. Clearing a target leaves that tier's devices on whatever they're already running.</p>
+    <table>
+      <thead><tr><th>Target</th><th>Version</th><th>Updated</th><th></th></tr></thead>
+      <tbody id="firmware-targets-table"></tbody>
+    </table>
+    <div class="inline-form" style="margin-top:14px;">
+      <div class="row">
+        <label>Target</label>
+        <select id="firmware-target-select"></select>
+      </div>
+      <div class="row">
+        <label>Version</label>
+        <select id="firmware-version-select"></select>
+      </div>
+      <button id="firmware-target-save-btn">Set Target</button>
+    </div>
+  </div>
 
   <div class="card">
     <h3>API Key</h3>
@@ -396,6 +427,38 @@ window.clearSchedule = clearSchedule;
 
 const fullImageUrlCache = {};
 
+// The popup is position:fixed, so top/left are viewport-relative and must be
+// computed on every hover (scroll position and which grid column the thumbnail
+// sits in both affect where it'd otherwise run off-screen). Sized against the
+// worst case (the img's own max-width/max-height are 45vw/70vh) rather than the
+// popup's actual rendered size, which isn't known until the image finishes
+// loading — this only ever leaves extra margin, never causes an overflow.
+function positionThumbPopup(wrapEl, popupEl) {
+  const margin = 10;
+  const maxW = window.innerWidth * 0.45 + 14;
+  const maxH = window.innerHeight * 0.70 + 14;
+  const rect = wrapEl.getBoundingClientRect();
+
+  let left = rect.right + 8;
+  if (left + maxW > window.innerWidth - margin) {
+    left = rect.left - maxW - 8;
+  }
+  left = Math.max(margin, Math.min(left, window.innerWidth - maxW - margin));
+
+  let top = Math.min(rect.top, window.innerHeight - maxH - margin);
+  top = Math.max(margin, top);
+
+  popupEl.style.left = left + "px";
+  popupEl.style.top = top + "px";
+}
+
+function onThumbHover(wrapEl, id) {
+  const popup = document.getElementById("full-" + id);
+  if (popup) positionThumbPopup(wrapEl, popup);
+  loadFullImage(id);
+}
+window.onThumbHover = onThumbHover;
+
 // Lazy-loaded on first hover (the raw endpoint re-checks ownership per request,
 // so there's no point prefetching every thumbnail's full image up front). Cached
 // by object URL per image id so repeat hovers in the same session are instant.
@@ -464,7 +527,7 @@ function bucketCardHtml(deviceKey, label, images, override) {
     ? images.map((img) =>
         "<tr>" +
         "<td>" + (img.thumbnail_data_url
-          ? '<div class="thumb-wrap" onmouseenter="loadFullImage(\\'' + img.id + '\\')">' +
+          ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \\'' + img.id + '\\')">' +
               '<img class="thumb" src="' + img.thumbnail_data_url + '" alt="" width="45" height="60">' +
               '<div class="thumb-popup" id="full-' + img.id + '"><p class="hint">Loading…</p></div>' +
             "</div>"
@@ -479,6 +542,12 @@ function bucketCardHtml(deviceKey, label, images, override) {
 
   const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
 
+  // The shared 'default' bucket only ever contributes images, not schedule
+  // config — there's no 'default' tier in the schedule fallback chain anymore.
+  const scheduleSection = deviceKey === "default"
+    ? ""
+    : '<h4 style="margin-top:18px;">Schedule override</h4>' + scheduleFormHtml(deviceKey, override);
+
   return (
     '<div class="card">' +
       "<h3>" + escapeHtml(label) + "</h3>" +
@@ -490,10 +559,84 @@ function bucketCardHtml(deviceKey, label, images, override) {
         '<div class="row"><label>Dither</label><select id="upload-dither-' + deviceKey + '">' + ditherOptions + "</select></div>" +
         '<button onclick="uploadImage(\\'' + deviceKey + '\\')">Upload</button>' +
       "</div>" +
-      '<h4 style="margin-top:18px;">Schedule override</h4>' +
-      scheduleFormHtml(deviceKey, override) +
+      scheduleSection +
     "</div>"
   );
+}
+
+document.getElementById("firmware-sync-btn").addEventListener("click", async () => {
+  try {
+    const result = await apiFetch("/admin/firmware/sync", { method: "POST" });
+    showMessage("app-message", result.isNew ? "Synced new firmware " + result.version : "Already up to date (" + result.version + ")", "success");
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to sync firmware: " + err.message, "error");
+  }
+});
+
+async function clearFirmwareTarget(target) {
+  try {
+    await apiFetch("/admin/firmware/target/" + encodeURIComponent(target), { method: "DELETE" });
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to clear firmware target for " + target + ": " + err.message, "error");
+  }
+}
+window.clearFirmwareTarget = clearFirmwareTarget;
+
+document.getElementById("firmware-target-save-btn").addEventListener("click", async () => {
+  const target = document.getElementById("firmware-target-select").value;
+  const version = document.getElementById("firmware-version-select").value;
+  if (!target || !version) return;
+  try {
+    await apiFetch("/admin/firmware/target/" + encodeURIComponent(target), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version }),
+    });
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to set firmware target: " + err.message, "error");
+  }
+});
+
+function renderFirmwareReleasesTable(releases) {
+  const tbody = document.getElementById("firmware-releases-table");
+  tbody.innerHTML = releases.length
+    ? releases.map((r) =>
+        "<tr>" +
+        "<td><code>" + escapeHtml(r.version) + "</code></td>" +
+        "<td>" + escapeHtml(r.tag) + "</td>" +
+        "<td>" + Math.round(r.size_bytes / 1024) + " KB</td>" +
+        "<td><code>" + escapeHtml(r.sha256.slice(0, 12)) + "&hellip;</code></td>" +
+        "<td>" + new Date(r.created_at * 1000).toLocaleString() + "</td>" +
+        "</tr>"
+      ).join("")
+    : '<tr><td colspan="5" class="hint">No releases synced yet.</td></tr>';
+}
+
+function renderFirmwareTargetsTable(targets) {
+  const tbody = document.getElementById("firmware-targets-table");
+  tbody.innerHTML = targets.length
+    ? targets.map((t) =>
+        "<tr>" +
+        "<td><code>" + escapeHtml(t.target) + "</code></td>" +
+        "<td><code>" + escapeHtml(t.version) + "</code></td>" +
+        "<td>" + new Date(t.updated_at * 1000).toLocaleString() + "</td>" +
+        '<td><button class="ghost" onclick="clearFirmwareTarget(\\'' + escapeHtml(t.target) + '\\')">Clear</button></td>' +
+        "</tr>"
+      ).join("")
+    : '<tr><td colspan="4" class="hint">No targets set — no device will OTA.</td></tr>';
+}
+
+function renderFirmwareTargetForm(targetOptions, releases) {
+  const targetSelect = document.getElementById("firmware-target-select");
+  targetSelect.innerHTML = targetOptions.map((o) => '<option value="' + o.key + '">' + escapeHtml(o.label) + "</option>").join("");
+
+  const versionSelect = document.getElementById("firmware-version-select");
+  versionSelect.innerHTML = releases.length
+    ? releases.map((r) => '<option value="' + r.version + '">' + r.version + "</option>").join("")
+    : '<option value="">(sync a release first)</option>';
 }
 
 function renderClaimBanner() {
@@ -523,7 +666,7 @@ async function renderApp() {
   renderDevicesTable(devices);
   document.getElementById("bucket-global").innerHTML = scheduleFormHtml("global", globalSchedule.override);
 
-  const buckets = [{ key: "default", label: "default (unregistered / fallback devices)" }].concat(
+  const buckets = [{ key: "default", label: "Default bucket (shared — devices merge these in unless opted out)" }].concat(
     devices.map((d) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }))
   );
 
@@ -533,11 +676,22 @@ async function renderApp() {
   await Promise.all(buckets.map(async (b) => {
     const [imagesResult, scheduleResult] = await Promise.all([
       apiFetch("/admin/images?device_key=" + encodeURIComponent(b.key)),
-      apiFetch("/admin/schedule/" + encodeURIComponent(b.key)),
+      b.key === "default" ? Promise.resolve({ override: null }) : apiFetch("/admin/schedule/" + encodeURIComponent(b.key)),
     ]);
     document.getElementById("bucket-" + b.key).innerHTML =
       bucketCardHtml(b.key, b.label, imagesResult.images, scheduleResult.override);
   }));
+
+  const [releasesResult, targetsResult] = await Promise.all([
+    apiFetch("/admin/firmware/releases"),
+    apiFetch("/admin/firmware/targets"),
+  ]);
+  renderFirmwareReleasesTable(releasesResult.releases);
+  renderFirmwareTargetsTable(targetsResult.targets);
+  const targetOptions = [{ key: "global", label: "global" }, { key: "default", label: "default" }].concat(
+    devices.map((d) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }))
+  );
+  renderFirmwareTargetForm(targetOptions, releasesResult.releases);
 }
 
 tryLogin(false);

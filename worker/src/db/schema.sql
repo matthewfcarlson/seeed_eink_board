@@ -50,9 +50,9 @@ CREATE TABLE images (
 );
 CREATE INDEX idx_images_device_key_filename ON images(device_key, filename);
 
--- Three-tier schedule override fallback: exact mac -> 'default' -> 'global'.
+-- Two-tier schedule override fallback: exact mac -> 'global'.
 CREATE TABLE schedule_overrides (
-  target                    TEXT PRIMARY KEY, -- mac | 'default' | 'global'
+  target                    TEXT PRIMARY KEY, -- mac | 'global'
   refresh_interval_minutes  INTEGER,
   active_start_hour         INTEGER,
   active_end_hour           INTEGER,

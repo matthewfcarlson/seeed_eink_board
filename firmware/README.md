@@ -357,6 +357,20 @@ firmware/
 | Blue | 0x05 |
 | Green | 0x06 |
 
+## OTA Firmware Updates
+
+Once a device is running and configured to point at the Cloudflare Worker, further
+firmware updates don't require USB at all. See CLAUDE.md's "OTA Firmware Updates"
+section for the full flow; the short version:
+
+1. Bump `FIRMWARE_VERSION` in `src/version.h`.
+2. `git tag vX.Y.Z && git push mine vX.Y.Z` (must match, with a leading `v`).
+3. GitHub Actions builds and attaches `firmware.bin` to a new release automatically.
+4. In the Worker's `/admin` page's Firmware panel, sync the release (or wait up to
+   6h for the automatic sync), then set a target version — start with a single
+   device's MAC before promoting to `'default'`/`'global'`, since a bad release
+   isn't automatically rolled back if it boots but misbehaves.
+
 ## Power Consumption
 
 - **Active (WiFi + display refresh)**: ~150-200mA

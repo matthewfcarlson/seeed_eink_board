@@ -1,5 +1,5 @@
 import type { Env, ScheduleConfig } from "../types";
-import { DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET } from "../types";
+import { GLOBAL_SCHEDULE_TARGET } from "../types";
 import { kvKeys } from "./kv-keys";
 
 const SCHEDULE_CACHE_TTL_SECONDS = 300;
@@ -56,19 +56,17 @@ export async function invalidateScheduleCache(env: Env, target: string): Promise
 }
 
 /**
- * Resolve schedule config using the exact same fallback chain as
- * image_server.py's get_device_schedule_config: exact device override ->
- * 'default' override -> 'global' override -> {} ("none"). First *existing*
- * override file wins outright — this is not a per-field merge.
+ * Resolve schedule config: exact device override -> 'global' override -> {}
+ * ("none"). First *existing* override wins outright — this is not a per-field
+ * merge. There is no longer a 'default'-bucket tier in this chain (see
+ * migrations/0003_include_default_images.sql plan notes) — the shared default
+ * bucket contributes images, not schedule config.
  */
 export async function resolveScheduleConfig(
   env: Env,
   deviceKey: string
 ): Promise<{ config: ScheduleConfig; source: string }> {
-  const chain =
-    deviceKey === DEFAULT_DEVICE_KEY
-      ? [DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET]
-      : [deviceKey, DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET];
+  const chain = [deviceKey, GLOBAL_SCHEDULE_TARGET];
 
   for (const target of chain) {
     const config = await getScheduleOverride(env, target);
