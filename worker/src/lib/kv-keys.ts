@@ -1,5 +1,10 @@
 export const kvKeys = {
-  device: (mac: string) => `device:${mac}`,
+  // v2: DeviceLookup gained a `secret` field (see lib/device-signature.ts). Bumped
+  // so pre-existing 24h-TTL cache entries in the old {deviceKey, userId} shape
+  // (no `secret`) are never misread as "registered with an implicit secret" —
+  // that caused resolveDeviceKey() to hand verifyDeviceSignature() an `undefined`
+  // secret and throw. Old v1 entries are simply orphaned and expire on their own.
+  device: (mac: string) => `device:v2:${mac}`,
   rotation: (deviceKey: string) => `rotation:${deviceKey}`,
   schedule: (target: string) => `schedule:${target}`,
   // Pending WebAuthn ceremonies, keyed by a random attempt id handed to the client
