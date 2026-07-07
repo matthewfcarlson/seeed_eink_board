@@ -1,6 +1,7 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
 -- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql,
--- 0004_device_secret.sql, 0005_device_nonce.sql, and 0006_running_firmware.sql
+-- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
+-- 0007_buckets.sql, and 0008_user_display_name.sql
 -- (wrangler d1 migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -8,7 +9,10 @@
 CREATE TABLE users (
   id            TEXT PRIMARY KEY,
   api_key_hash  TEXT NOT NULL,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  -- Human-settable name shown instead of "Account <id prefix>" (see migrations/0008) —
+  -- also how a user identifies themselves in a shared bucket's collaborator list.
+  display_name  TEXT
 );
 
 CREATE TABLE devices (
@@ -20,9 +24,6 @@ CREATE TABLE devices (
   last_seen_ip            TEXT,
   last_battery_voltage    REAL,
   last_battery_at         INTEGER,
-  -- Whether this device's rotation merges in the shared 'default' bucket's
-  -- images alongside its own. Defaults to on (see migrations/0003).
-  include_default_images  INTEGER NOT NULL DEFAULT 1,
   -- Per-device HMAC secret (hex), minted on-device and delivered out-of-band via
   -- the registration QR code. NULL means "not registered" for auth purposes even
   -- if a row exists — see migrations/0004 and lib/device-signature.ts.
@@ -33,6 +34,37 @@ CREATE TABLE devices (
   -- Version this device last reported running, via X-Firmware-Version on every
   -- request — distinct from firmware_targets, which is the desired version.
   running_firmware_version   TEXT
+);
+
+-- Image buckets: independently-owned, shareable entities a device subscribes to
+-- many-to-many (see migrations/0007). The one bucket with id 'default' and a
+-- NULL owner_id is the shared bucket every unclaimed device falls back to.
+CREATE TABLE buckets (
+  id         TEXT PRIMARY KEY,
+  owner_id   TEXT REFERENCES users(id),
+  label      TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE device_buckets (
+  device_mac TEXT NOT NULL REFERENCES devices(mac),
+  bucket_id  TEXT NOT NULL REFERENCES buckets(id),
+  PRIMARY KEY (device_mac, bucket_id)
+);
+
+-- Full read/write collaborators on a bucket, not the owner.
+CREATE TABLE bucket_shares (
+  bucket_id  TEXT NOT NULL REFERENCES buckets(id),
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (bucket_id, user_id)
+);
+
+-- One reusable-until-revoked invite link per bucket.
+CREATE TABLE bucket_invites (
+  bucket_id  TEXT PRIMARY KEY REFERENCES buckets(id),
+  token      TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL
 );
 
 -- Durable mirror of the live rotation cursor. KV is the hot path; this table is

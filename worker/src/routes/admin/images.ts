@@ -1,13 +1,8 @@
 import type { Hono } from "hono";
-import {
-  DEFAULT_DEVICE_KEY,
-  DITHER_ALGORITHMS,
-  PACKED_BYTES,
-  type DitherAlgorithm,
-  type Env,
-} from "../../types";
+import { DITHER_ALGORITHMS, PACKED_BYTES, type DitherAlgorithm, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { invalidateRotationCache, invalidateRotationCacheForDefaultConsumers } from "../../lib/rotation";
+import { assertBucketAccess } from "../../lib/bucket-access";
+import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
 import { decodeToLandscapeBuffer, isHeic, isSupportedImageType, sniffImageContentType } from "../../lib/decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../../lib/dither";
 import {
@@ -23,17 +18,6 @@ import { makeThumbnailJpeg } from "../../lib/thumbnail";
 const DEFAULT_BRIGHTNESS = 1.0;
 const DEFAULT_CONTRAST = 1.2;
 const DEFAULT_SATURATION = 1.2;
-
-/** Registered devices are owned per-user; the shared 'default' bucket (matching
- *  image_server.py's single shared images/default/ folder) is writable by any
- *  authenticated user — there's no per-user isolation for it today, same as Python. */
-async function assertDeviceKeyOwnership(env: Env, deviceKey: string, userId: string): Promise<boolean> {
-  if (deviceKey === DEFAULT_DEVICE_KEY) return true;
-  const row = await env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
-    .bind(deviceKey)
-    .first<{ user_id: string | null }>();
-  return row?.user_id === userId;
-}
 
 function isValidDitherAlgorithm(value: string): value is DitherAlgorithm {
   return (DITHER_ALGORITHMS as string[]).includes(value);
@@ -65,7 +49,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     if (!isValidDitherAlgorithm(ditherParam)) {
       return c.json({ error: `dither must be one of: ${DITHER_ALGORITHMS.join(", ")}` }, 400);
     }
-    if (!(await assertDeviceKeyOwnership(c.env, deviceKey, c.var.user.id))) {
+    if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
@@ -133,7 +117,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       .run();
 
     await invalidateRotationCache(c.env, deviceKey);
-    if (deviceKey === DEFAULT_DEVICE_KEY) await invalidateRotationCacheForDefaultConsumers(c.env);
+    await invalidateRotationCacheForBucketConsumers(c.env, deviceKey);
 
     return c.json(
       { id, device_key: deviceKey, filename, dither_algorithm: ditherParam, packed_hash: packedHash, packed_bytes: packed.byteLength },
@@ -144,7 +128,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
   app.get("/admin/images", requireAdmin, async (c) => {
     const deviceKey = c.req.query("device_key");
     if (!deviceKey) return c.json({ error: "device_key query param is required" }, 400);
-    if (!(await assertDeviceKeyOwnership(c.env, deviceKey, c.var.user.id))) {
+    if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
@@ -169,14 +153,14 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
 
     const deviceKey = await findImageDeviceKey(c.env, id);
     if (!deviceKey) return c.json({ error: "Not found" }, 404);
-    if (!(await assertDeviceKeyOwnership(c.env, deviceKey, c.var.user.id))) {
+    if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
     await c.env.DB.prepare("DELETE FROM images WHERE id = ?").bind(id).run();
     await deleteImageBlobs(c.env, deviceKey, id);
     await invalidateRotationCache(c.env, deviceKey);
-    if (deviceKey === DEFAULT_DEVICE_KEY) await invalidateRotationCacheForDefaultConsumers(c.env);
+    await invalidateRotationCacheForBucketConsumers(c.env, deviceKey);
 
     return c.json({ deleted: id });
   });
@@ -190,7 +174,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
 
     const deviceKey = await findImageDeviceKey(c.env, id);
     if (!deviceKey) return c.json({ error: "Not found" }, 404);
-    if (!(await assertDeviceKeyOwnership(c.env, deviceKey, c.var.user.id))) {
+    if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 

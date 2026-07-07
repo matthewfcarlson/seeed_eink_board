@@ -6,6 +6,7 @@ import { registerImagePackedRoute } from "./routes/image-packed";
 import { registerCurrentRoute } from "./routes/current";
 import { registerFirmwareBinRoute } from "./routes/firmware-bin";
 import { registerAdminDeviceRoutes } from "./routes/admin/devices";
+import { registerAdminBucketRoutes } from "./routes/admin/buckets";
 import { registerAdminImageRoutes } from "./routes/admin/images";
 import { registerAdminScheduleRoutes } from "./routes/admin/schedule";
 import { registerAdminAuthRoutes } from "./routes/admin/auth";
@@ -36,6 +37,7 @@ registerFirmwareBinRoute(app);
 
 // Admin-facing — require Authorization: Bearer <api_key>.
 registerAdminDeviceRoutes(app);
+registerAdminBucketRoutes(app);
 registerAdminImageRoutes(app);
 registerAdminScheduleRoutes(app);
 registerAdminAuthRoutes(app);

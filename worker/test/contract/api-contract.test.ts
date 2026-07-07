@@ -45,10 +45,14 @@ function signedHeaders(requestPath: string): Record<string, string> {
 let python: PythonServerHandle;
 let worker: WorkerServerHandle;
 
-async function uploadToWorker(deviceKey: string, filename: string): Promise<void> {
-  const bytes = fs.readFileSync(path.join(FIXTURES_IMAGES_DIR, deviceKey, filename));
+// `bucketId` is the worker-side bucket the bytes land in (an opaque id for a
+// freshly created bucket, or the literal 'default'); `fixtureDir` is just where
+// the source file lives on disk — the two are unrelated since bucket ids are no
+// longer the device's own mac (see migrations/0007_buckets.sql).
+async function uploadToWorker(bucketId: string, fixtureDir: string, filename: string): Promise<void> {
+  const bytes = fs.readFileSync(path.join(FIXTURES_IMAGES_DIR, fixtureDir, filename));
   const res = await fetch(
-    `${worker.baseUrl}/admin/images/upload?device_key=${deviceKey}&filename=${filename}`,
+    `${worker.baseUrl}/admin/images/upload?device_key=${bucketId}&filename=${filename}`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "image/jpeg" },
@@ -56,7 +60,7 @@ async function uploadToWorker(deviceKey: string, filename: string): Promise<void
     }
   );
   if (!res.ok) {
-    throw new Error(`Failed to seed ${deviceKey}/${filename} on worker: ${res.status} ${await res.text()}`);
+    throw new Error(`Failed to seed ${fixtureDir}/${filename} on worker: ${res.status} ${await res.text()}`);
   }
 }
 
@@ -76,15 +80,23 @@ beforeAll(async () => {
     body: JSON.stringify({ mac: DEVICE_MAC, label: "Contract test device", secret: DEVICE_SECRET }),
   });
 
-  // Python's rotation is fallback-only (device dir if present, else 'default' —
-  // never both). The Worker's include_default_images merge (migrations/0003)
-  // defaults to on, which would double-count this device's own images against
-  // the shared 'default' bucket seeded below — disable it to keep the two
-  // backends comparable for this parity suite.
-  await fetch(`${worker.baseUrl}/admin/devices/${DEVICE_MAC}`, {
+  // Buckets are independent, shareable entities a device explicitly subscribes
+  // to (migrations/0007_buckets.sql) — nothing is auto-subscribed for a newly
+  // registered device, unlike the old include_default_images-on-by-default
+  // column. Create this device's own bucket and subscribe it, leaving 'default'
+  // un-subscribed so Python's fallback-only rotation (device dir if present,
+  // else 'default', never both) stays directly comparable.
+  const createBucketRes = await fetch(`${worker.baseUrl}/admin/buckets`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "Contract test device bucket" }),
+  });
+  const { id: deviceBucketId } = (await createBucketRes.json()) as { id: string };
+
+  await fetch(`${worker.baseUrl}/admin/devices/${DEVICE_MAC}/buckets`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ include_default_images: false }),
+    body: JSON.stringify({ bucket_ids: [deviceBucketId] }),
   });
 
   await fetch(`${worker.baseUrl}/admin/schedule/${DEVICE_MAC}`, {
@@ -95,10 +107,10 @@ beforeAll(async () => {
 
   // Rotation order is alphabetical-by-filename on both backends, so uploading
   // under the same filenames keeps peek/advance sequencing directly comparable.
-  await uploadToWorker("default", "alpha.jpg");
-  await uploadToWorker("default", "beta.jpg");
-  await uploadToWorker(DEVICE_MAC, "one.jpg");
-  await uploadToWorker(DEVICE_MAC, "two.jpg");
+  await uploadToWorker("default", "default", "alpha.jpg");
+  await uploadToWorker("default", "default", "beta.jpg");
+  await uploadToWorker(deviceBucketId, DEVICE_MAC, "one.jpg");
+  await uploadToWorker(deviceBucketId, DEVICE_MAC, "two.jpg");
 }, 60000);
 
 afterAll(async () => {

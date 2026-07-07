@@ -44,6 +44,15 @@ public:
     // Fill entire display with a single color
     void fillColor(uint8_t color);
 
+    // Clear the buffer to a single color (alias for fillColor, reads better at call sites)
+    void clear(uint8_t color);
+
+    // Draw text using a built-in 5x7 bitmap font (space, '-', '.', '/', ':', 0-9, A-Z only;
+    // any other character is rendered blank). `scale` multiplies each font pixel into a
+    // scale x scale block. Does not wrap - use '\n' in text to move to the next line.
+    void drawString(uint16_t x, uint16_t y, const String& text, uint8_t color, uint8_t scale = 1);
+    void drawChar(uint16_t x, uint16_t y, char c, uint8_t color, uint8_t scale = 1);
+
     // Put display into deep sleep mode
     void sleep();
 
@@ -82,8 +91,9 @@ private:
     void slaveCmdData(uint8_t cmd, const uint8_t* data, size_t len);
     void sendCmdDataWithCS(uint8_t cmd, const uint8_t* data, size_t len);
 
-    // Get pixel value from buffer
+    // Get/set pixel value in buffer
     uint8_t getPixel(uint16_t x, uint16_t y);
+    void setPixel(uint16_t x, uint16_t y, uint8_t color);
 };
 
 // Color codes for the Spectra 6 display

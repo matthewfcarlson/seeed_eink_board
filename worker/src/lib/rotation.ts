@@ -23,14 +23,14 @@ async function loadImagesForKey(env: Env, deviceKey: string): Promise<ImageMeta[
   }));
 }
 
-/** Registered devices default to merging in the shared 'default' bucket's images
- *  (see migrations/0003_include_default_images.sql) — this can be toggled off per device. */
-async function shouldIncludeDefaultImages(env: Env, deviceKey: string): Promise<boolean> {
-  if (deviceKey === DEFAULT_DEVICE_KEY) return false;
-  const row = await env.DB.prepare("SELECT include_default_images FROM devices WHERE mac = ?")
+/** Bucket ids a device's rotation merges together — see migrations/0007_buckets.sql.
+ *  Unclaimed devices (deviceKey === 'default') just get the shared bucket itself. */
+async function getSubscribedBucketIds(env: Env, deviceKey: string): Promise<string[]> {
+  if (deviceKey === DEFAULT_DEVICE_KEY) return [DEFAULT_DEVICE_KEY];
+  const rows = await env.DB.prepare("SELECT bucket_id FROM device_buckets WHERE device_mac = ?")
     .bind(deviceKey)
-    .first<{ include_default_images: number }>();
-  return row?.include_default_images === 1;
+    .all<{ bucket_id: string }>();
+  return rows.results.map((row) => row.bucket_id);
 }
 
 /**
@@ -39,12 +39,9 @@ async function shouldIncludeDefaultImages(env: Env, deviceKey: string): Promise<
  * If KV is missing the key (cold start / eviction), we rebuild from D1 and re-seed KV.
  */
 async function loadSnapshotFromD1(env: Env, deviceKey: string): Promise<RotationSnapshot> {
-  const ownImages = await loadImagesForKey(env, deviceKey);
-  let images = ownImages;
-  if (await shouldIncludeDefaultImages(env, deviceKey)) {
-    const defaultImages = await loadImagesForKey(env, DEFAULT_DEVICE_KEY);
-    images = [...ownImages, ...defaultImages].sort((a, b) => a.filename.localeCompare(b.filename));
-  }
+  const bucketIds = await getSubscribedBucketIds(env, deviceKey);
+  const perBucketImages = await Promise.all(bucketIds.map((bucketId) => loadImagesForKey(env, bucketId)));
+  const images = perBucketImages.flat().sort((a, b) => a.filename.localeCompare(b.filename));
 
   const stateRow = await env.DB.prepare(
     `SELECT current_index, last_returned FROM rotation_state WHERE device_key = ?`
@@ -74,14 +71,14 @@ export async function invalidateRotationCache(env: Env, deviceKey: string): Prom
   await env.KV.delete(kvKeys.rotation(deviceKey));
 }
 
-/** Call in addition to invalidateRotationCache('default') after any upload/delete against
- *  the shared 'default' bucket — every device merging it in has its own cached snapshot
- *  that also needs busting, since it embeds default's images at cache-population time. */
-export async function invalidateRotationCacheForDefaultConsumers(env: Env): Promise<void> {
-  const rows = await env.DB.prepare("SELECT mac FROM devices WHERE include_default_images = 1").all<{
-    mac: string;
-  }>();
-  await Promise.all(rows.results.map((row) => invalidateRotationCache(env, row.mac)));
+/** Call in addition to invalidateRotationCache(bucketId) after any upload/delete against
+ *  a bucket — every device subscribed to it has its own cached snapshot that also needs
+ *  busting, since it embeds this bucket's images at cache-population time. */
+export async function invalidateRotationCacheForBucketConsumers(env: Env, bucketId: string): Promise<void> {
+  const rows = await env.DB.prepare("SELECT device_mac FROM device_buckets WHERE bucket_id = ?")
+    .bind(bucketId)
+    .all<{ device_mac: string }>();
+  await Promise.all(rows.results.map((row) => invalidateRotationCache(env, row.device_mac)));
 }
 
 /** The image that would be served next, without advancing. Never mutates state. */

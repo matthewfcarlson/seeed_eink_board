@@ -52,6 +52,13 @@ export function renderAdminPage(): string {
   .error { background: #fdecec; border: 1px solid #e2a4a4; }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75em; background: #eef1f4; }
   .bucket-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 40; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: white; border-radius: 8px; padding: 20px; max-width: 420px; width: 90%; max-height: 80vh; overflow: auto; }
+  .modal h3 { margin-top: 0; }
+  .bucket-checkbox-list label { display: flex; align-items: center; gap: 8px; font-weight: normal; margin-bottom: 6px; }
+  .collab-list { list-style: none; padding: 0; margin: 8px 0; }
+  .collab-list li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 0.9em; }
   .top-bar { display: flex; gap: 8px; align-items: center; }
   .top-bar span { font-size: 0.85em; color: #555; }
   #app { display: none; }
@@ -102,16 +109,19 @@ export function renderAdminPage(): string {
     E-Ink Admin
     <span class="top-bar">
       <span id="whoami"></span>
+      <button class="ghost" id="edit-name-btn" style="padding:2px 8px;">Edit name</button>
       <button class="ghost" id="logout-btn">Log out</button>
     </span>
   </h1>
   <div id="app-message"></div>
   <div id="claim-banner"></div>
+  <div id="join-bucket-banner"></div>
 
   <div class="card">
     <h2>Devices</h2>
+    <p class="hint">"Last image sent" is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
     <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Default images</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th>Label</th><th>Last image sent</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th></th></tr></thead>
       <tbody id="devices-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -133,8 +143,29 @@ export function renderAdminPage(): string {
     <div id="bucket-global"></div>
   </div>
 
-  <h2>Image Buckets</h2>
+  <div class="card">
+    <h2>Image Buckets</h2>
+    <p class="hint">Buckets are independent, shareable groups of images. Subscribe a device to any number of them via its "Manage" button above.</p>
+    <div class="inline-form">
+      <div class="row">
+        <label>New bucket label</label>
+        <input type="text" id="new-bucket-label" placeholder="Living room rotation">
+      </div>
+      <button id="create-bucket-btn">Create bucket</button>
+    </div>
+  </div>
   <div class="bucket-grid" id="buckets"></div>
+
+  <div class="modal-overlay" id="bucket-modal-overlay">
+    <div class="modal">
+      <h3>Manage buckets</h3>
+      <div id="bucket-modal-list"></div>
+      <div class="inline-form" style="margin-top:14px;">
+        <button id="bucket-modal-save-btn">Save</button>
+        <button class="ghost" id="bucket-modal-cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <div class="card">
     <h2>Firmware (OTA)</h2>
@@ -180,6 +211,10 @@ const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
 // Set by renderClaimBanner() from ?secret= when arriving via a device's QR scan;
 // consumed once by the Register click handler. See lib/registration-url.ts.
 let pendingClaimSecret = null;
+let currentUser = null;
+let devicesCache = [];
+let allBucketsCache = [];
+let bucketModalMac = null;
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -281,12 +316,17 @@ document.getElementById("passkey-login-btn").addEventListener("click", async () 
   }
 });
 
+function renderWhoami() {
+  document.getElementById("whoami").textContent =
+    (currentUser && currentUser.display_name) || "Account " + currentUser.id.slice(0, 8);
+}
+
 async function tryLogin(showError) {
   const key = getApiKey();
   if (!key) return false;
   try {
-    const me = await apiFetch("/admin/me");
-    document.getElementById("whoami").textContent = "Account " + me.id.slice(0, 8);
+    currentUser = await apiFetch("/admin/me");
+    renderWhoami();
     document.getElementById("login").style.display = "none";
     document.getElementById("app").style.display = "block";
     await renderApp();
@@ -297,6 +337,23 @@ async function tryLogin(showError) {
     return false;
   }
 }
+
+document.getElementById("edit-name-btn").addEventListener("click", async () => {
+  const next = prompt("Display name:", (currentUser && currentUser.display_name) || "");
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  try {
+    currentUser = await apiFetch("/admin/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: trimmed }),
+    });
+    renderWhoami();
+  } catch (err) {
+    showMessage("app-message", "Failed to update name: " + err.message, "error");
+  }
+});
 
 document.getElementById("login-btn").addEventListener("click", async () => {
   const key = document.getElementById("api-key-input").value.trim();
@@ -362,24 +419,61 @@ async function deleteDevice(mac) {
 }
 window.deleteDevice = deleteDevice;
 
-async function toggleIncludeDefaultImages(mac, checked) {
+function bucketLabelsFor(bucketIds) {
+  if (!bucketIds || bucketIds.length === 0) return '<span class="hint">none</span>';
+  return bucketIds
+    .map((id) => {
+      const b = allBucketsCache.find((x) => x.id === id);
+      return escapeHtml(b ? b.label : id);
+    })
+    .join(", ");
+}
+
+function openBucketModal(mac) {
+  bucketModalMac = mac;
+  const device = devicesCache.find((d) => d.mac === mac);
+  const currentBucketIds = device ? device.bucket_ids : [];
+  const list = document.getElementById("bucket-modal-list");
+  list.innerHTML = allBucketsCache.length
+    ? '<div class="bucket-checkbox-list">' +
+      allBucketsCache
+        .map(
+          (b) =>
+            '<label><input type="checkbox" value="' + escapeHtml(b.id) + '" ' +
+            (currentBucketIds.includes(b.id) ? "checked" : "") + "> " + escapeHtml(b.label) + "</label>"
+        )
+        .join("") +
+      "</div>"
+    : '<p class="hint">No buckets yet — create one in the Image Buckets section first.</p>';
+  document.getElementById("bucket-modal-overlay").classList.add("open");
+}
+window.openBucketModal = openBucketModal;
+
+document.getElementById("bucket-modal-cancel-btn").addEventListener("click", () => {
+  document.getElementById("bucket-modal-overlay").classList.remove("open");
+});
+
+document.getElementById("bucket-modal-save-btn").addEventListener("click", async () => {
+  const checked = Array.from(document.querySelectorAll("#bucket-modal-list input[type=checkbox]:checked")).map(
+    (el) => el.value
+  );
   try {
-    await apiFetch("/admin/devices/" + encodeURIComponent(mac), {
+    await apiFetch("/admin/devices/" + encodeURIComponent(bucketModalMac) + "/buckets", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ include_default_images: checked }),
+      body: JSON.stringify({ bucket_ids: checked }),
     });
+    document.getElementById("bucket-modal-overlay").classList.remove("open");
     await renderApp();
   } catch (err) {
-    showMessage("app-message", "Failed to update " + mac + ": " + err.message, "error");
+    showMessage("app-message", "Failed to save buckets: " + err.message, "error");
   }
-}
-window.toggleIncludeDefaultImages = toggleIncludeDefaultImages;
+});
 
 function renderDevicesTable(devices) {
   const tbody = document.getElementById("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="hint">No devices registered yet.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -392,14 +486,22 @@ function renderDevicesTable(devices) {
     const firmware = d.running_firmware_version
       ? escapeHtml(d.running_firmware_version)
       : '<span class="hint">unknown</span>';
+    const currentImage = !d.current_image
+      ? '<span class="hint">n/a</span>'
+      : d.current_image.thumbnail_data_url && d.current_image.id
+      ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \\'full-device-' + escapeHtml(d.mac) + '\\', \\'' + d.current_image.id + '\\')">' +
+          '<img class="thumb" src="' + d.current_image.thumbnail_data_url + '" alt="" width="34" height="45">' +
+          '<div class="thumb-popup" id="full-device-' + escapeHtml(d.mac) + '"><p class="hint">Loading…</p></div>' +
+        "</div>"
+      : escapeHtml(d.current_image.filename);
     return "<tr>" +
       "<td><code>" + escapeHtml(d.mac) + "</code></td>" +
       "<td>" + escapeHtml(d.label || "") + "</td>" +
+      "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
-      '<td><input type="checkbox" ' + (d.include_default_images ? "checked" : "") +
-        ' onchange="toggleIncludeDefaultImages(\\'' + escapeHtml(d.mac) + '\\', this.checked)"></td>' +
+      "<td>" + bucketLabelsFor(d.bucket_ids) + '<br><button class="ghost" onclick="openBucketModal(\\'' + escapeHtml(d.mac) + '\\')">Manage</button></td>' +
       '<td><button class="danger" onclick="deleteDevice(\\'' + escapeHtml(d.mac) + '\\')">Remove</button></td>' +
       "</tr>";
   }).join("");
@@ -480,32 +582,36 @@ function positionThumbPopup(wrapEl, popupEl) {
   popupEl.style.top = top + "px";
 }
 
-function onThumbHover(wrapEl, id) {
-  const popup = document.getElementById("full-" + id);
+// popupId is the DOM id of this thumb's popup div; imageId is what's fetched/cached.
+// Kept separate because the same image can appear in two different popups at once
+// (e.g. a device's "Current image" and its source bucket's row both show it) —
+// reusing "full-" + imageId as the DOM id for both would collide.
+function onThumbHover(wrapEl, popupId, imageId) {
+  const popup = document.getElementById(popupId);
   if (popup) positionThumbPopup(wrapEl, popup);
-  loadFullImage(id);
+  loadFullImage(popupId, imageId);
 }
 window.onThumbHover = onThumbHover;
 
 // Lazy-loaded on first hover (the raw endpoint re-checks ownership per request,
 // so there's no point prefetching every thumbnail's full image up front). Cached
 // by object URL per image id so repeat hovers in the same session are instant.
-async function loadFullImage(id) {
-  const popup = document.getElementById("full-" + id);
+async function loadFullImage(popupId, imageId) {
+  const popup = document.getElementById(popupId);
   if (!popup || popup.dataset.loaded) return;
-  if (fullImageUrlCache[id]) {
-    popup.innerHTML = '<img src="' + fullImageUrlCache[id] + '" alt="">';
+  if (fullImageUrlCache[imageId]) {
+    popup.innerHTML = '<img src="' + fullImageUrlCache[imageId] + '" alt="">';
     popup.dataset.loaded = "1";
     return;
   }
   try {
-    const res = await fetch("/admin/images/" + encodeURIComponent(id) + "/raw", {
+    const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
       headers: { Authorization: "Bearer " + getApiKey() },
     });
     if (!res.ok) throw new Error(res.status + " " + res.statusText);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
-    fullImageUrlCache[id] = url;
+    fullImageUrlCache[imageId] = url;
     popup.innerHTML = '<img src="' + url + '" alt="">';
     popup.dataset.loaded = "1";
   } catch (err) {
@@ -550,12 +656,13 @@ async function uploadImage(deviceKey) {
 }
 window.uploadImage = uploadImage;
 
-function bucketCardHtml(deviceKey, label, images, override) {
+function bucketCardHtml(bucket, images, override, showSchedule, collaborators) {
+  const deviceKey = bucket.id;
   const rows = images.length
     ? images.map((img) =>
         "<tr>" +
         "<td>" + (img.thumbnail_data_url
-          ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \\'' + img.id + '\\')">' +
+          ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \\'full-' + img.id + '\\', \\'' + img.id + '\\')">' +
               '<img class="thumb" src="' + img.thumbnail_data_url + '" alt="" width="45" height="60">' +
               '<div class="thumb-popup" id="full-' + img.id + '"><p class="hint">Loading…</p></div>' +
             "</div>"
@@ -570,15 +677,38 @@ function bucketCardHtml(deviceKey, label, images, override) {
 
   const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
 
-  // The shared 'default' bucket only ever contributes images, not schedule
-  // config — there's no 'default' tier in the schedule fallback chain anymore.
-  const scheduleSection = deviceKey === "default"
-    ? ""
-    : '<h4 style="margin-top:18px;">Schedule override</h4>' + scheduleFormHtml(deviceKey, override);
+  // Schedule is a per-device concept (target = mac), not per-bucket — only shown
+  // when this bucket's id happens to be a device's own mac (the pre-existing,
+  // backfilled 1:1 bucket every device already had before buckets were shareable).
+  const scheduleSection = showSchedule
+    ? '<h4 style="margin-top:18px;">Schedule override</h4>' + scheduleFormHtml(deviceKey, override)
+    : "";
+
+  const isOwnedShareable = bucket.is_owner && bucket.id !== "default";
+  const collabList = collaborators.length
+    ? '<ul class="collab-list">' +
+      collaborators
+        .map(
+          (u) =>
+            "<li>" + escapeHtml(u.display_name || "Account " + u.id.slice(0, 8)) +
+            ' <button class="ghost" onclick="removeBucketCollaborator(\\'' + escapeHtml(bucket.id) + '\\', \\'' + escapeHtml(u.id) + '\\')">Remove</button></li>'
+        )
+        .join("") +
+      "</ul>"
+    : '<p class="hint">No collaborators yet.</p>';
+
+  const ownerSection = isOwnedShareable
+    ? '<h4 style="margin-top:18px;">Sharing</h4>' +
+      collabList +
+      '<div class="inline-form" style="margin-top:8px;">' +
+        '<button class="ghost" onclick="createBucketInvite(\\'' + escapeHtml(bucket.id) + '\\')">Get invite link</button>' +
+        '<button class="danger" onclick="deleteBucket(\\'' + escapeHtml(bucket.id) + '\\')">Delete bucket</button>' +
+      "</div>"
+    : "";
 
   return (
     '<div class="card">' +
-      "<h3>" + escapeHtml(label) + "</h3>" +
+      "<h3>" + escapeHtml(bucket.label) + "</h3>" +
       "<table><thead><tr><th></th><th>Filename</th><th>Dither</th><th>Uploaded</th><th></th></tr></thead>" +
       "<tbody>" + rows + "</tbody></table>" +
       '<div class="inline-form" style="margin-top:12px;">' +
@@ -588,9 +718,67 @@ function bucketCardHtml(deviceKey, label, images, override) {
         '<button onclick="uploadImage(\\'' + deviceKey + '\\')">Upload</button>' +
       "</div>" +
       scheduleSection +
+      ownerSection +
     "</div>"
   );
 }
+
+async function createBucketInvite(bucketId) {
+  try {
+    const result = await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId) + "/invite", { method: "POST" });
+    try {
+      await navigator.clipboard.writeText(result.url);
+      alert("Invite link copied to clipboard:\\n\\n" + result.url);
+    } catch {
+      alert("Invite link (copy manually):\\n\\n" + result.url);
+    }
+  } catch (err) {
+    showMessage("app-message", "Failed to create invite link: " + err.message, "error");
+  }
+}
+window.createBucketInvite = createBucketInvite;
+
+async function deleteBucket(bucketId) {
+  if (!confirm("Delete this bucket and all its images? This cannot be undone.")) return;
+  try {
+    await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId), { method: "DELETE" });
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to delete bucket: " + err.message, "error");
+  }
+}
+window.deleteBucket = deleteBucket;
+
+async function removeBucketCollaborator(bucketId, userId) {
+  if (!confirm("Remove this collaborator's access to the bucket?")) return;
+  try {
+    await apiFetch(
+      "/admin/buckets/" + encodeURIComponent(bucketId) + "/collaborators/" + encodeURIComponent(userId),
+      { method: "DELETE" }
+    );
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to remove collaborator: " + err.message, "error");
+  }
+}
+window.removeBucketCollaborator = removeBucketCollaborator;
+
+document.getElementById("create-bucket-btn").addEventListener("click", async () => {
+  const input = document.getElementById("new-bucket-label");
+  const label = input.value.trim();
+  if (!label) return;
+  try {
+    await apiFetch("/admin/buckets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    input.value = "";
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to create bucket: " + err.message, "error");
+  }
+});
 
 document.getElementById("firmware-sync-btn").addEventListener("click", async () => {
   try {
@@ -689,31 +877,75 @@ function renderClaimBanner() {
   document.getElementById("new-device-label").focus();
 }
 
+function renderJoinBucketBanner() {
+  const params = new URLSearchParams(location.search);
+  const token = params.get("join_bucket");
+  const el = document.getElementById("join-bucket-banner");
+  if (!token) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML =
+    '<div class="message success">' +
+    "You've been invited to a shared image bucket. " +
+    '<button onclick="joinBucket(\\'' + escapeHtml(token) + '\\')">Join</button>' +
+    "</div>";
+}
+
+async function joinBucket(token) {
+  try {
+    const result = await apiFetch("/admin/buckets/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    history.replaceState(null, "", location.pathname);
+    document.getElementById("join-bucket-banner").innerHTML = "";
+    showMessage("app-message", 'Joined bucket "' + result.label + '".', "success");
+    await renderApp();
+  } catch (err) {
+    showMessage("app-message", "Failed to join bucket: " + err.message, "error");
+  }
+}
+window.joinBucket = joinBucket;
+
 async function renderApp() {
   showMessage("app-message", "", "");
   renderClaimBanner();
-  const [devicesResult, globalSchedule] = await Promise.all([
+  renderJoinBucketBanner();
+  const [devicesResult, globalSchedule, bucketsResult] = await Promise.all([
     apiFetch("/admin/devices"),
     apiFetch("/admin/schedule/global"),
+    apiFetch("/admin/buckets"),
   ]);
   const devices = devicesResult.devices;
+  devicesCache = devices;
+  allBucketsCache = bucketsResult.buckets;
   renderDevicesTable(devices);
   document.getElementById("bucket-global").innerHTML = scheduleFormHtml("global", globalSchedule.override);
 
-  const buckets = [{ key: "default", label: "Default bucket (shared — devices merge these in unless opted out)" }].concat(
-    devices.map((d) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }))
-  );
-
   const bucketsEl = document.getElementById("buckets");
-  bucketsEl.innerHTML = buckets.map((b) => '<div id="bucket-' + b.key + '"></div>').join("");
+  bucketsEl.innerHTML = allBucketsCache.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
 
-  await Promise.all(buckets.map(async (b) => {
-    const [imagesResult, scheduleResult] = await Promise.all([
-      apiFetch("/admin/images?device_key=" + encodeURIComponent(b.key)),
-      b.key === "default" ? Promise.resolve({ override: null }) : apiFetch("/admin/schedule/" + encodeURIComponent(b.key)),
+  await Promise.all(allBucketsCache.map(async (b) => {
+    // Schedule only applies to buckets that are a device's own backfilled bucket
+    // (id === some device's mac) — see bucketCardHtml's comment.
+    const showSchedule = b.id !== "default" && devices.some((d) => d.mac === b.id);
+    const isOwnedShareable = b.is_owner && b.id !== "default";
+    const [imagesResult, scheduleResult, collaboratorsResult] = await Promise.all([
+      apiFetch("/admin/images?device_key=" + encodeURIComponent(b.id)),
+      showSchedule ? apiFetch("/admin/schedule/" + encodeURIComponent(b.id)) : Promise.resolve({ override: null }),
+      isOwnedShareable
+        ? apiFetch("/admin/buckets/" + encodeURIComponent(b.id) + "/collaborators")
+        : Promise.resolve({ collaborators: [] }),
     ]);
-    document.getElementById("bucket-" + b.key).innerHTML =
-      bucketCardHtml(b.key, b.label, imagesResult.images, scheduleResult.override);
+    document.getElementById("bucket-" + b.id).innerHTML = bucketCardHtml(
+      b,
+      imagesResult.images,
+      scheduleResult.override,
+      showSchedule,
+      collaboratorsResult.collaborators
+    );
   }));
 
   const [releasesResult, targetsResult] = await Promise.all([
