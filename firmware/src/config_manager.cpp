@@ -15,6 +15,7 @@ static const char* KEY_ACTIVE_END = "active_end";
 static const char* KEY_TZ_OFFSET = "tz_offset";
 static const char* KEY_DEVICE_SECRET = "dev_secret";
 static const char* KEY_DEVICE_REGISTERED = "dev_reg";
+static const char* KEY_REQUEST_NONCE = "req_nonce";
 
 ConfigManager::ConfigManager()
     : wifiSsid_(""),
@@ -28,7 +29,8 @@ ConfigManager::ConfigManager()
       activeEndHour_(DEFAULT_ACTIVE_END_HOUR),
       timezoneOffsetMinutes_(DEFAULT_TIMEZONE_OFFSET_MINUTES),
       deviceSecret_(""),
-      deviceRegistered_(false) {
+      deviceRegistered_(false),
+      requestNonce_(0) {
 }
 
 void ConfigManager::begin() {
@@ -53,6 +55,7 @@ void ConfigManager::loadFromNVS() {
     timezoneOffsetMinutes_ = prefs_.getShort(KEY_TZ_OFFSET, DEFAULT_TIMEZONE_OFFSET_MINUTES);
     deviceSecret_ = prefs_.getString(KEY_DEVICE_SECRET, "");
     deviceRegistered_ = prefs_.getBool(KEY_DEVICE_REGISTERED, false);
+    requestNonce_ = prefs_.getUInt(KEY_REQUEST_NONCE, 0);
 
     prefs_.end();
 }
@@ -290,6 +293,14 @@ void ConfigManager::setDeviceRegistered(bool registered) {
     prefs_.putBool(KEY_DEVICE_REGISTERED, registered);
     prefs_.end();
     Serial.printf("ConfigManager: Device registered = %s\n", registered ? "true" : "false");
+}
+
+uint32_t ConfigManager::nextNonce() {
+    requestNonce_++;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putUInt(KEY_REQUEST_NONCE, requestNonce_);
+    prefs_.end();
+    return requestNonce_;
 }
 
 void ConfigManager::printConfig() {

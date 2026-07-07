@@ -29,7 +29,7 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
           mac,
           lookup.secret!,
           "/hash",
-          c.req.header("X-Device-Timestamp"),
+          c.req.header("X-Device-Nonce"),
           c.req.header("X-Device-Signature")
         );
         if (!valid) return c.text("Invalid or missing device signature", 401);

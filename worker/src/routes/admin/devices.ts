@@ -32,9 +32,16 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     const now = Math.floor(Date.now() / 1000);
     // COALESCE keeps any existing secret when the caller doesn't send one (e.g. an
     // admin editing just the label) rather than accidentally locking the device out.
+    // last_nonce resets to 0 whenever a *new* secret is bound: a fresh secret means
+    // the device's NVS was wiped (see ConfigManager::ensureDeviceSecret()), so its
+    // nonce counter restarted at 0 too — carrying over the old high-water mark here
+    // would reject every request from the "new" device as a replay forever.
     await c.env.DB.prepare(
-      `INSERT INTO devices (mac, user_id, label, secret, created_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(mac) DO UPDATE SET label = excluded.label, secret = COALESCE(excluded.secret, devices.secret)`
+      `INSERT INTO devices (mac, user_id, label, secret, last_nonce, created_at) VALUES (?, ?, ?, ?, 0, ?)
+       ON CONFLICT(mac) DO UPDATE SET
+         label = excluded.label,
+         secret = COALESCE(excluded.secret, devices.secret),
+         last_nonce = CASE WHEN excluded.secret IS NOT NULL THEN 0 ELSE devices.last_nonce END`
     )
       .bind(mac, user.id, body.label ?? null, body.secret ?? null, now)
       .run();

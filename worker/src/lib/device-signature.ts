@@ -36,46 +36,46 @@ async function hmacHex(secretHex: string, message: string): Promise<string> {
 }
 
 /**
- * Verifies a device's HMAC-signed request and enforces a monotonic timestamp to
+ * Verifies a device's HMAC-signed request and enforces a monotonic nonce to
  * block replay — see plan §device auth. `path` disambiguates endpoints so a
  * captured /hash signature can't be replayed against /image_packed.
  *
- * The timestamp check is deliberately "never goes backwards" rather than "within
- * N seconds of wall-clock now": the ESP32's clock isn't NTP-synced, only
- * monotonic (RTC keeps ticking across deep sleep), so a freshness window would
- * either reject legitimate devices with drifted clocks or have to be so wide it
- * stops blocking anything.
+ * The nonce is an opaque counter the firmware persists in NVS (see
+ * ConfigManager::nextNonce()), NOT a timestamp. An earlier version used
+ * time(nullptr) and required it to "never go backwards," but the ESP32's RTC
+ * only survives deep sleep, not a real power loss — a device that ever
+ * browned out would send a "time" behind what the server already had on
+ * file and get permanently rejected. A flash-backed counter has no such
+ * failure mode: it only ever goes up, power loss or not.
  *
- * On success this also advances last_signature_timestamp in D1 so the same
- * signature can never be replayed again once time moves forward — caller should
- * NOT await this if it isn't already on the response's critical path, though in
- * practice this is cheap enough to just await directly.
+ * On success this also advances last_nonce in D1 so the same signature can
+ * never be replayed again once the counter moves forward — caller should
+ * NOT await this if it isn't already on the response's critical path, though
+ * in practice this is cheap enough to just await directly.
  */
 export async function verifyDeviceSignature(
   env: Env,
   mac: string,
   secret: string,
   path: string,
-  timestampHeader: string | undefined,
+  nonceHeader: string | undefined,
   signatureHeader: string | undefined
 ): Promise<boolean> {
-  if (!timestampHeader || !signatureHeader) return false;
+  if (!nonceHeader || !signatureHeader) return false;
 
-  const timestamp = Number.parseInt(timestampHeader, 10);
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
+  const nonce = Number.parseInt(nonceHeader, 10);
+  if (!Number.isFinite(nonce) || nonce <= 0) return false;
 
-  const expected = await hmacHex(secret, `${mac}|${path}|${timestamp}`);
+  const expected = await hmacHex(secret, `${mac}|${path}|${nonce}`);
   if (!timingSafeEqual(expected, signatureHeader.toLowerCase())) return false;
 
-  const row = await env.DB.prepare("SELECT last_signature_timestamp FROM devices WHERE mac = ?")
+  const row = await env.DB.prepare("SELECT last_nonce FROM devices WHERE mac = ?")
     .bind(mac)
-    .first<{ last_signature_timestamp: number }>();
-  if (row && timestamp < row.last_signature_timestamp) return false;
+    .first<{ last_nonce: number }>();
+  if (row && nonce < row.last_nonce) return false;
 
-  await env.DB.prepare(
-    "UPDATE devices SET last_signature_timestamp = ? WHERE mac = ? AND last_signature_timestamp <= ?"
-  )
-    .bind(timestamp, mac, timestamp)
+  await env.DB.prepare("UPDATE devices SET last_nonce = ? WHERE mac = ? AND last_nonce <= ?")
+    .bind(nonce, mac, nonce)
     .run();
 
   return true;

@@ -22,17 +22,22 @@ const DEVICE_SECRET = "aabbccddeeff00112233445566778899";
 const PYTHON_PORT = 8899;
 const WORKER_PORT = 8898;
 
-/** Builds the X-Device-Timestamp/X-Device-Signature headers lib/device-signature.ts
+// Mirrors the firmware's NVS-persisted counter (ConfigManager::nextNonce()), not
+// a timestamp — a monotonically increasing integer is all lib/device-signature.ts
+// requires, and a real counter avoids any ambiguity from clock-based nonces.
+let testNonceCounter = 0;
+
+/** Builds the X-Device-Nonce/X-Device-Signature headers lib/device-signature.ts
  *  requires for a registered device's requests, alongside X-Device-MAC. */
 function signedHeaders(requestPath: string): Record<string, string> {
-  const timestamp = Date.now();
+  const nonce = ++testNonceCounter;
   const signature = crypto
     .createHmac("sha256", Buffer.from(DEVICE_SECRET, "hex"))
-    .update(`${DEVICE_MAC}|${requestPath}|${timestamp}`)
+    .update(`${DEVICE_MAC}|${requestPath}|${nonce}`)
     .digest("hex");
   return {
     "X-Device-MAC": DEVICE_MAC,
-    "X-Device-Timestamp": String(timestamp),
+    "X-Device-Nonce": String(nonce),
     "X-Device-Signature": signature,
   };
 }

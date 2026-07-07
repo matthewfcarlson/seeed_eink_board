@@ -93,6 +93,15 @@ public:
     String getDeviceSecret();
     void ensureDeviceSecret();
 
+    // Anti-replay nonce for signed requests: an NVS-persisted counter, NOT the
+    // wall clock. time(nullptr) was tried first and doesn't survive a real power
+    // loss (only deep sleep keeps the RTC running), so a device that ever
+    // browns out sends a "time" far below what the server already has on file
+    // and gets stuck 401ing forever. A flash-backed counter only ever goes up.
+    // Each call both advances and returns the new value — never re-read the
+    // same nonce twice.
+    uint32_t nextNonce();
+
     // Whether the server has confirmed (via device_config's device_id field)
     // that this device is claimed. While false, requests include the raw secret
     // (X-Device-Secret) so the registration QR can be built; once true, the
@@ -114,6 +123,7 @@ private:
     int16_t timezoneOffsetMinutes_;
     String deviceSecret_;
     bool deviceRegistered_;
+    uint32_t requestNonce_;
 
     void loadFromNVS();
     void saveToNVS();

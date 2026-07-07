@@ -33,7 +33,7 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
           mac,
           lookup.secret!,
           "/image_packed",
-          c.req.header("X-Device-Timestamp"),
+          c.req.header("X-Device-Nonce"),
           c.req.header("X-Device-Signature")
         );
         if (!valid) return c.text("Invalid or missing device signature", 401);

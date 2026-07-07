@@ -174,27 +174,43 @@ String computeDeviceSignature(const String& secretHex, const String& message) {
  * another. X-Device-Secret is only sent pre-registration, to bootstrap the
  * registration QR (see qr-registration.ts) — after the server confirms this
  * device is claimed (device_config's device_id field), it's never sent again.
+ *
+ * X-Device-Nonce is an NVS-persisted counter, NOT a timestamp — time(nullptr)
+ * was tried first and doesn't survive a real power loss (deep sleep keeps the
+ * RTC running, a brownout/reset doesn't), so a device that ever loses power
+ * would send a "time" behind what the server already had on file and get
+ * stuck 401ing forever. See ConfigManager::nextNonce().
  */
 void addCommonHeaders(HTTPClient& http, const String& path) {
     String macAddress = getMACAddressClean();
     http.addHeader("X-Device-MAC", macAddress);
-    Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
 
     if (batteryVoltage > 0) {
         http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
     }
 
     String secret = configManager.getDeviceSecret();
-    char timestampBuf[24];
-    snprintf(timestampBuf, sizeof(timestampBuf), "%lld", static_cast<long long>(time(nullptr)));
-    String timestamp(timestampBuf);
-    String message = macAddress + "|" + path + "|" + timestamp;
-    http.addHeader("X-Device-Timestamp", timestamp);
-    http.addHeader("X-Device-Signature", computeDeviceSignature(secret, message));
+    String nonce = String(configManager.nextNonce());
+    String message = macAddress + "|" + path + "|" + nonce;
+    String signature = computeDeviceSignature(secret, message);
+    http.addHeader("X-Device-Nonce", nonce);
+    http.addHeader("X-Device-Signature", signature);
 
-    if (!configManager.getDeviceRegistered()) {
+    bool sendingSecret = !configManager.getDeviceRegistered();
+    if (sendingSecret) {
         http.addHeader("X-Device-Secret", secret);
     }
+
+    // Logged so a request can be replayed by hand with curl, e.g.:
+    //   curl -H "X-Device-MAC: <mac>" -H "X-Device-Nonce: <nonce>" \
+    //        -H "X-Device-Signature: <signature>" <url>
+    // Note X-Device-Nonce is single-use — the server rejects any nonce that
+    // isn't strictly greater than the last one it accepted for this mac, so a
+    // logged request can only be replayed once, immediately, before the real
+    // device's next wake advances the counter past it.
+    Serial.printf("Request headers -> X-Device-MAC: %s, X-Device-Nonce: %s, X-Device-Signature: %s%s\n",
+                  macAddress.c_str(), nonce.c_str(), signature.c_str(),
+                  sendingSecret ? (", X-Device-Secret: " + secret).c_str() : "");
 }
 
 /**
