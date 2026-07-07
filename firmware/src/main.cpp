@@ -916,7 +916,7 @@ void runNormalMode() {
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);  // Give serial time to connect
+    delay(2000);  // Give the USB serial port time to enumerate/attach before we start logging
 
     Serial.println("\n========================================");
     Serial.println("Seeed EE02 E-Ink Display Firmware");

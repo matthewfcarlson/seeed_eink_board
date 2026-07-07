@@ -47,9 +47,17 @@ export async function getPackedImage(
   deviceKey: string,
   imageId: string
 ): Promise<ArrayBuffer | null> {
-  const compressed = await env.KV.get(imageStoreKeys.packed(deviceKey, imageId), "arrayBuffer");
-  if (!compressed) return null;
-  return gunzip(compressed);
+  const stored = await env.KV.get(imageStoreKeys.packed(deviceKey, imageId), "arrayBuffer");
+  if (!stored) return null;
+
+  // Images uploaded before gzip compression was added here are still plain
+  // bytes in KV — gunzip-ing them unconditionally throws (DecompressionStream
+  // rejects non-gzip input), which surfaces as a bare 500 on /image_packed.
+  // Detect via the gzip magic number instead of assuming every stored blob is
+  // compressed, so pre-existing rotations don't break.
+  const bytes = new Uint8Array(stored);
+  const isGzipped = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  return isGzipped ? gunzip(stored) : stored;
 }
 
 export async function putRawImage(
