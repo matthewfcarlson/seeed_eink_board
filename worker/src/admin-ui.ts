@@ -111,7 +111,7 @@ export function renderAdminPage(): string {
   <div class="card">
     <h2>Devices</h2>
     <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Last seen</th><th>Battery</th><th>Default images</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th>Label</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Default images</th><th></th></tr></thead>
       <tbody id="devices-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -379,7 +379,7 @@ window.toggleIncludeDefaultImages = toggleIncludeDefaultImages;
 function renderDevicesTable(devices) {
   const tbody = document.getElementById("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="hint">No devices registered yet.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -389,9 +389,13 @@ function renderDevicesTable(devices) {
     const lastSeen = d.last_seen_at
       ? new Date(d.last_seen_at * 1000).toLocaleString() + (d.last_seen_ip ? " (" + escapeHtml(d.last_seen_ip) + ")" : "")
       : '<span class="hint">never</span>';
+    const firmware = d.running_firmware_version
+      ? escapeHtml(d.running_firmware_version)
+      : '<span class="hint">unknown</span>';
     return "<tr>" +
       "<td><code>" + escapeHtml(d.mac) + "</code></td>" +
       "<td>" + escapeHtml(d.label || "") + "</td>" +
+      "<td>" + firmware + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
       '<td><input type="checkbox" ' + (d.include_default_images ? "checked" : "") +

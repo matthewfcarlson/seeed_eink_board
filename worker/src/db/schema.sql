@@ -1,7 +1,7 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
 -- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql,
--- 0004_device_secret.sql, and 0005_device_nonce.sql (wrangler d1 migrations
--- tracks applied state per-database).
+-- 0004_device_secret.sql, 0005_device_nonce.sql, and 0006_running_firmware.sql
+-- (wrangler d1 migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -29,7 +29,10 @@ CREATE TABLE devices (
   secret       TEXT,
   -- Opaque monotonic anti-replay counter, NVS-persisted on the device (not a
   -- timestamp — see migrations/0005). Reset to 0 whenever `secret` changes.
-  last_nonce   INTEGER NOT NULL DEFAULT 0
+  last_nonce   INTEGER NOT NULL DEFAULT 0,
+  -- Version this device last reported running, via X-Firmware-Version on every
+  -- request — distinct from firmware_targets, which is the desired version.
+  running_firmware_version   TEXT
 );
 
 -- Durable mirror of the live rotation cursor. KV is the hot path; this table is

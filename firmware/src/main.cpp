@@ -189,6 +189,8 @@ void addCommonHeaders(HTTPClient& http, const String& path) {
         http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
     }
 
+    http.addHeader("X-Firmware-Version", FIRMWARE_VERSION);
+
     String secret = configManager.getDeviceSecret();
     String nonce = String(configManager.nextNonce());
     String message = macAddress + "|" + path + "|" + nonce;
@@ -920,6 +922,7 @@ void setup() {
 
     Serial.println("\n========================================");
     Serial.println("Seeed EE02 E-Ink Display Firmware");
+    Serial.printf("Version: %s\n", FIRMWARE_VERSION);
     Serial.println("========================================");
 
     bootCount++;

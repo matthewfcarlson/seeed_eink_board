@@ -21,6 +21,7 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
     const macHeader = c.req.header("X-Device-MAC");
     const batteryHeader = c.req.header("X-Battery-Voltage");
     const battery = batteryHeader ? Number.parseFloat(batteryHeader) : NaN;
+    const reportedFirmwareVersion = c.req.header("X-Firmware-Version") ?? null;
     const ip = c.req.header("CF-Connecting-IP") ?? null;
 
     let deviceKey: string = DEFAULT_DEVICE_KEY;
@@ -44,7 +45,9 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
       // Fire-and-forget: last-seen/battery tracking must never delay the response.
       // No-ops for unregistered MACs (no devices row to update) — matches Python's
       // in-memory tracking being effectively per-known-device only in practice.
-      c.executionCtx.waitUntil(recordDeviceSeen(c.env, mac, ip, Number.isNaN(battery) ? null : battery));
+      c.executionCtx.waitUntil(
+        recordDeviceSeen(c.env, mac, ip, Number.isNaN(battery) ? null : battery, reportedFirmwareVersion)
+      );
     }
 
     const { config, source } = await resolveScheduleConfig(c.env, deviceKey);
