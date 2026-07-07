@@ -185,6 +185,19 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// Single-cell LiPo range this board's battery circuit is calibrated for (see
+// CLAUDE.md's Battery Monitoring section). Percent is derived at render time
+// from the voltage already stored — not sent by the firmware separately, so
+// there's one source of truth to keep in sync.
+const BATTERY_VOLTAGE_FULL = 4.1;
+const BATTERY_VOLTAGE_EMPTY = 3.2;
+function batteryPercent(voltage) {
+  const percent = Math.round(
+    ((voltage - BATTERY_VOLTAGE_EMPTY) / (BATTERY_VOLTAGE_FULL - BATTERY_VOLTAGE_EMPTY)) * 100
+  );
+  return Math.max(0, Math.min(100, percent));
+}
+
 function getApiKey() { return localStorage.getItem(KEY_STORAGE); }
 function setApiKey(key) { localStorage.setItem(KEY_STORAGE, key); }
 function clearApiKey() { localStorage.removeItem(KEY_STORAGE); }
@@ -371,7 +384,7 @@ function renderDevicesTable(devices) {
   }
   tbody.innerHTML = devices.map((d) => {
     const battery = d.last_battery_voltage != null
-      ? d.last_battery_voltage.toFixed(2) + "V"
+      ? d.last_battery_voltage.toFixed(2) + "V (" + batteryPercent(d.last_battery_voltage) + "%)"
       : '<span class="hint">n/a</span>';
     const lastSeen = d.last_seen_at
       ? new Date(d.last_seen_at * 1000).toLocaleString() + (d.last_seen_ip ? " (" + escapeHtml(d.last_seen_ip) + ")" : "")
