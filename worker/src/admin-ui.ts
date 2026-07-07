@@ -51,7 +51,7 @@ export function renderAdminPage(): string {
   .success { background: #e7f6ea; border: 1px solid #9bd0a7; }
   .error { background: #fdecec; border: 1px solid #e2a4a4; }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75em; background: #eef1f4; }
-  .bucket-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .bucket-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 40; align-items: center; justify-content: center; }
   .modal-overlay.open { display: flex; }
   .modal { background: white; border-radius: 8px; padding: 20px; max-width: 420px; width: 90%; max-height: 80vh; overflow: auto; }
