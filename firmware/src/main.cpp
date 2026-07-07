@@ -572,6 +572,20 @@ void printWakeupReason() {
     }
 }
 
+/**
+ * True only for a genuine deep-sleep timer/pin wakeup — false for a cold boot
+ * (power-on, reset button, fresh flash). Used to let quiet hours only skip the
+ * fetch on a *scheduled* wake, since a cold boot means the display might not be
+ * showing anything meaningful yet and is worth populating once regardless of
+ * the active window; the next real deep-sleep wake goes back to respecting it.
+ */
+bool wasDeepSleepWakeup() {
+    esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
+    return wakeupReason == ESP_SLEEP_WAKEUP_TIMER ||
+           wakeupReason == ESP_SLEEP_WAKEUP_EXT0 ||
+           wakeupReason == ESP_SLEEP_WAKEUP_EXT1;
+}
+
 bool checkConfigButton() {
     // Configure button pin with internal pull-up
     pinMode(PIN_BUTTON_1, INPUT_PULLUP);
@@ -861,7 +875,8 @@ void runNormalMode() {
         }
     }
 
-    if (isClockValid() &&
+    if (wasDeepSleepWakeup() &&
+        isClockValid() &&
         !isWithinActiveWindow(time(nullptr),
                               configManager.getActiveStartHour(),
                               configManager.getActiveEndHour(),
