@@ -1,14 +1,18 @@
 /**
- * Self-contained Web Bluetooth pairing page for provisioning an EE02 board —
- * replaces the old AP-mode/STA-mode HTTP captive portal (config_server.h/.cpp,
- * removed from the firmware). No build step, vanilla JS. Pairs directly with the
- * device's BLE GATT service (see firmware/src/ble_provisioning.h for the schema)
- * over the browser's Web Bluetooth API — no need to join a temporary WiFi network
- * first, and no secrets pass through this worker (the browser talks to the board
- * directly over BLE).
+ * Web Bluetooth pairing page shell for provisioning an EE02 board — replaces
+ * the old AP-mode/STA-mode HTTP captive portal (config_server.h/.cpp, removed
+ * from the firmware). Pairs directly with the device's BLE GATT service (see
+ * firmware/src/ble_provisioning.h for the schema) over the browser's Web
+ * Bluetooth API — no need to join a temporary WiFi network first, and no
+ * secrets pass through this worker (the browser talks to the board directly
+ * over BLE).
  *
  * Requires Chrome/Edge (desktop or Android) — Web Bluetooth isn't supported in
  * Safari/iOS, a limitation of the browser API itself, not this page.
+ *
+ * The client-side logic lives in src/client/provision.ts, compiled by
+ * scripts/build-client.mjs to public/static/provision.js and served as a
+ * static asset (see [assets] in wrangler.toml) — not embedded here as a string.
  */
 export function renderProvisionPage(): string {
   return `<!DOCTYPE html>
@@ -116,170 +120,7 @@ export function renderProvisionPage(): string {
   </div>
 </div>
 
-<script>
-const SERVICE_UUID = "00dc0948-cda5-4429-b7f3-5ea67f1b1347";
-const CHAR_INFO_UUID = "7a209705-d097-43bb-a724-a41d29504486";
-const CHAR_CONFIG_UUID = "514a006a-319b-4e01-ba80-aa38bf8e5b1f";
-const CHAR_COMMAND_UUID = "1bc65320-3316-4de8-8a2c-89c89fa792ff";
-const CHAR_SCAN_RESULTS_UUID = "97c497fa-7e94-4fe6-bad2-68ffd9d34d5e";
-
-let gattServer = null;
-let infoChar = null;
-let configWriteChar = null;
-let commandChar = null;
-let scanResultsChar = null;
-
-function showMessage(text, kind) {
-  const el = document.getElementById("top-message");
-  el.innerHTML = text ? '<div class="message ' + kind + '">' + escapeHtml(text) + "</div>" : "";
-}
-
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-function textFromValue(dataView) {
-  return new TextDecoder().decode(dataView);
-}
-
-function applyInfo(info) {
-  document.getElementById("device-info").innerHTML =
-    "MAC: <code>" + escapeHtml(info.device_mac) + "</code> &middot; " +
-    "Firmware: <code>" + escapeHtml(info.firmware_version) + "</code> &middot; " +
-    "State: <code>" + escapeHtml(info.state) + "</code>";
-
-  document.getElementById("wifi-ssid").value = info.wifi_ssid || "";
-  document.getElementById("host").value = info.host || "";
-  document.getElementById("port").value = info.port || "";
-  document.getElementById("use_https").checked = !!info.use_https;
-  document.getElementById("endpoint").value = info.endpoint || "";
-  document.getElementById("sleep_minutes").value = info.sleep_minutes || "";
-  document.getElementById("active_start_hour").value = info.active_start_hour ?? "";
-  document.getElementById("active_end_hour").value = info.active_end_hour ?? "";
-  document.getElementById("timezone_offset_minutes").value = info.timezone_offset_minutes ?? "";
-
-  if (info.state === "saved_rebooting") {
-    showMessage("Saved! The device is rebooting and will connect to your WiFi shortly.", "success");
-  }
-}
-
-function applyScanResults(networks) {
-  const select = document.getElementById("wifi-ssid-select");
-  select.innerHTML = '<option value="">(scan or type below)</option>' +
-    networks
-      .slice()
-      .sort((a, b) => b.r - a.r)
-      .map((n) => '<option value="' + escapeHtml(n.s) + '">' + escapeHtml(n.s) + (n.o ? " (open)" : "") + "</option>")
-      .join("");
-}
-
-document.getElementById("wifi-ssid-select").addEventListener("change", (e) => {
-  if (e.target.value) document.getElementById("wifi-ssid").value = e.target.value;
-});
-
-async function connect() {
-  try {
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [SERVICE_UUID] }],
-    });
-    device.addEventListener("gattserverdisconnected", onDisconnected);
-
-    showMessage("Connecting...", "info");
-    gattServer = await device.gatt.connect();
-    const service = await gattServer.getPrimaryService(SERVICE_UUID);
-
-    infoChar = await service.getCharacteristic(CHAR_INFO_UUID);
-    configWriteChar = await service.getCharacteristic(CHAR_CONFIG_UUID);
-    commandChar = await service.getCharacteristic(CHAR_COMMAND_UUID);
-    scanResultsChar = await service.getCharacteristic(CHAR_SCAN_RESULTS_UUID);
-
-    await infoChar.startNotifications();
-    infoChar.addEventListener("characteristicvaluechanged", (e) => {
-      applyInfo(JSON.parse(textFromValue(e.target.value)));
-    });
-
-    await scanResultsChar.startNotifications();
-    // Deliberately re-read rather than trust the notification's own payload: a
-    // single notification can't span multiple BLE packets, so if it's cut short
-    // by a smaller-than-expected negotiated MTU the delivered value would be
-    // truncated. A read supports the GATT "long read" procedure (multiple
-    // request/response round trips), so it reliably retrieves the full value.
-    scanResultsChar.addEventListener("characteristicvaluechanged", async () => {
-      try {
-        const value = await scanResultsChar.readValue();
-        applyScanResults(JSON.parse(textFromValue(value)));
-      } catch (err) {
-        showMessage("Failed to read scan results: " + err.message, "error");
-      }
-    });
-
-    const initialInfo = JSON.parse(textFromValue(await infoChar.readValue()));
-    applyInfo(initialInfo);
-
-    document.getElementById("connect-card").style.display = "none";
-    document.getElementById("form").style.display = "block";
-    showMessage("Connected.", "success");
-  } catch (err) {
-    showMessage("Failed to connect: " + err.message, "error");
-  }
-}
-
-function onDisconnected() {
-  showMessage("Disconnected. If you just saved, the device is rebooting and connecting to your WiFi.", "info");
-  document.getElementById("connect-card").style.display = "block";
-  document.getElementById("form").style.display = "none";
-  gattServer = null;
-}
-
-document.getElementById("connect-btn").addEventListener("click", connect);
-
-document.getElementById("disconnect-btn").addEventListener("click", () => {
-  if (gattServer && gattServer.connected) gattServer.disconnect();
-});
-
-document.getElementById("scan-btn").addEventListener("click", async () => {
-  try {
-    await commandChar.writeValueWithResponse(new TextEncoder().encode("scan"));
-    showMessage("Scanning for networks...", "info");
-  } catch (err) {
-    showMessage("Failed to start scan: " + err.message, "error");
-  }
-});
-
-document.getElementById("save-btn").addEventListener("click", async () => {
-  const config = {
-    wifi_ssid: document.getElementById("wifi-ssid").value.trim(),
-    host: document.getElementById("host").value.trim(),
-    port: Number(document.getElementById("port").value),
-    use_https: document.getElementById("use_https").checked,
-    endpoint: document.getElementById("endpoint").value.trim(),
-    sleep_minutes: Number(document.getElementById("sleep_minutes").value),
-    active_start_hour: Number(document.getElementById("active_start_hour").value),
-    active_end_hour: Number(document.getElementById("active_end_hour").value),
-    timezone_offset_minutes: Number(document.getElementById("timezone_offset_minutes").value),
-  };
-  const password = document.getElementById("wifi-password").value;
-  if (password.length > 0) config.wifi_password = password;
-
-  if (!config.wifi_ssid) {
-    showMessage("WiFi network name is required.", "error");
-    return;
-  }
-
-  try {
-    await configWriteChar.writeValueWithResponse(new TextEncoder().encode(JSON.stringify(config)));
-    await commandChar.writeValueWithResponse(new TextEncoder().encode("save"));
-    showMessage("Saving and rebooting the device...", "info");
-  } catch (err) {
-    showMessage("Failed to save: " + err.message, "error");
-  }
-});
-
-if (!navigator.bluetooth) {
-  document.getElementById("unsupported").style.display = "block";
-  document.getElementById("connect-btn").disabled = true;
-}
-</script>
+<script src="/static/provision.js"></script>
 </body>
 </html>`;
 }

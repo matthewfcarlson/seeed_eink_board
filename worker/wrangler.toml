@@ -3,6 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Compiled client-side JS (see scripts/build-client.mjs, run via the "build:client"
+# npm script — predev/predeploy hooks in package.json keep this directory up to
+# date) — served as static files, bypassing the Worker entirely. admin-ui.ts and
+# provision-ui.ts reference these by path (e.g. <script src="/static/admin.js">)
+# instead of embedding client JS as hand-escaped strings in the Worker's own source.
+[assets]
+directory = "./public"
+
 # Image ingestion (decode/resize/dither) runs in-Worker on /admin/images/upload and is
 # CPU-heavy (hand-rolled Floyd-Steinberg/Atkinson dithering over ~1.9M pixels). The
 # default free-tier CPU limit (10ms) is nowhere near enough — this requires a paid

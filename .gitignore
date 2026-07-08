@@ -31,6 +31,10 @@ worker/node_modules/
 worker/.wrangler/
 worker/.dev.vars
 
+# Compiled client-side JS (see worker/scripts/build-client.mjs)
+worker/public/static/*.js
+worker/public/static/*.js.map
+
 # IDE/editor files
 .vscode/
 .idea/
