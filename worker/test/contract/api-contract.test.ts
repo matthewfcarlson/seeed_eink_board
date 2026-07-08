@@ -46,9 +46,9 @@ let python: PythonServerHandle;
 let worker: WorkerServerHandle;
 
 // `bucketId` is the worker-side bucket the bytes land in (an opaque id for a
-// freshly created bucket, or the literal 'default'); `fixtureDir` is just where
-// the source file lives on disk — the two are unrelated since bucket ids are no
-// longer the device's own mac (see migrations/0007_buckets.sql).
+// freshly created bucket); `fixtureDir` is just where the source file lives on
+// disk — the two are unrelated since bucket ids are no longer the device's own
+// mac (see migrations/0007_buckets.sql).
 async function uploadToWorker(bucketId: string, fixtureDir: string, filename: string): Promise<void> {
   const bytes = fs.readFileSync(path.join(FIXTURES_IMAGES_DIR, fixtureDir, filename));
   const res = await fetch(
@@ -83,15 +83,26 @@ beforeAll(async () => {
   // Buckets are independent, shareable entities a device explicitly subscribes
   // to (migrations/0007_buckets.sql) — nothing is auto-subscribed for a newly
   // registered device, unlike the old include_default_images-on-by-default
-  // column. Create this device's own bucket and subscribe it, leaving 'default'
-  // un-subscribed so Python's fallback-only rotation (device dir if present,
-  // else 'default', never both) stays directly comparable.
+  // column. Create this device's own bucket and subscribe it, leaving the
+  // 'default'-named bucket below un-subscribed so Python's fallback-only
+  // rotation (device dir if present, else images/default/, never both) stays
+  // directly comparable. There's no more globally-shared 'default' bucket id on
+  // the Worker side (migrations/0009_bucket_ownership.sql) — this is just an
+  // ordinary bucket the test's own admin user owns, matching Python's
+  // images/default/ fixture dir by content, not by id.
   const createBucketRes = await fetch(`${worker.baseUrl}/admin/buckets`, {
     method: "POST",
     headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({ label: "Contract test device bucket" }),
   });
   const { id: deviceBucketId } = (await createBucketRes.json()) as { id: string };
+
+  const createDefaultBucketRes = await fetch(`${worker.baseUrl}/admin/buckets`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "Contract test default-equivalent bucket" }),
+  });
+  const { id: defaultBucketId } = (await createDefaultBucketRes.json()) as { id: string };
 
   await fetch(`${worker.baseUrl}/admin/devices/${DEVICE_MAC}/buckets`, {
     method: "PATCH",
@@ -107,8 +118,8 @@ beforeAll(async () => {
 
   // Rotation order is alphabetical-by-filename on both backends, so uploading
   // under the same filenames keeps peek/advance sequencing directly comparable.
-  await uploadToWorker("default", "default", "alpha.jpg");
-  await uploadToWorker("default", "default", "beta.jpg");
+  await uploadToWorker(defaultBucketId, "default", "alpha.jpg");
+  await uploadToWorker(defaultBucketId, "default", "beta.jpg");
   await uploadToWorker(deviceBucketId, DEVICE_MAC, "one.jpg");
   await uploadToWorker(deviceBucketId, DEVICE_MAC, "two.jpg");
 }, 60000);
@@ -205,7 +216,9 @@ describe("GET /current", () => {
   it("reports the same total image count and device identity on both backends", async () => {
     const [pyRes, workerRes] = await Promise.all([
       fetch(`${python.baseUrl}/current?device=${DEVICE_MAC}`),
-      fetch(`${worker.baseUrl}/current?device=${DEVICE_MAC}`),
+      fetch(`${worker.baseUrl}/current?device=${DEVICE_MAC}`, {
+        headers: { Authorization: `Bearer ${worker.apiKey}` },
+      }),
     ]);
     expect(pyRes.status).toBe(200);
     expect(workerRes.status).toBe(200);
@@ -219,5 +232,31 @@ describe("GET /current", () => {
     // equivalence, not byte-identical shape (see plan §Test harness).
     expect(pyBody.rotation.total_images).toBe(2);
     expect(workerBody.total_images).toBe(2);
+  });
+
+  // Worker-only: the Python reference server (image_server.py) is a single-tenant
+  // local tool with no concept of users, so this endpoint has no auth there.
+  // The Worker is multi-tenant — see privacy review, 2026-07-07 — so it must
+  // require a login and never hand back another user's device status.
+  it("requires auth and never leaks another user's devices (worker only)", async () => {
+    const noAuthRes = await fetch(`${worker.baseUrl}/current`);
+    expect(noAuthRes.status).toBe(401);
+
+    const noAuthWithDeviceRes = await fetch(`${worker.baseUrl}/current?device=${DEVICE_MAC}`);
+    expect(noAuthWithDeviceRes.status).toBe(401);
+  });
+});
+
+describe("Bucket content requires device identification (worker only)", () => {
+  // Regression coverage for the privacy fix in migrations/0009_bucket_ownership.sql:
+  // omitting X-Device-MAC entirely used to silently serve the shared 'default'
+  // bucket's real images with zero authentication.
+  it("/image_packed and /hash reject requests with no X-Device-MAC header", async () => {
+    const [packedRes, hashRes] = await Promise.all([
+      fetch(`${worker.baseUrl}/image_packed`),
+      fetch(`${worker.baseUrl}/hash`),
+    ]);
+    expect(packedRes.status).toBe(400);
+    expect(hashRes.status).toBe(400);
   });
 });

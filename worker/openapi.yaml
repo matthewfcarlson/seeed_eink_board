@@ -1,0 +1,786 @@
+openapi: 3.0.3
+info:
+  title: E-Ink Board Worker API
+  version: "1.0"
+  description: |
+    API for the Cloudflare Worker backing the EE02 e-ink display boards.
+
+    Two very different kinds of clients call this API:
+
+    - **Admin clients** (you, from a browser, curl, Postman, etc.) — everything
+      under `/admin/*` plus `GET /current`. Authenticate with
+      `Authorization: Bearer <api_key>`. Get a key by completing passkey
+      registration (`/auth/register/*`) or by copying it from the admin UI at
+      `/admin` ("Rotate API Key").
+    - **Devices** (the ESP32 firmware) — `/device_config`, `/hash`,
+      `/image_packed`, `/firmware_bin`. These use a different, HMAC-based
+      per-request signature (`X-Device-MAC` / `X-Device-Nonce` /
+      `X-Device-Signature`), not the Bearer key. Documented here for
+      completeness but you won't normally call these by hand.
+
+    Import this file into Postman/Insomnia/Swagger UI, set the `bearerAuth`
+    security value to your API key, and every `/admin/*` request (including
+    `GET /current`) is one click away.
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: localhost:8787
+        description: Your deployed worker's hostname (or a local `wrangler dev` host:port).
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Your account's API key, minted by /auth/register/verify,
+        /auth/login/verify, or POST /admin/keys/rotate.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    Bucket:
+      type: object
+      properties:
+        id:
+          type: string
+        owner_id:
+          type: string
+          nullable: true
+        label:
+          type: string
+        created_at:
+          type: integer
+        is_owner:
+          type: boolean
+    Image:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        dither_algorithm:
+          type: string
+          enum: [floyd_steinberg, atkinson, ordered, none]
+        packed_hash:
+          type: string
+        packed_bytes:
+          type: integer
+        raw_bytes:
+          type: integer
+        created_at:
+          type: integer
+        thumbnail_data_url:
+          type: string
+          nullable: true
+    Device:
+      type: object
+      properties:
+        mac:
+          type: string
+        label:
+          type: string
+          nullable: true
+        created_at:
+          type: integer
+        last_seen_at:
+          type: integer
+          nullable: true
+        last_seen_ip:
+          type: string
+          nullable: true
+        last_battery_voltage:
+          type: number
+          nullable: true
+        last_battery_at:
+          type: integer
+          nullable: true
+        running_firmware_version:
+          type: string
+          nullable: true
+        bucket_ids:
+          type: array
+          items:
+            type: string
+        current_image:
+          type: object
+          nullable: true
+          properties:
+            id:
+              type: string
+              nullable: true
+            filename:
+              type: string
+            thumbnail_data_url:
+              type: string
+              nullable: true
+    ScheduleConfig:
+      type: object
+      properties:
+        refresh_interval_minutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+        active_start_hour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        active_end_hour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        timezone_offset_minutes:
+          type: integer
+          minimum: -720
+          maximum: 840
+    DeviceStatus:
+      type: object
+      properties:
+        device_id:
+          type: string
+        current_image:
+          type: string
+          nullable: true
+        pending_image:
+          type: string
+          nullable: true
+        total_images:
+          type: integer
+        schedule_config:
+          $ref: '#/components/schemas/ScheduleConfig'
+        config_source:
+          type: string
+        battery:
+          type: object
+          nullable: true
+          properties:
+            voltage:
+              type: number
+            updated_at:
+              type: integer
+              nullable: true
+  parameters:
+    XDeviceMac:
+      name: X-Device-MAC
+      in: header
+      required: true
+      schema:
+        type: string
+      description: Device MAC address, no separators (e.g. `d0cf1326f7e8`).
+    MacPath:
+      name: mac
+      in: path
+      required: true
+      schema: { type: string }
+      description: Device MAC address, no separators (e.g. `d0cf1326f7e8`).
+    BucketIdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    ImageIdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    TargetPath:
+      name: target
+      in: path
+      required: true
+      schema: { type: string }
+      description: A device MAC, or the literal `default` / `global` tier.
+paths:
+  /current:
+    get:
+      summary: Device status (your own devices only)
+      description: >-
+        Debug/status view. Requires an admin API key and only ever returns
+        devices you own. With no `device` query param / X-Device-MAC header,
+        returns every device belonging to the caller.
+      parameters:
+        - name: device
+          in: query
+          schema:
+            type: string
+          description: MAC of a specific device to look up (alternative to X-Device-MAC).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DeviceStatus'
+                  - type: object
+                    properties:
+                      devices:
+                        type: object
+                        additionalProperties:
+                          $ref: '#/components/schemas/DeviceStatus'
+                      total_devices:
+                        type: integer
+        '401':
+          description: Missing/invalid API key
+        '403':
+          description: Device belongs to another user
+        '404':
+          description: Device not found
+
+  /admin/me:
+    get:
+      summary: Get the logged-in account
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  display_name: { type: string, nullable: true }
+    patch:
+      summary: Set your display name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string, maxLength: 40 }
+              required: [display_name]
+      responses:
+        '200':
+          description: OK
+
+  /admin/keys/rotate:
+    post:
+      summary: Rotate your API key
+      description: Invalidates the current key. The new key is returned exactly once.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_key: { type: string }
+
+  /admin/devices:
+    get:
+      summary: List your devices
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items: { $ref: '#/components/schemas/Device' }
+    post:
+      summary: Register or update a device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mac: { type: string }
+                label: { type: string }
+                secret:
+                  type: string
+                  description: Hex device secret from the registration QR code.
+              required: [mac]
+      responses:
+        '201':
+          description: Created/updated
+        '409':
+          description: MAC already registered to another user
+
+  /admin/devices/{mac}:
+    patch:
+      summary: Rename a device
+      parameters:
+        - $ref: '#/components/parameters/MacPath'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string }
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+    delete:
+      summary: Unregister a device
+      description: >-
+        Deletes the device row and its bucket subscriptions. Its images are
+        untouched. Until re-claimed, requests bearing this MAC get a
+        "scan to register" QR code, never bucket content.
+      parameters:
+        - $ref: '#/components/parameters/MacPath'
+      responses:
+        '200': { description: Deleted }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+
+  /admin/devices/{mac}/buckets:
+    patch:
+      summary: Replace a device's bucket subscriptions
+      parameters:
+        - $ref: '#/components/parameters/MacPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bucket_ids:
+                  type: array
+                  items: { type: string }
+              required: [bucket_ids]
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden (device not yours, or no access to one of the bucket ids) }
+        '404': { description: Device not found }
+
+  /admin/buckets:
+    get:
+      summary: List buckets you own or collaborate on
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items: { $ref: '#/components/schemas/Bucket' }
+    post:
+      summary: Create a bucket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string }
+              required: [label]
+      responses:
+        '201': { description: Created }
+
+  /admin/buckets/{id}:
+    delete:
+      summary: Delete a bucket (owner only)
+      description: Deletes all images, subscriptions, shares, and invites for the bucket.
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      responses:
+        '200': { description: Deleted }
+        '403': { description: Not the owner }
+        '404': { description: Not found }
+
+  /admin/buckets/{id}/invite:
+    post:
+      summary: Create/refresh a reusable invite link (owner only)
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+    delete:
+      summary: Revoke a bucket's invite link (owner only)
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      responses:
+        '200': { description: Revoked }
+
+  /admin/buckets/join:
+    post:
+      summary: Join a bucket via invite token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string }
+              required: [token]
+      responses:
+        '200': { description: OK }
+        '404': { description: Invalid or revoked invite link }
+
+  /admin/buckets/{id}/collaborators:
+    get:
+      summary: List a bucket's collaborators (owner only)
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collaborators:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        display_name: { type: string, nullable: true }
+
+  /admin/buckets/{id}/collaborators/{userId}:
+    delete:
+      summary: Remove a collaborator (owner only)
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Removed }
+
+  /admin/images:
+    get:
+      summary: List a bucket's images
+      parameters:
+        - name: device_key
+          in: query
+          required: true
+          description: The bucket id.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  images:
+                    type: array
+                    items: { $ref: '#/components/schemas/Image' }
+        '403': { description: No access to this bucket }
+
+  /admin/images/upload:
+    post:
+      summary: Upload an image into a bucket
+      description: >-
+        Decodes, EXIF-corrects, crops, enhances, dithers, and packs the image
+        entirely server-side. HEIC/HEIF is rejected — convert to JPEG first.
+      parameters:
+        - name: device_key
+          in: query
+          required: true
+          description: The bucket id to upload into.
+          schema: { type: string }
+        - name: filename
+          in: query
+          required: true
+          schema: { type: string }
+        - name: dither
+          in: query
+          schema:
+            type: string
+            enum: [floyd_steinberg, atkinson, ordered, none]
+            default: floyd_steinberg
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+          image/webp: { schema: { type: string, format: binary } }
+          image/gif: { schema: { type: string, format: binary } }
+          image/bmp: { schema: { type: string, format: binary } }
+      responses:
+        '201': { description: Uploaded }
+        '403': { description: No access to this bucket }
+        '415': { description: Unsupported or HEIC content type }
+        '422': { description: Failed to decode image }
+
+  /admin/images/{id}:
+    delete:
+      summary: Delete an image
+      parameters:
+        - $ref: '#/components/parameters/ImageIdPath'
+      responses:
+        '200': { description: Deleted }
+        '403': { description: No access to this bucket }
+        '404': { description: Not found }
+
+  /admin/images/{id}/raw:
+    get:
+      summary: Fetch an image's original as-uploaded bytes
+      parameters:
+        - $ref: '#/components/parameters/ImageIdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            image/*: { schema: { type: string, format: binary } }
+        '403': { description: No access to this bucket }
+        '404': { description: Not found }
+
+  /admin/schedule/{target}:
+    get:
+      summary: Get a schedule override
+      parameters:
+        - $ref: '#/components/parameters/TargetPath'
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+    put:
+      summary: Set a schedule override
+      parameters:
+        - $ref: '#/components/parameters/TargetPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleConfig' }
+      responses:
+        '200': { description: OK }
+        '400': { description: Invalid values }
+        '403': { description: Forbidden }
+    delete:
+      summary: Clear a schedule override
+      parameters:
+        - $ref: '#/components/parameters/TargetPath'
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+
+  /admin/firmware/sync:
+    post:
+      summary: Pull the latest GitHub release into the firmware catalog
+      description: Only catalogs the binary (D1 + KV) — never rolls it out to any device.
+      responses:
+        '200': { description: OK }
+        '502': { description: GitHub fetch failed }
+
+  /admin/firmware/releases:
+    get:
+      summary: List cataloged firmware releases
+      responses:
+        '200': { description: OK }
+
+  /admin/firmware/targets:
+    get:
+      summary: List current firmware targets
+      responses:
+        '200': { description: OK }
+
+  /admin/firmware/target/{target}:
+    put:
+      summary: Set the firmware target for a mac / 'default' / 'global'
+      parameters:
+        - $ref: '#/components/parameters/TargetPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: string }
+              required: [version]
+      responses:
+        '200': { description: OK }
+        '400': { description: Unknown firmware version }
+        '403': { description: Forbidden }
+    delete:
+      summary: Clear the firmware target for a mac / 'default' / 'global'
+      parameters:
+        - $ref: '#/components/parameters/TargetPath'
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+
+  /auth/register/options:
+    post:
+      summary: Start passkey registration (creates a new account)
+      security: []
+      responses:
+        '200': { description: OK }
+
+  /auth/register/verify:
+    post:
+      summary: Complete passkey registration
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                attemptId: { type: string }
+                response: { type: object }
+              required: [attemptId, response]
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_key: { type: string }
+
+  /auth/login/options:
+    post:
+      summary: Start passkey login
+      security: []
+      responses:
+        '200': { description: OK }
+
+  /auth/login/verify:
+    post:
+      summary: Complete passkey login
+      description: Mints a fresh API key on every successful login.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                attemptId: { type: string }
+                response: { type: object }
+              required: [attemptId, response]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_key: { type: string }
+
+  /device_config:
+    get:
+      summary: "[Device-facing] Resolved schedule/firmware config for a device"
+      description: >-
+        Called by firmware, not admins. Unsigned if X-Device-MAC is omitted
+        (returns global defaults); a present MAC for a registered device
+        requires a valid X-Device-Nonce/X-Device-Signature.
+      security: []
+      parameters:
+        - name: X-Device-MAC
+          in: header
+          schema: { type: string }
+        - name: X-Device-Nonce
+          in: header
+          schema: { type: string }
+        - name: X-Device-Signature
+          in: header
+          schema: { type: string }
+        - name: X-Battery-Voltage
+          in: header
+          schema: { type: string }
+        - name: X-Firmware-Version
+          in: header
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '401': { description: Invalid or missing device signature }
+
+  /hash:
+    get:
+      summary: "[Device-facing] 16-char hash of the pending image"
+      description: Does not advance rotation. Requires X-Device-MAC (see /image_packed).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XDeviceMac'
+        - name: X-Device-Nonce
+          in: header
+          schema: { type: string }
+        - name: X-Device-Signature
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain: { schema: { type: string } }
+        '400': { description: X-Device-MAC header required }
+        '401': { description: Invalid or missing device signature }
+        '404': { description: No image available }
+
+  /image_packed:
+    get:
+      summary: "[Device-facing] Fetch and advance to the next packed image"
+      description: >-
+        Returns 960,000 bytes of packed 4bpp image data and advances the
+        rotation cursor. Requires X-Device-MAC — a request without it is
+        rejected outright rather than falling back to any bucket's content
+        (see migrations/0009_bucket_ownership.sql for why).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XDeviceMac'
+        - name: X-Device-Nonce
+          in: header
+          schema: { type: string }
+        - name: X-Device-Signature
+          in: header
+          schema: { type: string }
+        - name: X-Device-Secret
+          in: header
+          schema: { type: string }
+          description: Only sent by an unregistered device requesting its registration QR.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        '400': { description: X-Device-MAC header required }
+        '401': { description: Invalid or missing device signature }
+        '404': { description: No images available }
+
+  /firmware_bin:
+    get:
+      summary: "[Device-facing] Download a cataloged firmware binary"
+      security: []
+      parameters:
+        - name: version
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        '400': { description: version query param is required }
+        '404': { description: Unknown firmware version }
+        '500': { description: Firmware binary missing from storage }

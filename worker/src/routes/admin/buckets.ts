@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { DEFAULT_DEVICE_KEY, type Env } from "../../types";
+import type { Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { deleteImageBlobs } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
@@ -35,10 +35,10 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
   app.get("/admin/buckets", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
       `SELECT id, owner_id, label, created_at FROM buckets
-       WHERE owner_id = ?1 OR id = ?2 OR id IN (SELECT bucket_id FROM bucket_shares WHERE user_id = ?1)
+       WHERE owner_id = ?1 OR id IN (SELECT bucket_id FROM bucket_shares WHERE user_id = ?1)
        ORDER BY created_at ASC`
     )
-      .bind(c.var.user.id, DEFAULT_DEVICE_KEY)
+      .bind(c.var.user.id)
       .all<{ id: string; owner_id: string | null; label: string; created_at: number }>();
 
     const buckets = rows.results.map((row) => ({ ...row, is_owner: row.owner_id === c.var.user.id }));
@@ -48,7 +48,6 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
   app.delete("/admin/buckets/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
     if (!id) return c.json({ error: "id is required" }, 400);
-    if (id === DEFAULT_DEVICE_KEY) return c.json({ error: "Cannot delete the shared default bucket" }, 400);
 
     const bucket = await c.env.DB.prepare("SELECT owner_id FROM buckets WHERE id = ?")
       .bind(id)
@@ -77,7 +76,6 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/buckets/:id/invite", requireAdmin, async (c) => {
     const id = c.req.param("id");
     if (!id) return c.json({ error: "id is required" }, 400);
-    if (id === DEFAULT_DEVICE_KEY) return c.json({ error: "The default bucket is already shared" }, 400);
 
     const bucket = await c.env.DB.prepare("SELECT owner_id FROM buckets WHERE id = ?")
       .bind(id)

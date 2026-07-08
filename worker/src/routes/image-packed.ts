@@ -17,33 +17,34 @@ import { registrationUrl } from "../lib/registration-url";
 export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
   app.get("/image_packed", async (c) => {
     const macHeader = c.req.header("X-Device-MAC");
-    let deviceKey: string = DEFAULT_DEVICE_KEY;
-    let mac: string | null = null;
-    if (macHeader) {
-      mac = normalizeMac(macHeader);
-      const lookup = await resolveDeviceKey(c.env, mac);
-      deviceKey = lookup.deviceKey;
+    // A device identifies itself via X-Device-MAC on every request; with no
+    // header there is nothing to authenticate and nothing to serve. Bucket
+    // content must never be reachable without it — see migrations/0009_bucket_ownership.sql.
+    if (!macHeader) return c.text("X-Device-MAC header required", 400);
 
-      // A registered device's mac isn't enough on its own — see lib/device-signature.ts.
-      // Without this, anyone who knows/guesses a registered mac could impersonate that
-      // device just by sending X-Device-MAC.
-      if (deviceKey !== DEFAULT_DEVICE_KEY) {
-        const valid = await verifyDeviceSignature(
-          c.env,
-          mac,
-          lookup.secret!,
-          "/image_packed",
-          c.req.header("X-Device-Nonce"),
-          c.req.header("X-Device-Signature")
-        );
-        if (!valid) return c.text("Invalid or missing device signature", 401);
-      }
+    const mac = normalizeMac(macHeader);
+    const lookup = await resolveDeviceKey(c.env, mac);
+    const deviceKey = lookup.deviceKey;
+
+    // A registered device's mac isn't enough on its own — see lib/device-signature.ts.
+    // Without this, anyone who knows/guesses a registered mac could impersonate that
+    // device just by sending X-Device-MAC.
+    if (deviceKey !== DEFAULT_DEVICE_KEY) {
+      const valid = await verifyDeviceSignature(
+        c.env,
+        mac,
+        lookup.secret!,
+        "/image_packed",
+        c.req.header("X-Device-Nonce"),
+        c.req.header("X-Device-Signature")
+      );
+      if (!valid) return c.text("Invalid or missing device signature", 401);
     }
 
-    // A real (but unregistered) MAC gets a "scan to register" QR instead of the
-    // shared default rotation — see plan §QR registration. Never touches
-    // rotation state, since it isn't part of any device's image rotation.
-    if (mac && deviceKey === DEFAULT_DEVICE_KEY) {
+    // A real but unregistered MAC gets a "scan to register" QR instead of any
+    // bucket's rotation — see plan §QR registration. Never touches rotation
+    // state, since it isn't part of any device's image rotation.
+    if (deviceKey === DEFAULT_DEVICE_KEY) {
       const { packed, hash } = await renderRegistrationBuffer(
         mac,
         registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret"))

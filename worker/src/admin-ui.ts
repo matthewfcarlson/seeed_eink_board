@@ -109,7 +109,6 @@ export function renderAdminPage(): string {
     E-Ink Admin
     <span class="top-bar">
       <span id="whoami"></span>
-      <button class="ghost" id="edit-name-btn" style="padding:2px 8px;">Edit name</button>
       <button class="ghost" id="logout-btn">Log out</button>
     </span>
   </h1>
@@ -121,7 +120,7 @@ export function renderAdminPage(): string {
     <h2>Devices</h2>
     <p class="hint">"Last image sent" is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
     <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Last image sent</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th>Label</th><th>Last image sent</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
       <tbody id="devices-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -167,6 +166,16 @@ export function renderAdminPage(): string {
     </div>
   </div>
 
+  <div class="modal-overlay" id="schedule-modal-overlay">
+    <div class="modal">
+      <h3>Schedule override</h3>
+      <div id="schedule-modal-content"></div>
+      <div class="inline-form" style="margin-top:14px;">
+        <button class="ghost" id="schedule-modal-close-btn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div class="card">
     <h2>Firmware (OTA)</h2>
     <p class="hint">Devices only ever update their firmware when a target version is set below — syncing a release from GitHub just makes it available to target.</p>
@@ -202,6 +211,11 @@ export function renderAdminPage(): string {
     <h3>API Key</h3>
     <p class="hint">Rotating your key immediately invalidates the old one — anything using it (scripts, the firmware config page) will need the new value.</p>
     <button class="ghost" id="rotate-key-btn">Rotate API Key</button>
+  </div>
+
+  <div class="card">
+    <h3>Account</h3>
+    <button class="ghost" id="edit-name-btn">Edit name</button>
   </div>
 </div>
 
@@ -317,8 +331,9 @@ document.getElementById("passkey-login-btn").addEventListener("click", async () 
 });
 
 function renderWhoami() {
-  document.getElementById("whoami").textContent =
-    (currentUser && currentUser.display_name) || "Account " + currentUser.id.slice(0, 8);
+  document.getElementById("whoami").textContent = currentUser.display_name
+    ? "Howdy " + currentUser.display_name
+    : "Account " + currentUser.id.slice(0, 8);
 }
 
 async function tryLogin(showError) {
@@ -409,7 +424,7 @@ document.getElementById("register-device-btn").addEventListener("click", async (
 });
 
 async function deleteDevice(mac) {
-  if (!confirm("Unregister device " + mac + "? Its images stay in place but the MAC falls back to the default bucket.")) return;
+  if (!confirm("Unregister device " + mac + "? Its images stay in place but the MAC will show a \"scan to register\" QR code until re-claimed.")) return;
   try {
     await apiFetch("/admin/devices/" + encodeURIComponent(mac), { method: "DELETE" });
     await renderApp();
@@ -470,10 +485,27 @@ document.getElementById("bucket-modal-save-btn").addEventListener("click", async
   }
 });
 
+async function openScheduleModal(mac) {
+  const content = document.getElementById("schedule-modal-content");
+  content.innerHTML = '<p class="hint">Loading…</p>';
+  document.getElementById("schedule-modal-overlay").classList.add("open");
+  try {
+    const result = await apiFetch("/admin/schedule/" + encodeURIComponent(mac));
+    content.innerHTML = scheduleFormHtml(mac, result.override);
+  } catch (err) {
+    content.innerHTML = '<p class="hint">Failed to load schedule: ' + escapeHtml(err.message) + "</p>";
+  }
+}
+window.openScheduleModal = openScheduleModal;
+
+document.getElementById("schedule-modal-close-btn").addEventListener("click", () => {
+  document.getElementById("schedule-modal-overlay").classList.remove("open");
+});
+
 function renderDevicesTable(devices) {
   const tbody = document.getElementById("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="hint">No devices registered yet.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -502,6 +534,7 @@ function renderDevicesTable(devices) {
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
       "<td>" + bucketLabelsFor(d.bucket_ids) + '<br><button class="ghost" onclick="openBucketModal(\\'' + escapeHtml(d.mac) + '\\')">Manage</button></td>' +
+      '<td><button class="ghost" onclick="openScheduleModal(\\'' + escapeHtml(d.mac) + '\\')">Manage</button></td>' +
       '<td><button class="danger" onclick="deleteDevice(\\'' + escapeHtml(d.mac) + '\\')">Remove</button></td>' +
       "</tr>";
   }).join("");
@@ -538,6 +571,7 @@ async function saveSchedule(target) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    document.getElementById("schedule-modal-overlay").classList.remove("open");
     await renderApp();
   } catch (err) {
     showMessage("app-message", "Failed to save schedule for " + target + ": " + err.message, "error");
@@ -548,6 +582,7 @@ window.saveSchedule = saveSchedule;
 async function clearSchedule(target) {
   try {
     await apiFetch("/admin/schedule/" + encodeURIComponent(target), { method: "DELETE" });
+    document.getElementById("schedule-modal-overlay").classList.remove("open");
     await renderApp();
   } catch (err) {
     showMessage("app-message", "Failed to clear schedule for " + target + ": " + err.message, "error");
@@ -656,7 +691,7 @@ async function uploadImage(deviceKey) {
 }
 window.uploadImage = uploadImage;
 
-function bucketCardHtml(bucket, images, override, showSchedule, collaborators) {
+function bucketCardHtml(bucket, images, collaborators) {
   const deviceKey = bucket.id;
   const rows = images.length
     ? images.map((img) =>
@@ -677,14 +712,7 @@ function bucketCardHtml(bucket, images, override, showSchedule, collaborators) {
 
   const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
 
-  // Schedule is a per-device concept (target = mac), not per-bucket — only shown
-  // when this bucket's id happens to be a device's own mac (the pre-existing,
-  // backfilled 1:1 bucket every device already had before buckets were shareable).
-  const scheduleSection = showSchedule
-    ? '<h4 style="margin-top:18px;">Schedule override</h4>' + scheduleFormHtml(deviceKey, override)
-    : "";
-
-  const isOwnedShareable = bucket.is_owner && bucket.id !== "default";
+  const isOwnedShareable = bucket.is_owner;
   const collabList = collaborators.length
     ? '<ul class="collab-list">' +
       collaborators
@@ -717,7 +745,6 @@ function bucketCardHtml(bucket, images, override, showSchedule, collaborators) {
         '<div class="row"><label>Dither</label><select id="upload-dither-' + deviceKey + '">' + ditherOptions + "</select></div>" +
         '<button onclick="uploadImage(\\'' + deviceKey + '\\')">Upload</button>' +
       "</div>" +
-      scheduleSection +
       ownerSection +
     "</div>"
   );
@@ -928,13 +955,9 @@ async function renderApp() {
   bucketsEl.innerHTML = allBucketsCache.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
 
   await Promise.all(allBucketsCache.map(async (b) => {
-    // Schedule only applies to buckets that are a device's own backfilled bucket
-    // (id === some device's mac) — see bucketCardHtml's comment.
-    const showSchedule = b.id !== "default" && devices.some((d) => d.mac === b.id);
-    const isOwnedShareable = b.is_owner && b.id !== "default";
-    const [imagesResult, scheduleResult, collaboratorsResult] = await Promise.all([
+    const isOwnedShareable = b.is_owner;
+    const [imagesResult, collaboratorsResult] = await Promise.all([
       apiFetch("/admin/images?device_key=" + encodeURIComponent(b.id)),
-      showSchedule ? apiFetch("/admin/schedule/" + encodeURIComponent(b.id)) : Promise.resolve({ override: null }),
       isOwnedShareable
         ? apiFetch("/admin/buckets/" + encodeURIComponent(b.id) + "/collaborators")
         : Promise.resolve({ collaborators: [] }),
@@ -942,8 +965,6 @@ async function renderApp() {
     document.getElementById("bucket-" + b.id).innerHTML = bucketCardHtml(
       b,
       imagesResult.images,
-      scheduleResult.override,
-      showSchedule,
       collaboratorsResult.collaborators
     );
   }));

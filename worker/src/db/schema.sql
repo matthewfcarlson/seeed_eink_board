@@ -1,7 +1,7 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
 -- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql,
 -- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
--- 0007_buckets.sql, and 0008_user_display_name.sql
+-- 0007_buckets.sql, 0008_user_display_name.sql, and 0009_bucket_ownership.sql
 -- (wrangler d1 migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -37,8 +37,15 @@ CREATE TABLE devices (
 );
 
 -- Image buckets: independently-owned, shareable entities a device subscribes to
--- many-to-many (see migrations/0007). The one bucket with id 'default' and a
--- NULL owner_id is the shared bucket every unclaimed device falls back to.
+-- many-to-many (see migrations/0007). There is no globally-shared bucket —
+-- every bucket belongs to exactly one user and everyone else needs an accepted
+-- invite (bucket_shares) to see it (migrations/0009 removed the old ownerless
+-- 'default' bucket). owner_id stays nullable at the schema level only because
+-- D1's remote engine won't allow the usual SQLite table-rebuild recipe for
+-- adding NOT NULL here (see migrations/0009's comment) — it's enforced instead
+-- by lib/bucket-access.ts (a NULL owner matches no one) and by
+-- routes/admin/buckets.ts being the only INSERT path, which always supplies
+-- the caller's user id.
 CREATE TABLE buckets (
   id         TEXT PRIMARY KEY,
   owner_id   TEXT REFERENCES users(id),

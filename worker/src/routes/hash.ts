@@ -16,29 +16,30 @@ import { registrationUrl } from "../lib/registration-url";
 export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
   app.get("/hash", async (c) => {
     const macHeader = c.req.header("X-Device-MAC");
-    let deviceKey: string = DEFAULT_DEVICE_KEY;
-    let mac: string | null = null;
-    if (macHeader) {
-      mac = normalizeMac(macHeader);
-      const lookup = await resolveDeviceKey(c.env, mac);
-      deviceKey = lookup.deviceKey;
+    // A device identifies itself via X-Device-MAC on every request; with no
+    // header there is nothing to authenticate and nothing to serve. Bucket
+    // content must never be reachable without it — see migrations/0009_bucket_ownership.sql.
+    if (!macHeader) return c.text("X-Device-MAC header required", 400);
 
-      if (deviceKey !== DEFAULT_DEVICE_KEY) {
-        const valid = await verifyDeviceSignature(
-          c.env,
-          mac,
-          lookup.secret!,
-          "/hash",
-          c.req.header("X-Device-Nonce"),
-          c.req.header("X-Device-Signature")
-        );
-        if (!valid) return c.text("Invalid or missing device signature", 401);
-      }
+    const mac = normalizeMac(macHeader);
+    const lookup = await resolveDeviceKey(c.env, mac);
+    const deviceKey = lookup.deviceKey;
+
+    if (deviceKey !== DEFAULT_DEVICE_KEY) {
+      const valid = await verifyDeviceSignature(
+        c.env,
+        mac,
+        lookup.secret!,
+        "/hash",
+        c.req.header("X-Device-Nonce"),
+        c.req.header("X-Device-Signature")
+      );
+      if (!valid) return c.text("Invalid or missing device signature", 401);
     }
 
-    // A real (but unregistered) MAC gets a "scan to register" QR instead of the
-    // shared default rotation — see plan §QR registration.
-    if (mac && deviceKey === DEFAULT_DEVICE_KEY) {
+    // A real but unregistered MAC gets a "scan to register" QR instead of any
+    // bucket's rotation — see plan §QR registration.
+    if (deviceKey === DEFAULT_DEVICE_KEY) {
       const { hash } = await renderRegistrationBuffer(
         mac,
         registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret"))

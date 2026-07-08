@@ -1,15 +1,14 @@
-import { DEFAULT_DEVICE_KEY, type Env } from "../types";
+import type { Env } from "../types";
 
 /**
- * Shared by admin/buckets.ts and admin/images.ts. The shared 'default' bucket
- * (owner_id NULL) is writable by any authenticated user — matches
- * image_server.py's single shared images/default/ folder, no per-user isolation.
- * Everything else requires ownership or an accepted invite (bucket_shares row) —
- * see migrations/0007_buckets.sql. Shared collaborators get full read/write,
- * same as the owner, so this one check gates upload/list/delete/raw alike.
+ * Shared by admin/buckets.ts and admin/images.ts. Every bucket requires
+ * ownership or an accepted invite (bucket_shares row) — see
+ * migrations/0007_buckets.sql and migrations/0009_bucket_ownership.sql (which
+ * removed the old globally-shared, ownerless 'default' bucket). Shared
+ * collaborators get full read/write, same as the owner, so this one check
+ * gates upload/list/delete/raw alike.
  */
 export async function assertBucketAccess(env: Env, bucketId: string, userId: string): Promise<boolean> {
-  if (bucketId === DEFAULT_DEVICE_KEY) return true;
   const bucket = await env.DB.prepare("SELECT owner_id FROM buckets WHERE id = ?")
     .bind(bucketId)
     .first<{ owner_id: string | null }>();
