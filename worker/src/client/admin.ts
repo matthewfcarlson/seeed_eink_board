@@ -524,9 +524,14 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[]): strin
       "</div>"
     : "";
 
+  const titleRow =
+    "<h3>" + escapeHtml(bucket.label) + ' <span class="pill">' + images.length + (images.length === 1 ? " image" : " images") + "</span>" +
+    (isOwnedShareable ? ' <button class="ghost" onclick="renameBucket(\'' + escapeHtml(bucket.id) + '\')">Rename</button>' : "") +
+    "</h3>";
+
   return (
     '<div class="card">' +
-      "<h3>" + escapeHtml(bucket.label) + "</h3>" +
+      titleRow +
       "<table><thead><tr><th></th><th>Filename</th><th>Dither</th><th>Uploaded</th><th></th></tr></thead>" +
       "<tbody>" + rows + "</tbody></table>" +
       '<div class="inline-form" style="margin-top:12px;">' +
@@ -554,6 +559,25 @@ async function createBucketInvite(bucketId: string) {
   }
 }
 (window as any).createBucketInvite = createBucketInvite;
+
+async function renameBucket(bucketId: string) {
+  const bucket = allBucketsCache.find((b) => b.id === bucketId);
+  const next = prompt("New label:", (bucket && bucket.label) || "");
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  try {
+    await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: trimmed }),
+    });
+    await renderApp();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to rename bucket: " + err.message, "error");
+  }
+}
+(window as any).renameBucket = renameBucket;
 
 async function deleteBucket(bucketId: string) {
   if (!confirm("Delete this bucket and all its images? This cannot be undone.")) return;

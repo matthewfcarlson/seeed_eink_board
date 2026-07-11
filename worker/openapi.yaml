@@ -388,6 +388,23 @@ paths:
         '201': { description: Created }
 
   /admin/buckets/{id}:
+    patch:
+      summary: Rename a bucket (owner only)
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string }
+              required: [label]
+      responses:
+        '200': { description: OK }
+        '403': { description: Not the owner }
+        '404': { description: Not found }
     delete:
       summary: Delete a bucket (owner only)
       description: Deletes all images, subscriptions, shares, and invites for the bucket.

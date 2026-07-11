@@ -45,6 +45,24 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ buckets });
   });
 
+  app.patch("/admin/buckets/:id", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id is required" }, 400);
+
+    const body = await c.req.json<{ label?: string }>().catch(() => ({}) as never);
+    const label = body.label?.trim();
+    if (!label) return c.json({ error: "label is required" }, 400);
+
+    const bucket = await c.env.DB.prepare("SELECT owner_id FROM buckets WHERE id = ?")
+      .bind(id)
+      .first<{ owner_id: string | null }>();
+    if (!bucket) return c.json({ error: "Not found" }, 404);
+    if (bucket.owner_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
+
+    await c.env.DB.prepare("UPDATE buckets SET label = ? WHERE id = ?").bind(label, id).run();
+    return c.json({ id, label });
+  });
+
   app.delete("/admin/buckets/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
     if (!id) return c.json({ error: "id is required" }, 400);
