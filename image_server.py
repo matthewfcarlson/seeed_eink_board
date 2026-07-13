@@ -1084,6 +1084,13 @@ def image_packed():
         if packed_data is None:
             return "Failed to process image", 500
 
+        # Optional ?known_hash=<hash> lets firmware fold the old separate /hash
+        # pre-check into this same request: if it matches, respond 304 with no
+        # body and don't advance rotation. Omitting it behaves exactly as before.
+        known_hash = request.args.get('known_hash')
+        if known_hash and known_hash == image_hash:
+            return Response(status=304, headers={'X-Image-Hash': image_hash})
+
         image_name = os.path.basename(image_path)
         _rotator.mark_image_served(device_id)
         log_message(

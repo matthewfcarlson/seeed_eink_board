@@ -60,4 +60,12 @@
 // WiFi connection timeout (in milliseconds)
 #define WIFI_TIMEOUT_MS 30000
 
+// How long to try a fast reconnect (cached channel/BSSID, no scan) before
+// falling back to a normal full-scan connect (in milliseconds).
+#define WIFI_FAST_RECONNECT_TIMEOUT_MS 5000
+
+// CPU frequency used for the whole active window (WiFi/BT require >=80MHz).
+// Lower than the 240MHz default to cut active-mode current draw.
+#define ACTIVE_CPU_FREQ_MHZ 80
+
 #endif // CONFIG_H

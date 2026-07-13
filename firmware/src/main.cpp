@@ -41,7 +41,12 @@ RTC_DATA_ATTR int bootCount = 0;
 // Last image hash stored in RTC memory (survives deep sleep)
 // Used to skip download if image hasn't changed
 RTC_DATA_ATTR char lastImageHash[17] = {0};  // 16 chars + null terminator
-char pendingImageHash[17] = {0};
+
+// Last-associated AP, stored in RTC memory (survives deep sleep). Lets
+// connectWiFi() skip the channel scan on the next wake - see connectWiFi().
+RTC_DATA_ATTR uint8_t lastApBssid[6] = {0};
+RTC_DATA_ATTR uint8_t lastApChannel = 0;
+RTC_DATA_ATTR bool haveLastAp = false;
 
 // Firmware target reported by /device_config this wake, if any (see
 // syncRemoteConfigAndTime() and version.h). Empty means "no target set" —
@@ -617,24 +622,59 @@ bool connectWiFi() {
         Serial.println("No WiFi credentials configured - skipping connect attempt");
         return false;
     }
-    Serial.printf("Connecting to WiFi: %s\n", ssid.c_str());
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), configManager.getWifiPassword().c_str());
+    String password = configManager.getWifiPassword();
 
-    uint32_t startTime = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    // Fast reconnect: skip the AP scan by reusing the channel/BSSID we associated
+    // with last time (cached in RTC memory, so it survives deep sleep). Home APs
+    // essentially never change channel/BSSID on their own, and this only ever
+    // saves time - if the cache is stale this attempt just times out quickly and
+    // we fall through to the normal full-scan connect below, so there's no
+    // downside versus today's behavior beyond the short extra timeout.
+    if (haveLastAp) {
+        Serial.printf("Connecting to WiFi: %s (fast reconnect, channel %d)\n", ssid.c_str(), lastApChannel);
+        WiFi.begin(ssid.c_str(), password.c_str(), lastApChannel, lastApBssid);
 
-        if (millis() - startTime > WIFI_TIMEOUT_MS) {
-            Serial.println("\nWiFi connection timeout!");
-            return false;
+        uint32_t fastStart = millis();
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(100);
+            if (millis() - fastStart > WIFI_FAST_RECONNECT_TIMEOUT_MS) {
+                Serial.println("\nFast reconnect failed - falling back to full scan");
+                WiFi.disconnect();
+                haveLastAp = false;
+                break;
+            }
         }
     }
 
-    Serial.println();
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.printf("Connecting to WiFi: %s\n", ssid.c_str());
+        WiFi.begin(ssid.c_str(), password.c_str());
+
+        uint32_t startTime = millis();
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+
+            if (millis() - startTime > WIFI_TIMEOUT_MS) {
+                Serial.println("\nWiFi connection timeout!");
+                return false;
+            }
+        }
+        Serial.println();
+    }
+
     Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+
+    // Cache this AP for next wake's fast reconnect.
+    uint8_t* bssid = WiFi.BSSID();
+    if (bssid != nullptr) {
+        memcpy(lastApBssid, bssid, sizeof(lastApBssid));
+        lastApChannel = WiFi.channel();
+        haveLastAp = true;
+    }
+
     return true;
 }
 
@@ -644,67 +684,23 @@ void disconnectWiFi() {
     Serial.println("WiFi disconnected");
 }
 
+enum class ImageFetchResult { UNCHANGED, UPDATED, FAILED };
+
 /**
- * Check if the image on the server has changed by comparing hashes.
- *
- * @return true if image has changed (or if check failed), false if unchanged
+ * Fetches the pending image, folding the old separate hash pre-check into this
+ * same request via ?known_hash= (see worker/src/routes/image-packed.ts and
+ * image_server.py) - one fewer full request/TLS-handshake per wake versus the
+ * previous checkImageChanged() + fetchAndDisplayImage() pair. A 304 means the
+ * server confirmed the image is unchanged; the display buffer is only allocated
+ * and display.begin() only called once we know we actually have bytes to show.
  */
-bool checkImageChanged() {
-    // Build hash endpoint URL from config
-    String hashUrl = getBaseURL() + "/hash";
-
-    Serial.printf("Checking image hash at: %s\n", hashUrl.c_str());
-    Serial.printf("Last known hash: %s\n", lastImageHash[0] ? lastImageHash : "(none)");
-
-    HTTPClient http;
-    WiFiClientSecure secureClient;
-    beginRequest(http, secureClient, hashUrl);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    addCommonHeaders(http, "/hash");
-
-    int httpCode = http.GET();
-
-    if (httpCode != HTTP_CODE_OK) {
-        Serial.printf("Hash check failed, HTTP code: %d\n", httpCode);
-        http.end();
-        return true;  // Assume changed if we can't check
-    }
-
-    String newHash = http.getString();
-    http.end();
-
-    // Validate hash length (should be 16 characters)
-    if (newHash.length() != 16) {
-        Serial.printf("Invalid hash length: %d\n", newHash.length());
-        return true;  // Assume changed if invalid
-    }
-
-    Serial.printf("Server hash: %s\n", newHash.c_str());
-
-    // Compare with stored hash
-    if (strcmp(newHash.c_str(), lastImageHash) == 0) {
-        Serial.println("Image unchanged - skipping download");
-        pendingImageHash[0] = '\0';
-        return false;  // No change
-    }
-
-    Serial.println("Image changed - will download new image");
-    strncpy(pendingImageHash, newHash.c_str(), 16);
-    pendingImageHash[16] = '\0';
-
-    return true;  // Changed
-}
-
-bool fetchAndDisplayImage() {
-    // Allocate buffer in PSRAM for the image
-    uint8_t* imageBuffer = (uint8_t*)ps_malloc(BUFFER_SIZE);
-    if (imageBuffer == nullptr) {
-        Serial.println("Failed to allocate image buffer!");
-        return false;
-    }
-
-    // Get URL from config manager
+ImageFetchResult fetchAndDisplayImage() {
     String url = configManager.getFullURL();
+    if (lastImageHash[0] != '\0') {
+        url += (url.indexOf('?') >= 0 ? "&" : "?");
+        url += "known_hash=";
+        url += lastImageHash;
+    }
     Serial.printf("Fetching image from: %s\n", url.c_str());
 
     HTTPClient http;
@@ -715,11 +711,16 @@ bool fetchAndDisplayImage() {
 
     int httpCode = http.GET();
 
+    if (httpCode == 304) {
+        Serial.println("Server reports image unchanged (304) - skipping download");
+        http.end();
+        return ImageFetchResult::UNCHANGED;
+    }
+
     if (httpCode != HTTP_CODE_OK) {
         Serial.printf("HTTP GET failed, code: %d\n", httpCode);
-        free(imageBuffer);
         http.end();
-        return false;
+        return ImageFetchResult::FAILED;
     }
 
     String responseImageHash = http.header("X-Image-Hash");
@@ -737,9 +738,18 @@ bool fetchAndDisplayImage() {
 
     if (contentLength <= 0 || contentLength > BUFFER_SIZE) {
         Serial.printf("Invalid content length: %d (expected %d)\n", contentLength, BUFFER_SIZE);
-        free(imageBuffer);
         http.end();
-        return false;
+        return ImageFetchResult::FAILED;
+    }
+
+    // Allocate the buffer only now that we know there's actually a new image to
+    // download - a 304 above never reaches here, so an unchanged-image wake
+    // never touches PSRAM or the display at all.
+    uint8_t* imageBuffer = (uint8_t*)ps_malloc(BUFFER_SIZE);
+    if (imageBuffer == nullptr) {
+        Serial.println("Failed to allocate image buffer!");
+        http.end();
+        return ImageFetchResult::FAILED;
     }
 
     // Stream the response directly into our buffer
@@ -777,7 +787,13 @@ bool fetchAndDisplayImage() {
     if (bytesRead != contentLength) {
         Serial.println("Incomplete download!");
         free(imageBuffer);
-        return false;
+        return ImageFetchResult::FAILED;
+    }
+
+    if (!display.begin()) {
+        Serial.println("Display initialization failed!");
+        free(imageBuffer);
+        return ImageFetchResult::FAILED;
     }
 
     // Load image data into display buffer
@@ -792,20 +808,12 @@ bool fetchAndDisplayImage() {
     if (responseImageHash.length() == 16) {
         strncpy(lastImageHash, responseImageHash.c_str(), 16);
         lastImageHash[16] = '\0';
-    } else if (pendingImageHash[0] != '\0') {
-        strncpy(lastImageHash, pendingImageHash, 16);
-        lastImageHash[16] = '\0';
+    } else {
+        Serial.println("Warning: response had no X-Image-Hash - next wake will re-fetch this image");
     }
-
-    if (pendingImageHash[0] != '\0' && responseImageHash.length() == 16 &&
-        strcmp(pendingImageHash, responseImageHash.c_str()) != 0) {
-        Serial.printf("Warning: pending hash %s did not match response hash %s\n",
-                      pendingImageHash, responseImageHash.c_str());
-    }
-    pendingImageHash[0] = '\0';
     Serial.printf("Committed displayed image hash: %s\n", lastImageHash[0] ? lastImageHash : "(none)");
 
-    return true;
+    return ImageFetchResult::UPDATED;
 }
 
 void enterDeepSleep(uint32_t sleepSeconds) {
@@ -882,7 +890,7 @@ void runNormalMode() {
     // Read battery voltage before WiFi (ADC can be noisy during WiFi)
     batteryVoltage = readBatteryVoltage();
 
-    // Connect to WiFi first (needed for hash check)
+    // Connect to WiFi first (needed for device_config and the image fetch)
     if (!connectWiFi()) {
         Serial.println("WiFi connection failed!");
         // Keep previous image, just go to sleep
@@ -912,30 +920,22 @@ void runNormalMode() {
                               configManager.getActiveStartHour(),
                               configManager.getActiveEndHour(),
                               configManager.getTimezoneOffsetMinutes())) {
-        Serial.println("Currently in quiet hours - skipping hash/image fetch");
+        Serial.println("Currently in quiet hours - skipping image fetch");
         disconnectWiFi();
         enterDeepSleep(calculateSleepSeconds());
     }
 
-    // Check if image has changed before downloading
-    if (!checkImageChanged()) {
-        Serial.println("Image unchanged - going back to sleep");
-        disconnectWiFi();
-        enterDeepSleep(calculateSleepSeconds());
-    }
-
-    // Image has changed - initialize display and update
-    if (!display.begin()) {
-        Serial.println("Display initialization failed!");
-        disconnectWiFi();
-        delay(5000);
-        ESP.restart();
-    }
-
-    // Fetch and display image
-    if (!fetchAndDisplayImage()) {
-        Serial.println("Image fetch/display failed!");
-        // Keep previous image on display
+    // Fetch (and display, if changed) the pending image. The hash check is
+    // folded into this same request via ?known_hash= - see fetchAndDisplayImage().
+    switch (fetchAndDisplayImage()) {
+        case ImageFetchResult::UNCHANGED:
+            Serial.println("Image unchanged - going back to sleep");
+            break;
+        case ImageFetchResult::UPDATED:
+            break;
+        case ImageFetchResult::FAILED:
+            Serial.println("Image fetch/display failed - keeping previous image on display");
+            break;
     }
 
     // Disconnect WiFi to save power
@@ -947,7 +947,18 @@ void runNormalMode() {
 
 void setup() {
     Serial.begin(115200);
-    delay(2000);  // Give the USB serial port time to enumerate/attach before we start logging
+
+    // Give the USB serial port time to enumerate/attach before we start logging -
+    // but only on a cold boot (power-on/reset button), where someone plausibly has
+    // a serial monitor open. A scheduled deep-sleep wakeup has nobody watching, so
+    // skip it there to save ~2s of active current on every single wake cycle.
+    if (!wasDeepSleepWakeup()) {
+        delay(2000);
+    }
+
+    // WiFi/BT need >=80MHz; running the rest of the active window here too (rather
+    // than the 240MHz default) cuts active-mode current draw for the whole cycle.
+    setCpuFrequencyMhz(ACTIVE_CPU_FREQ_MHZ);
 
     Serial.println("\n========================================");
     Serial.println("Seeed EE02 E-Ink Display Firmware");

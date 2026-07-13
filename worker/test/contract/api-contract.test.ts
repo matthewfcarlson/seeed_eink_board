@@ -210,6 +210,42 @@ describe.each([
     const hash3 = await (await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })).text();
     expect(hash3).toBe(hash1);
   });
+
+  it("image_packed's ?known_hash= folds the /hash pre-check into one request", async () => {
+    const server = getServer();
+
+    // Picks up wherever the previous test left rotation (pending image = hash1,
+    // per that test's final assertion) - /hash doesn't advance, so this is stable.
+    const currentHash = await (await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })).text();
+    expect(currentHash).toHaveLength(16);
+
+    // Matching known_hash -> 304, no body, and rotation must NOT advance.
+    const unchangedRes = await fetch(`${server.baseUrl}/image_packed?known_hash=${currentHash}`, {
+      headers: signedHeaders("/image_packed"),
+    });
+    expect(unchangedRes.status).toBe(304);
+    expect((await unchangedRes.arrayBuffer()).byteLength).toBe(0);
+
+    const hashAfterUnchanged = await (
+      await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })
+    ).text();
+    expect(hashAfterUnchanged).toBe(currentHash);
+
+    // A stale/wrong known_hash -> normal 200 + full image, and rotation advances
+    // exactly like calling /image_packed with no known_hash at all.
+    const changedRes = await fetch(`${server.baseUrl}/image_packed?known_hash=0000000000000000`, {
+      headers: signedHeaders("/image_packed"),
+    });
+    expect(changedRes.status).toBe(200);
+    const body = new Uint8Array(await changedRes.arrayBuffer());
+    expect(body.byteLength).toBe(960000);
+    expect(changedRes.headers.get("x-image-hash")).toBe(currentHash);
+
+    const hashAfterChanged = await (
+      await fetch(`${server.baseUrl}/hash`, { headers: signedHeaders("/hash") })
+    ).text();
+    expect(hashAfterChanged).not.toBe(currentHash);
+  });
 });
 
 describe("GET /current", () => {

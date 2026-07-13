@@ -13,6 +13,12 @@ import { registrationUrl } from "../lib/registration-url";
  * Content-Length must exactly match the body; X-Image-Hash must be the same 16-char
  * hash /hash would have returned for this same pending image. Rotation only advances
  * after we've successfully read the object from R2 — never on a failed/missing fetch.
+ *
+ * Optional ?known_hash=<16-char hash> lets current firmware fold the old separate
+ * /hash pre-check into this same request/TLS-handshake: if it matches the pending
+ * image's hash, respond 304 with no body and don't touch rotation (same "unchanged"
+ * contract /hash has). Omitting it (older firmware) behaves exactly as before -
+ * always 200 with the full image - so this is purely additive, /hash stays untouched.
  */
 export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
   app.get("/image_packed", async (c) => {
@@ -65,6 +71,11 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     const snapshot = await getRotationSnapshot(c.env, deviceKey);
     const pending = peekPendingImage(snapshot);
     if (!pending) return c.text("No images available", 404);
+
+    const knownHash = c.req.query("known_hash");
+    if (knownHash && knownHash === pending.image.packedHash) {
+      return new Response(null, { status: 304, headers: { "X-Image-Hash": pending.image.packedHash } });
+    }
 
     const bytes = await getPackedImage(c.env, pending.image.sourceDeviceKey, pending.image.id);
     if (!bytes) return c.text("Failed to process image", 500);
