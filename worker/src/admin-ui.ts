@@ -141,12 +141,6 @@ export function renderAdminPage(): string {
   </div>
 
   <div class="card">
-    <h3>Global fallback schedule</h3>
-    <p class="hint">Used when a device has no schedule override of its own.</p>
-    <div id="bucket-global"></div>
-  </div>
-
-  <div class="card">
     <h2>Image Buckets</h2>
     <p class="hint">Buckets are independent, shareable groups of images. Subscribe a device to any number of them via its "Manage" button above.</p>
     <div class="inline-form">
@@ -193,7 +187,7 @@ export function renderAdminPage(): string {
     </div>
 
     <h3 style="margin-top:22px;">Targets</h3>
-    <p class="hint">Resolution order per device: exact MAC override &rarr; 'default' &rarr; 'global'. Clearing a target leaves that tier's devices on whatever they're already running.</p>
+    <p class="hint">Each device only ever runs a version an admin has explicitly targeted for its own MAC &mdash; there's no shared fallback. Clearing a target leaves that device on whatever it's already running.</p>
     <table>
       <thead><tr><th>Target</th><th>Version</th><th>Updated</th><th></th></tr></thead>
       <tbody id="firmware-targets-table"></tbody>

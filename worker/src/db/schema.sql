@@ -1,8 +1,9 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
 -- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql,
 -- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
--- 0007_buckets.sql, 0008_user_display_name.sql, and 0009_bucket_ownership.sql
--- (wrangler d1 migrations tracks applied state per-database).
+-- 0007_buckets.sql, 0008_user_display_name.sql, 0009_bucket_ownership.sql, and
+-- 0010_remove_shared_targets.sql (wrangler d1 migrations tracks applied state
+-- per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -100,9 +101,13 @@ CREATE TABLE images (
 );
 CREATE INDEX idx_images_device_key_filename ON images(device_key, filename);
 
--- Two-tier schedule override fallback: exact mac -> 'global'.
+-- Per-device schedule override, or nothing (firmware runs on its own compiled-in
+-- default). No shared 'global'/'default' fallback row (removed in migrations/
+-- 0010_remove_shared_targets.sql) — that was a Worker-only addition on top of
+-- image_server.py, and letting any authenticated user write one row every other
+-- tenant's un-configured devices inherited was a cross-tenant griefing vector.
 CREATE TABLE schedule_overrides (
-  target                    TEXT PRIMARY KEY, -- mac | 'global'
+  target                    TEXT PRIMARY KEY, -- mac, owned via devices.user_id
   refresh_interval_minutes  INTEGER,
   active_start_hour         INTEGER,
   active_end_hour           INTEGER,
@@ -123,8 +128,8 @@ CREATE TABLE credentials (
 CREATE INDEX idx_credentials_user_id ON credentials(user_id);
 
 -- Firmware OTA: releases Cloudflare has fetched from GitHub, and which version
--- each target (mac | 'default' | 'global') should be running. Mirrors the
--- schedule_overrides fallback-chain pattern in lib/schedule.ts.
+-- each device (mac only, no shared 'default'/'global' target — see
+-- schedule_overrides above for the matching rationale) should be running.
 CREATE TABLE firmware_releases (
   version     TEXT PRIMARY KEY, -- e.g. "1.2.0" (tag_name with leading 'v' stripped)
   tag         TEXT NOT NULL,    -- raw GitHub tag_name, e.g. "v1.2.0"
@@ -135,7 +140,7 @@ CREATE TABLE firmware_releases (
 );
 
 CREATE TABLE firmware_targets (
-  target      TEXT PRIMARY KEY, -- mac | 'default' | 'global'
+  target      TEXT PRIMARY KEY, -- mac, owned via devices.user_id
   version     TEXT NOT NULL REFERENCES firmware_releases(version),
   updated_at  INTEGER NOT NULL
 );

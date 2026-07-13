@@ -1,14 +1,13 @@
 import type { Hono } from "hono";
-import { DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET, type Env } from "../../types";
+import type { Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { fetchLatestFirmwareRelease, downloadFirmwareAsset } from "../../lib/github-release";
 import { computeSha256Hex, putFirmwareBinary } from "../../lib/firmware-store";
 import { invalidateFirmwareTargetCache } from "../../lib/firmware-target";
 
-/** Same ownership model as admin/schedule.ts's assertTargetOwnership: 'default'/'global'
- *  are shared across all users, a mac target must belong to the caller. */
+/** Same ownership model as admin/schedule.ts's assertTargetOwnership: every target
+ *  must be a device MAC owned by the caller — no shared 'default'/'global' tier. */
 async function assertTargetOwnership(env: Env, target: string, userId: string): Promise<boolean> {
-  if (target === DEFAULT_DEVICE_KEY || target === GLOBAL_SCHEDULE_TARGET) return true;
   const row = await env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
     .bind(target)
     .first<{ user_id: string | null }>();

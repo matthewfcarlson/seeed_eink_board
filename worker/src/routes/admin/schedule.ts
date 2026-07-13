@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET, type Env, type ScheduleConfig } from "../../types";
+import type { Env, ScheduleConfig } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { invalidateScheduleCache } from "../../lib/schedule";
 
@@ -36,10 +36,9 @@ function validateScheduleBody(body: unknown): { config: ScheduleConfig } | { err
   };
 }
 
-/** Registered devices' overrides are owned per-user; 'default'/'global' are shared,
- *  editable by any authenticated user — matches Python having no per-user isolation. */
+/** Every target must be a device MAC owned by the caller — no shared 'default'/'global'
+ *  tier (see lib/schedule.ts's resolveScheduleConfig for why that was removed). */
 async function assertTargetOwnership(env: Env, target: string, userId: string): Promise<boolean> {
-  if (target === DEFAULT_DEVICE_KEY || target === GLOBAL_SCHEDULE_TARGET) return true;
   const row = await env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
     .bind(target)
     .first<{ user_id: string | null }>();

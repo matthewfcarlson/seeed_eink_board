@@ -1,5 +1,4 @@
 import type { Env } from "../types";
-import { DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET } from "../types";
 import { kvKeys } from "./kv-keys";
 
 const FIRMWARE_TARGET_CACHE_TTL_SECONDS = 300;
@@ -27,21 +26,15 @@ export async function invalidateFirmwareTargetCache(env: Env, target: string): P
 }
 
 /**
- * Resolve which firmware version `deviceKey` should be running, using the same
- * fallback chain as lib/schedule.ts's resolveScheduleConfig: exact device ->
- * 'default' -> 'global'. Returns null ("none") if nothing has ever been targeted,
- * which means "don't touch the device's firmware" — devices only ever OTA when
- * an admin has explicitly set a target version somewhere in the chain.
+ * Resolve which firmware version `deviceKey` should be running: this exact
+ * device's own target, or null ("none") if no one has ever targeted it —
+ * which means "don't touch this device's firmware." Deliberately no shared
+ * 'default'/'global' fallback tier (see lib/schedule.ts's resolveScheduleConfig
+ * for the matching rationale) — a bad flash can brick this board (no
+ * rollback-on-crash), so letting any authenticated user push a version onto
+ * every other tenant's un-targeted devices via one shared row was a real
+ * cross-tenant risk, not just a config convenience.
  */
 export async function resolveFirmwareTarget(env: Env, deviceKey: string): Promise<string | null> {
-  const chain =
-    deviceKey === DEFAULT_DEVICE_KEY
-      ? [DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET]
-      : [deviceKey, DEFAULT_DEVICE_KEY, GLOBAL_SCHEDULE_TARGET];
-
-  for (const target of chain) {
-    const version = await getFirmwareTargetOverride(env, target);
-    if (version !== null) return version;
-  }
-  return null;
+  return getFirmwareTargetOverride(env, deviceKey);
 }

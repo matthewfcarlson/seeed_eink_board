@@ -194,7 +194,9 @@ components:
       in: path
       required: true
       schema: { type: string }
-      description: A device MAC, or the literal `default` / `global` tier.
+      description: >-
+        A device MAC owned by the caller. There is no shared `default`/`global`
+        tier — every schedule override and firmware target is per-device.
 paths:
   /current:
     get:
@@ -617,7 +619,7 @@ paths:
 
   /admin/firmware/target/{target}:
     put:
-      summary: Set the firmware target for a mac / 'default' / 'global'
+      summary: Set the firmware target for a device MAC
       parameters:
         - $ref: '#/components/parameters/TargetPath'
       requestBody:
@@ -634,7 +636,7 @@ paths:
         '400': { description: Unknown firmware version }
         '403': { description: Forbidden }
     delete:
-      summary: Clear the firmware target for a mac / 'default' / 'global'
+      summary: Clear the firmware target for a device MAC
       parameters:
         - $ref: '#/components/parameters/TargetPath'
       responses:

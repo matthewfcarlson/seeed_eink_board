@@ -754,16 +754,14 @@ async function renderApp() {
   showMessage("app-message", "", "");
   renderClaimBanner();
   renderJoinBucketBanner();
-  const [devicesResult, globalSchedule, bucketsResult] = await Promise.all([
+  const [devicesResult, bucketsResult] = await Promise.all([
     apiFetch("/admin/devices"),
-    apiFetch("/admin/schedule/global"),
     apiFetch("/admin/buckets"),
   ]);
   const devices = devicesResult.devices;
   devicesCache = devices;
   allBucketsCache = bucketsResult.buckets;
   renderDevicesTable(devices);
-  el("bucket-global").innerHTML = scheduleFormHtml("global", globalSchedule.override);
 
   const bucketsEl = el("buckets");
   bucketsEl.innerHTML = allBucketsCache.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
@@ -789,9 +787,7 @@ async function renderApp() {
   ]);
   renderFirmwareReleasesTable(releasesResult.releases);
   renderFirmwareTargetsTable(targetsResult.targets);
-  const targetOptions = [{ key: "global", label: "global" }, { key: "default", label: "default" }].concat(
-    devices.map((d: any) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }))
-  );
+  const targetOptions = devices.map((d: any) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }));
   renderFirmwareTargetForm(targetOptions, releasesResult.releases);
 }
 

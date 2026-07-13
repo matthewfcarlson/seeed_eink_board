@@ -224,11 +224,15 @@ on that instead of adding a separate update mechanism.
    in `/admin` for it immediately. Either way this only stores the binary (worker KV,
    byte-exact — no gzip) and its SHA-256 in D1's `firmware_releases` table; it does
    **not** roll anything out to devices by itself.
-4. An admin explicitly sets a firmware **target** version for a scope — a specific
-   device MAC, the shared `'default'` bucket, or `'global'` — in `/admin`'s Firmware
-   panel. This is the same three-tier fallback chain schedule overrides use (see
-   `worker/src/lib/firmware-target.ts`, mirroring `lib/schedule.ts`). No target ever
-   set means a device's firmware is never touched.
+4. An admin explicitly sets a firmware **target** version for a specific device MAC
+   in `/admin`'s Firmware panel (see `worker/src/lib/firmware-target.ts`, mirroring
+   `lib/schedule.ts`'s per-device-only schedule overrides). There is deliberately no
+   shared `'default'`/`'global'` target any authenticated user could set for every
+   device on the server at once — that was removed as a cross-tenant risk (see
+   privacy review, 2026-07-13): this board has no rollback-on-crash, so letting any
+   signed-up account force-flash every other tenant's devices was a real
+   brick-someone-else's-hardware vector, not just a config convenience. No target
+   ever set means a device's firmware is never touched.
 5. On its next wake, `GET /device_config` includes `firmware_version` /
    `firmware_sha256` when a target resolves for that device. If it differs from the
    firmware's own compiled-in `FIRMWARE_VERSION`, the device downloads
@@ -239,8 +243,8 @@ on that instead of adding a separate update mechanism.
 **Safety model:** this board's stock Arduino/ESP-IDF build does not have automatic
 rollback-on-crash enabled, so a release that flashes clean but bootloops isn't
 self-healing. The mitigation is staged rollout, not automatic recovery: target one
-device's MAC first, confirm it's healthy, then promote to `'default'`/`'global'`.
-The board's default partition table (`default_8MB.csv`, already in place — no
+device's MAC, confirm it's healthy, then target the next — each device is targeted
+individually, one MAC at a time. The board's default partition table (`default_8MB.csv`, already in place — no
 partition change or one-time USB reflash was needed for this feature) gives each of
 the two OTA app slots 3264KB, versus the ~950KB firmware.bin this project currently
 produces.

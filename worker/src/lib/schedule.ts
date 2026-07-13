@@ -1,5 +1,4 @@
 import type { Env, ScheduleConfig } from "../types";
-import { GLOBAL_SCHEDULE_TARGET } from "../types";
 import { kvKeys } from "./kv-keys";
 
 const SCHEDULE_CACHE_TTL_SECONDS = 300;
@@ -56,21 +55,19 @@ export async function invalidateScheduleCache(env: Env, target: string): Promise
 }
 
 /**
- * Resolve schedule config: exact device override -> 'global' override -> {}
- * ("none"). First *existing* override wins outright — this is not a per-field
- * merge. There is no longer a 'default'-bucket tier in this chain (see
- * migrations/0003_include_default_images.sql plan notes) — the shared default
- * bucket contributes images, not schedule config.
+ * Resolve schedule config: this device's own override, or {} ("none") if it
+ * has never set one. Deliberately no shared 'global'/'default' fallback tier —
+ * that was a Worker-only addition on top of image_server.py, which only ever
+ * applied a schedule to the handful of devices that had one, and letting any
+ * authenticated user write a single shared row every other tenant's unconfigured
+ * devices inherited was a cross-tenant griefing vector (see privacy review,
+ * 2026-07-13). A device with no override of its own just runs on the firmware's
+ * own compiled-in default until its owner sets one explicitly.
  */
 export async function resolveScheduleConfig(
   env: Env,
   deviceKey: string
 ): Promise<{ config: ScheduleConfig; source: string }> {
-  const chain = [deviceKey, GLOBAL_SCHEDULE_TARGET];
-
-  for (const target of chain) {
-    const config = await getScheduleOverride(env, target);
-    if (config !== null) return { config, source: target };
-  }
-  return { config: {}, source: "none" };
+  const config = await getScheduleOverride(env, deviceKey);
+  return config !== null ? { config, source: deviceKey } : { config: {}, source: "none" };
 }

@@ -48,7 +48,6 @@ export interface FirmwareRelease {
 }
 
 export const DEFAULT_DEVICE_KEY = "default";
-export const GLOBAL_SCHEDULE_TARGET = "global";
 export const PACKED_BYTES = 960000;
 
 // Buffer is 1600x1200 landscape to match firmware; source images are fit to
