@@ -643,6 +643,13 @@ paths:
         '200': { description: OK }
         '403': { description: Forbidden }
 
+  /admin/crash-reports:
+    get:
+      summary: List recent crash/rollback reports across the caller's devices
+      description: Populated by POST /crash_report; pruned to the most recent 20 rows per device.
+      responses:
+        '200': { description: OK }
+
   /auth/register/options:
     post:
       summary: Start passkey registration (creates a new account)
@@ -732,6 +739,47 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: OK }
+        '401': { description: Invalid or missing device signature }
+
+  /crash_report:
+    post:
+      summary: "[Device-facing] Report a crash and/or OTA rollback"
+      description: >-
+        Called by firmware/src/ota_health.cpp + main.cpp's sendCrashReportIfPending(),
+        at most once per boot, only after a device has already proven connectivity via
+        /device_config this wake. Same auth as /device_config. An unclaimed device
+        (unresolved X-Device-MAC) still gets a 200 so it stops retrying, but nothing
+        is persisted.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XDeviceMac'
+        - name: X-Device-Nonce
+          in: header
+          schema: { type: string }
+        - name: X-Device-Signature
+          in: header
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                firmware_version: { type: string }
+                rolled_back: { type: boolean }
+                reset_reason: { type: string }
+                boot_attempts: { type: integer }
+                crash_task: { type: string }
+                crash_pc: { type: string }
+                crash_cause: { type: integer }
+                backtrace: { type: array, items: { type: string } }
+                backtrace_corrupted: { type: boolean }
+              required: [firmware_version, reset_reason]
+      responses:
+        '201': { description: Stored }
+        '200': { description: Accepted but not stored (unclaimed device) }
+        '400': { description: Missing X-Device-MAC or required body fields }
         '401': { description: Invalid or missing device signature }
 
   /hash:

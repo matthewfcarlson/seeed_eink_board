@@ -696,6 +696,25 @@ function renderFirmwareTargetForm(targetOptions: any[], releases: any[]) {
     : '<option value="">(sync a release first)</option>';
 }
 
+function renderCrashReportsTable(reports: any[]) {
+  const tbody = el("crash-reports-table");
+  tbody.innerHTML = reports.length
+    ? reports.map((r) => {
+        const backtrace = r.backtrace ? (JSON.parse(r.backtrace) as string[]).join(" ") : r.crash_pc || "";
+        return (
+          "<tr>" +
+          "<td><code>" + escapeHtml(r.device_mac) + "</code></td>" +
+          "<td><code>" + escapeHtml(r.firmware_version) + "</code></td>" +
+          "<td>" + escapeHtml(r.reset_reason) + (r.crash_task ? " (" + escapeHtml(r.crash_task) + ")" : "") + "</td>" +
+          "<td>" + (r.rolled_back ? "yes (" + r.boot_attempts + " attempts)" : "no") + "</td>" +
+          "<td><code style=\"font-size:11px; word-break:break-all;\">" + escapeHtml(backtrace) + "</code></td>" +
+          "<td>" + new Date(r.received_at * 1000).toLocaleString() + "</td>" +
+          "</tr>"
+        );
+      }).join("")
+    : '<tr><td colspan="6" class="hint">No crash or rollback reports.</td></tr>';
+}
+
 function renderClaimBanner() {
   const params = new URLSearchParams(location.search);
   const claimMac = params.get("claim");
@@ -781,14 +800,16 @@ async function renderApp() {
     );
   }));
 
-  const [releasesResult, targetsResult] = await Promise.all([
+  const [releasesResult, targetsResult, crashReportsResult] = await Promise.all([
     apiFetch("/admin/firmware/releases"),
     apiFetch("/admin/firmware/targets"),
+    apiFetch("/admin/crash-reports"),
   ]);
   renderFirmwareReleasesTable(releasesResult.releases);
   renderFirmwareTargetsTable(targetsResult.targets);
   const targetOptions = devices.map((d: any) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }));
   renderFirmwareTargetForm(targetOptions, releasesResult.releases);
+  renderCrashReportsTable(crashReportsResult.reports);
 }
 
 tryLogin(false);

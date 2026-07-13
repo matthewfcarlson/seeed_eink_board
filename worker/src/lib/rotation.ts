@@ -1,4 +1,4 @@
-import { DEFAULT_DEVICE_KEY, type Env, type ImageMeta, type RotationSnapshot } from "../types";
+import type { Env, ImageMeta, RotationSnapshot } from "../types";
 import { kvKeys } from "./kv-keys";
 
 async function loadImagesForKey(env: Env, deviceKey: string): Promise<ImageMeta[]> {
@@ -24,9 +24,11 @@ async function loadImagesForKey(env: Env, deviceKey: string): Promise<ImageMeta[
 }
 
 /** Bucket ids a device's rotation merges together — see migrations/0007_buckets.sql.
- *  Unclaimed devices (deviceKey === 'default') just get the shared bucket itself. */
+ *  Only ever called with a real, registered device's mac: routes/image-packed.ts
+ *  and routes/hash.ts short-circuit to the QR-registration image before ever
+ *  reaching rotation for an unclaimed device, so there's no 'default'-deviceKey
+ *  case to special-case here (see lib/auth-device.ts's resolveDeviceKey). */
 async function getSubscribedBucketIds(env: Env, deviceKey: string): Promise<string[]> {
-  if (deviceKey === DEFAULT_DEVICE_KEY) return [DEFAULT_DEVICE_KEY];
   const rows = await env.DB.prepare("SELECT bucket_id FROM device_buckets WHERE device_mac = ?")
     .bind(deviceKey)
     .all<{ bucket_id: string }>();

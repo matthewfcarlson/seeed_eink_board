@@ -1,9 +1,9 @@
 -- Reference copy of the full schema. The authoritative, applied version lives in
 -- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql,
 -- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
--- 0007_buckets.sql, 0008_user_display_name.sql, 0009_bucket_ownership.sql, and
--- 0010_remove_shared_targets.sql (wrangler d1 migrations tracks applied state
--- per-database).
+-- 0007_buckets.sql, 0008_user_display_name.sql, 0009_bucket_ownership.sql,
+-- 0010_remove_shared_targets.sql, and 0011_crash_reports.sql (wrangler d1
+-- migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -144,3 +144,26 @@ CREATE TABLE firmware_targets (
   version     TEXT NOT NULL REFERENCES firmware_releases(version),
   updated_at  INTEGER NOT NULL
 );
+
+-- Crash/rollback reports uploaded by firmware/src/ota_health.cpp + main.cpp's
+-- sendCrashReportIfPending(), via POST /crash_report — see migrations/0011.
+-- Pruned to the most recent 20 rows per device on every insert.
+CREATE TABLE crash_reports (
+  id                   TEXT PRIMARY KEY,
+  device_mac           TEXT NOT NULL REFERENCES devices(mac),
+  -- Version that actually experienced the failure - for a rollback this is the
+  -- version being rolled back *away from*, not whatever's running now.
+  firmware_version     TEXT NOT NULL,
+  rolled_back          INTEGER NOT NULL DEFAULT 0,
+  reset_reason         TEXT NOT NULL, -- esp_reset_reason(), e.g. "panic", "task_wdt", "brownout", "sw"
+  boot_attempts        INTEGER NOT NULL DEFAULT 0,
+  -- Populated only when a core dump was present in flash (see esp_core_dump_get_summary()) -
+  -- null for a functional-failure rollback with no actual crash.
+  crash_task           TEXT,
+  crash_pc             TEXT,    -- hex PC, e.g. "0x420182a0"
+  crash_cause          INTEGER,
+  backtrace            TEXT,    -- JSON array of hex PC strings, or null
+  backtrace_corrupted  INTEGER,
+  received_at          INTEGER NOT NULL
+);
+CREATE INDEX idx_crash_reports_device_mac ON crash_reports(device_mac, received_at DESC);

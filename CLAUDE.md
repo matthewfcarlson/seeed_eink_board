@@ -229,10 +229,11 @@ on that instead of adding a separate update mechanism.
    `lib/schedule.ts`'s per-device-only schedule overrides). There is deliberately no
    shared `'default'`/`'global'` target any authenticated user could set for every
    device on the server at once — that was removed as a cross-tenant risk (see
-   privacy review, 2026-07-13): this board has no rollback-on-crash, so letting any
-   signed-up account force-flash every other tenant's devices was a real
-   brick-someone-else's-hardware vector, not just a config convenience. No target
-   ever set means a device's firmware is never touched.
+   privacy review, 2026-07-13): even with the rollback safety net below, a firmware
+   that boots but is silently broken can still take several wake cycles to recover
+   from, so letting any signed-up account force-flash every other tenant's devices
+   was a real risk to other tenants' hardware, not just a config convenience. No
+   target ever set means a device's firmware is never touched.
 5. On its next wake, `GET /device_config` includes `firmware_version` /
    `firmware_sha256` when a target resolves for that device. If it differs from the
    firmware's own compiled-in `FIRMWARE_VERSION`, the device downloads
@@ -240,14 +241,37 @@ on that instead of adding a separate update mechanism.
    committing), flashes it with the ESP32 `Update` library, and reboots. A failed or
    corrupt download aborts cleanly and leaves the running firmware untouched.
 
-**Safety model:** this board's stock Arduino/ESP-IDF build does not have automatic
-rollback-on-crash enabled, so a release that flashes clean but bootloops isn't
-self-healing. The mitigation is staged rollout, not automatic recovery: target one
-device's MAC, confirm it's healthy, then target the next — each device is targeted
-individually, one MAC at a time. The board's default partition table (`default_8MB.csv`, already in place — no
-partition change or one-time USB reflash was needed for this feature) gives each of
-the two OTA app slots 3264KB, versus the ~950KB firmware.bin this project currently
-produces.
+**Safety model:** the stock Arduino-ESP32 core for esp32s3 (as pulled by this
+project's unpinned `platform = espressif32`) ships with both
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` and `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`
+(ELF format) on by default, and the board's own `default_8MB.csv` (already in
+place — no partition change or one-time USB reflash was needed) already reserves a
+64KB `coredump` partition alongside the two 3264KB OTA app slots (versus the
+~1.1MB firmware.bin this project currently produces). `firmware/src/ota_health.h/
+.cpp` drives both:
+  - **Boot-time crash → automatic rollback.** `Update.end(true)` (called from
+    `performFirmwareOTA()`) leaves the freshly-flashed partition in the bootloader's
+    `PENDING_VERIFY` state. If it panics/watchdog-resets before confirming itself,
+    the *next* boot's bootloader detects the still-pending state and switches back
+    to the previous partition on its own, before any application code runs.
+  - **Boots fine but never works → app-forced rollback.** That bootloader mechanism
+    only guards against boot-time crashes, not firmware that boots but never manages
+    to prove itself (e.g. a WiFi/HTTP regression). `OtaHealth` tracks an NVS boot-
+    attempt counter across wake cycles and calls
+    `esp_ota_mark_app_invalid_rollback_and_reboot()` after
+    `OTA_MAX_UNCONFIRMED_BOOT_ATTEMPTS` (3) boots without a successful authenticated
+    `/device_config` round trip (`OtaHealth::confirmHealthy()`, called right after
+    that succeeds, is what cancels the rollback watch for good).
+  - **Crash/rollback reporting.** Whenever either path fires, or a core dump is
+    present in flash from an unrelated crash, `OtaHealth` builds a compact JSON
+    report (reset reason via `esp_reset_reason()`, plus `esp_core_dump_get_summary()`'s
+    crashing task/PC/backtrace when available) and queues it in NVS. `main.cpp`'s
+    `sendCrashReportIfPending()` uploads it to `POST /crash_report` once connectivity
+    is confirmed each wake; `/admin`'s Firmware panel lists recent reports per device.
+  - This is still not a substitute for staged rollout — a bad firmware that neither
+    crashes nor fails its `/device_config` round trip (e.g. one that garbles the
+    display but is otherwise "healthy") won't trigger any of the above. Target one
+    device's MAC, confirm it's actually behaving correctly, then target the next.
 
 ### Color Palette
 

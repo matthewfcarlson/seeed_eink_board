@@ -6,8 +6,10 @@ const DEVICE_CACHE_TTL_SECONDS = 60 * 60 * 24; // 24h; correctness-critical chan
 
 /**
  * Resolve a normalized MAC to the device_key its requests should be served under.
- * Unregistered MACs fall back to the shared 'default' bucket (matches image_server.py's
- * directory-fallback behavior) rather than being rejected — see plan §Auth.
+ * Unregistered MACs resolve to the 'default' sentinel rather than being rejected
+ * outright — routes/image-packed.ts and routes/hash.ts turn that into a "scan to
+ * register" QR image, not any bucket's content (there is no shared bucket to fall
+ * back to — see migrations/0009_bucket_ownership.sql).
  *
  * A row with no secret is treated the same as no row at all: deviceKey stays
  * 'default'. That's what forces devices claimed before the secret column existed

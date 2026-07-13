@@ -16,6 +16,11 @@ export const TEST_API_KEY = "eink_contract_test_fixed_key_do_not_use_in_prod";
 export interface WorkerServerHandle {
   baseUrl: string;
   apiKey: string;
+  /** Runs raw SQL directly against this run's isolated local D1 — for seeding
+   *  states the HTTP API can't produce (e.g. a legacy ownerless bucket row),
+   *  so tests can prove access control fails closed regardless of how such a
+   *  row might exist, not just that today's insert path avoids creating one. */
+  execSql(sql: string): void;
   stop(): Promise<void>;
 }
 
@@ -65,6 +70,13 @@ export async function startWorkerServer(port: number): Promise<WorkerServerHandl
   return {
     baseUrl,
     apiKey: TEST_API_KEY,
+    execSql: (sql: string) => {
+      execFileSync(
+        WRANGLER_BIN,
+        ["d1", "execute", "eink-local", "--env", "local", "--local", "--persist-to", persistTo, "--command", sql],
+        { cwd: WORKER_ROOT, stdio: "pipe" }
+      );
+    },
     stop: async () => {
       if (child.pid) {
         try {

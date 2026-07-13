@@ -203,6 +203,13 @@ export function renderAdminPage(): string {
       </div>
       <button id="firmware-target-save-btn">Set Target</button>
     </div>
+
+    <h3 style="margin-top:22px;">Crash &amp; Rollback Reports</h3>
+    <p class="hint">Filled in automatically when a device panics, watchdog-resets, or an OTA gets rolled back after failing to confirm itself healthy. Backtrace entries are raw program-counter addresses from the on-device core dump — symbolize them against a matching .elf build for more than the version/reason.</p>
+    <table>
+      <thead><tr><th>Device</th><th>Version</th><th>Reason</th><th>Rolled back</th><th>Backtrace</th><th>Received</th></tr></thead>
+      <tbody id="crash-reports-table"></tbody>
+    </table>
   </div>
 
   <div class="card">

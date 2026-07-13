@@ -296,3 +296,60 @@ describe("Bucket content requires device identification (worker only)", () => {
     expect(hashRes.status).toBe(400);
   });
 });
+
+describe("The 'default' bucket can never be recreated as a shared/ownerless bucket (worker only)", () => {
+  // POST /admin/buckets's request body only ever reads `label` (routes/admin/buckets.ts)
+  // — id is always crypto.randomUUID(), server-side, never client input. Proves that
+  // holds even when a caller actively tries to force the reserved id.
+  it("ignores a client-supplied id, including an attempt to claim 'default'", async () => {
+    const res = await fetch(`${worker.baseUrl}/admin/buckets`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "default", label: "Attempted default bucket" }),
+    });
+    expect(res.status).toBe(201);
+    const body = await asJson(res);
+    expect(body.id).not.toBe("default");
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  // Simulates the one way an ownerless 'default' bucket could still exist — not
+  // through the app (the test above rules that out), but a row inserted some
+  // other way (a hand-run SQL statement, a future migration mistake, etc.). Proves
+  // lib/bucket-access.ts fails closed regardless of *how* such a row got there,
+  // which is the actual guarantee against this ever being "shared with all users"
+  // again, not just that today's single INSERT call site behaves.
+  it("is completely inert to every user if an ownerless row exists by any other means", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    worker.execSql(
+      `INSERT INTO buckets (id, owner_id, label, created_at) VALUES ('default', NULL, 'Orphaned default', ${now});`
+    );
+
+    const listRes = await fetch(`${worker.baseUrl}/admin/buckets`, {
+      headers: { Authorization: `Bearer ${worker.apiKey}` },
+    });
+    const { buckets } = await asJson(listRes);
+    expect(buckets.find((b: { id: string }) => b.id === "default")).toBeUndefined();
+
+    const imagesRes = await fetch(`${worker.baseUrl}/admin/images?device_key=default`, {
+      headers: { Authorization: `Bearer ${worker.apiKey}` },
+    });
+    expect(imagesRes.status).toBe(403);
+
+    const subscribeRes = await fetch(`${worker.baseUrl}/admin/devices/${DEVICE_MAC}/buckets`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ bucket_ids: ["default"] }),
+    });
+    expect(subscribeRes.status).toBe(403);
+
+    const uploadRes = await fetch(`${worker.baseUrl}/admin/images/upload?device_key=default&filename=x.jpg`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${worker.apiKey}`, "Content-Type": "image/jpeg" },
+      body: fs.readFileSync(path.join(FIXTURES_IMAGES_DIR, "default", "alpha.jpg")),
+    });
+    expect(uploadRes.status).toBe(403);
+
+    worker.execSql(`DELETE FROM buckets WHERE id = 'default';`);
+  });
+});

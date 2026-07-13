@@ -12,6 +12,7 @@
 #include "display.h"
 #include "config_manager.h"
 #include "ble_provisioning.h"
+#include "ota_health.h"
 #include "version.h"
 
 #ifndef IMAGE_INITIAL_RESPONSE_TIMEOUT_MS
@@ -34,6 +35,7 @@
 Spectra6Display display;
 ConfigManager configManager;
 BLEProvisioning bleProvisioning(configManager);
+OtaHealth otaHealth;
 
 // Boot count stored in RTC memory (survives deep sleep)
 RTC_DATA_ATTR int bootCount = 0;
@@ -329,6 +331,36 @@ bool performFirmwareOTA(const String& version, const String& expectedSha256Hex) 
 
     Serial.printf("Firmware update verified and flashed in %lu ms\n", millis() - startTime);
     return true;
+}
+
+/**
+ * Uploads whatever crash/rollback report OtaHealth has queued (see ota_health.h) —
+ * a boot-time panic/watchdog reset, a bootloader/self-triggered OTA rollback, or
+ * both. Only called once WiFi + an authenticated round trip already succeeded this
+ * wake, so there's nothing new to prove here. Leaves the queued report in place on
+ * any failure - NVS storage is cheap and it'll just retry next wake.
+ */
+void sendCrashReportIfPending() {
+    if (!otaHealth.hasPendingReport()) return;
+
+    String url = getBaseURL() + "/crash_report";
+    HTTPClient http;
+    WiFiClientSecure secureClient;
+    beginRequest(http, secureClient, url);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    addCommonHeaders(http, "/crash_report");
+    http.addHeader("Content-Type", "application/json");
+
+    String body = otaHealth.getPendingReportJson();
+    int httpCode = http.POST(body);
+    http.end();
+
+    if (httpCode == HTTP_CODE_OK || httpCode == 201) {
+        Serial.println("Crash report uploaded");
+        otaHealth.clearPendingReport();
+    } else {
+        Serial.printf("Crash report upload failed (HTTP %d) - will retry next wake\n", httpCode);
+    }
 }
 
 bool isClockValid(time_t now = time(nullptr)) {
@@ -898,8 +930,16 @@ void runNormalMode() {
         enterDeepSleep(calculateSleepSeconds());
     }
 
-    syncRemoteConfigAndTime();
+    bool remoteConfigSynced = syncRemoteConfigAndTime();
     printClockStatus();
+
+    if (remoteConfigSynced) {
+        // A successful authenticated round trip is our proof this firmware actually
+        // works - cancel any pending OTA rollback watch and flush any queued crash/
+        // rollback report now that we have connectivity. See ota_health.h.
+        otaHealth.confirmHealthy();
+        sendCrashReportIfPending();
+    }
 
     // Firmware OTA check happens regardless of quiet hours — it's rare and the
     // device is already awake and connected. firmwareTargetVersion is only ever
@@ -907,6 +947,7 @@ void runNormalMode() {
     if (firmwareTargetVersion.length() > 0 && firmwareTargetVersion != FIRMWARE_VERSION) {
         if (performFirmwareOTA(firmwareTargetVersion, firmwareTargetSha256)) {
             Serial.println("Rebooting into new firmware...");
+            otaHealth.recordOtaAttempt(FIRMWARE_VERSION, firmwareTargetVersion);
             disconnectWiFi();
             ESP.restart();
         } else {
@@ -972,6 +1013,12 @@ void setup() {
     // Initialize configuration manager
     configManager.begin();
     configManager.ensureDeviceSecret();
+
+    // Rollback safety net: as early as possible, before anything else has a chance
+    // to crash. May not return (forces a reboot) if a just-flashed OTA has failed to
+    // confirm itself healthy too many wake cycles in a row - see ota_health.h.
+    otaHealth.begin();
+    otaHealth.checkBootHealth();
 
     // Check if config button (Button 1 / GPIO2) is held to enter config mode
     if (checkConfigButton()) {

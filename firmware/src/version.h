@@ -14,6 +14,6 @@
  *   6. Set a firmware target (device MAC first, ideally, then 'default'/'global')
  *      in /admin to actually roll it out — see CLAUDE.md's OTA section.
  */
-#define FIRMWARE_VERSION "0.3.3"
+#define FIRMWARE_VERSION "0.4.0"
 
 #endif // FIRMWARE_VERSION_H

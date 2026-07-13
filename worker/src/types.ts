@@ -14,8 +14,9 @@ export interface ImageMeta {
   filename: string;
   packedHash: string;
   packedBytes: number;
-  // The device_key bucket this image's KV blobs actually live under (its own
-  // key, or 'default' when merged in from the shared bucket) — see rotation.ts.
+  // Which of the device's subscribed buckets this image's KV blobs actually live
+  // under (a device can subscribe to several — see device_buckets in schema.sql) —
+  // see rotation.ts.
   sourceDeviceKey: string;
 }
 

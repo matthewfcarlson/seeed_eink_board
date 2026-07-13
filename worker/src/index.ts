@@ -5,12 +5,14 @@ import { registerHashRoute } from "./routes/hash";
 import { registerImagePackedRoute } from "./routes/image-packed";
 import { registerCurrentRoute } from "./routes/current";
 import { registerFirmwareBinRoute } from "./routes/firmware-bin";
+import { registerCrashReportRoute } from "./routes/crash-report";
 import { registerAdminDeviceRoutes } from "./routes/admin/devices";
 import { registerAdminBucketRoutes } from "./routes/admin/buckets";
 import { registerAdminImageRoutes } from "./routes/admin/images";
 import { registerAdminScheduleRoutes } from "./routes/admin/schedule";
 import { registerAdminAuthRoutes } from "./routes/admin/auth";
 import { registerAdminFirmwareRoutes, syncLatestFirmwareRelease } from "./routes/admin/firmware";
+import { registerAdminCrashReportRoutes } from "./routes/admin/crash-reports";
 import { registerAuthPasskeyRoutes } from "./routes/auth-passkey";
 import { renderAdminPage } from "./admin-ui";
 import { renderLandingPage } from "./landing-ui";
@@ -34,6 +36,7 @@ registerHashRoute(app);
 registerImagePackedRoute(app);
 registerCurrentRoute(app);
 registerFirmwareBinRoute(app);
+registerCrashReportRoute(app);
 
 // Admin-facing — require Authorization: Bearer <api_key>.
 registerAdminDeviceRoutes(app);
@@ -42,6 +45,7 @@ registerAdminImageRoutes(app);
 registerAdminScheduleRoutes(app);
 registerAdminAuthRoutes(app);
 registerAdminFirmwareRoutes(app);
+registerAdminCrashReportRoutes(app);
 
 // Public — passkey registration/login. The only way to create an account.
 registerAuthPasskeyRoutes(app);
