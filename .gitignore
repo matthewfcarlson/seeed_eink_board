@@ -1,14 +1,3 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv/
-
 # PlatformIO build artifacts
 .pio/
 
@@ -19,12 +8,6 @@ wheels/
 *.JPG
 *.JPEG
 *.PNG
-
-# ...except the worker's contract-test fixtures, which must be checked in for
-# the dual-run test harness to be reproducible on a fresh clone.
-!worker/test/contract/fixtures/images/**/*.jpg
-!worker/test/contract/fixtures/images/**/*.jpeg
-!worker/test/contract/fixtures/images/**/*.png
 
 # Node / Cloudflare Workers (worker/)
 worker/node_modules/
@@ -44,6 +27,3 @@ worker/public/static/*.js.map
 # OS files
 .DS_Store
 Thumbs.db
-
-# Image server state
-.eink_rotation_state.json

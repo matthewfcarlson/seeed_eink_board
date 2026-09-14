@@ -14,7 +14,7 @@ Custom firmware for the Seeed Studio XIAO ePaper Display Board (EE02) driving a 
 
 - [PlatformIO](https://platformio.org/) (CLI or VSCode extension)
 - USB-C cable with data lines (not charge-only)
-- Python 3.x with `uv` for the image server
+- A deployed Cloudflare Worker backend (see the repository root `README.md`'s "Deploy the Cloudflare Worker" step) — or `npm run dev` inside `worker/` for local development
 
 ## Quick Start
 
@@ -25,13 +25,14 @@ your first build. WiFi is provisioned after flashing, over Bluetooth (see
 
 ### 1. Set Default Server Address (Optional)
 
-Edit `src/config_manager.h` to set the default image server:
+Edit `src/config_manager.h` to point the compiled-in default at your own deployed Worker (these are only the *fallback* values — Bluetooth provisioning in step 4 below overrides them at runtime, so this step can be skipped entirely):
 
 ```cpp
-#define DEFAULT_SERVER_HOST "192.168.86.34"  // Your server's IP
-#define DEFAULT_SERVER_PORT 5000
+#define DEFAULT_SERVER_HOST "eink.example.workers.dev"  // Your Worker's hostname
+#define DEFAULT_SERVER_PORT 443
+#define DEFAULT_USE_HTTPS true
 #define DEFAULT_IMAGE_ENDPOINT "/image_packed"
-#define DEFAULT_SLEEP_MINUTES 15
+#define DEFAULT_SLEEP_MINUTES 60
 #define DEFAULT_ACTIVE_START_HOUR 8
 #define DEFAULT_ACTIVE_END_HOUR 20
 #define DEFAULT_TIMEZONE_OFFSET_MINUTES 0
@@ -41,7 +42,7 @@ Edit `src/config_manager.h` to set the default image server:
 
 ```bash
 cd firmware
-uv run pio run
+pio run
 ```
 
 ### 3. Flash the Firmware
@@ -49,7 +50,7 @@ uv run pio run
 Connect the EE02 board via USB. If the device is in deep sleep, press the reset button to wake it.
 
 ```bash
-uv run pio run -t upload --upload-port /dev/ttyACM0
+pio run -t upload --upload-port /dev/ttyACM0
 ```
 
 **Note:** The USB port may vary. On Linux it's typically `/dev/ttyACM0`, on macOS `/dev/cu.usbmodem*`, on Windows `COM3` or similar.
@@ -62,25 +63,14 @@ A freshly flashed device has no WiFi credentials, so it boots straight into
 Bluetooth configuration mode — see "Changing Configuration at Runtime" below to
 pair with it from `/provision` and set your WiFi network and server address.
 
-### 5. Start the Image Server
+### 5. Register the Device and Upload Images
 
-In the repository root:
-
-```bash
-# Create a symlink to your image
-ln -sf your_image.jpg image.jpg
-
-# Start the server
-uv run python image_server.py
-```
-
-The server runs on `http://0.0.0.0:5000` with these endpoints:
-- `/device_config` - Current epoch time plus optional schedule overrides
-- `/` - Status page with embedded schedule editors
-- `/schedule` - Focused browser UI for editing schedule overrides
+An unregistered board's display shows a QR code with its MAC address instead of your photos. Scan it (or open `/admin?claim=<mac>` on your Worker) to claim the device into your account, then upload images from `/admin`. See the repository root `README.md` for the full walkthrough. The Worker exposes these device-facing endpoints (see `worker/openapi.yaml` for the complete API):
+- `/device_config` - Current epoch time plus resolved schedule/firmware target
 - `/image_packed` - 960KB binary data for the display
 - `/hash` - 16-character hash for change detection
-- `/image` - JPEG preview
+- `/firmware_bin` - OTA firmware binary download
+- `/crash_report` - Crash/rollback reporting
 
 ### 6. Test
 
@@ -115,7 +105,7 @@ screen /dev/ttyACM0 115200
 ### Using PlatformIO Monitor
 
 ```bash
-uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+pio device monitor --port /dev/ttyACM0 --baud 115200
 ```
 
 ### Important: Deep Sleep Disconnects USB
@@ -130,7 +120,7 @@ If you want the monitor to reconnect automatically after each sleep cycle:
 
 ```bash
 while true; do
-  uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+  pio device monitor --port /dev/ttyACM0 --baud 115200
   sleep 1
 done
 ```
@@ -145,9 +135,9 @@ Boot count: 1
 Wakeup was not from deep sleep (code: 0)
 ConfigManager: Initialized
 Current Configuration:
-  Server: 192.168.86.34:5000
+  Server: your-worker.workers.dev:443 (HTTPS)
   Endpoint: /image_packed
-  Full URL: http://192.168.86.34:5000/image_packed
+  Full URL: https://your-worker.workers.dev/image_packed
   Refresh interval: 15 minutes
   Active window: 08:00-20:00
   Timezone offset: 0 minutes from UTC
@@ -159,16 +149,16 @@ NORMAL OPERATION MODE
 Connecting to WiFi: YourNetwork
 .
 Connected! IP: 192.168.86.24
-Fetching device config from: http://192.168.86.34:5000/device_config
+Fetching device config from: https://your-worker.workers.dev/device_config
 Clock synchronized from server epoch: 1772290800
 Clock status: utc=1772290800, local=08:00, active_window=yes
-Checking image hash at: http://192.168.86.34:5000/hash
+Checking image hash at: https://your-worker.workers.dev/hash
 Last known hash: (none)
 Server hash: 942d3cfc05c8fa41
 Image changed - will download new image
 Spectra6: Initializing display...
 Spectra6: Buffer allocated in PSRAM (960000 bytes)
-Fetching image from: http://192.168.86.34:5000/image_packed
+Fetching image from: https://your-worker.workers.dev/image_packed
 Content length: 960000 bytes
 Downloaded 960000 bytes in 10395 ms
 Spectra6: Starting display refresh...
@@ -182,7 +172,7 @@ Going to sleep now...
 
 When the image hasn't changed:
 ```
-Checking image hash at: http://192.168.86.34:5000/hash
+Checking image hash at: https://your-worker.workers.dev/hash
 Last known hash: 942d3cfc05c8fa41
 Server hash: 942d3cfc05c8fa41
 Image unchanged - skipping download
@@ -193,7 +183,7 @@ Entering deep sleep for 15 minutes 0 seconds...
 
 When the device wakes during quiet hours:
 ```
-Fetching device config from: http://192.168.86.34:5000/device_config
+Fetching device config from: https://your-worker.workers.dev/device_config
 Clock synchronized from server epoch: 1772337600
 Clock status: utc=1772337600, local=21:00, active_window=no
 Currently in quiet hours - skipping hash/image fetch
@@ -227,7 +217,7 @@ Either way, the device starts advertising over Bluetooth as `EInk-Setup`.
    Safari/iOS), open the worker's `/provision` page (linked from its home page).
 2. Click "Connect to device" and select `EInk-Setup` from the browser's picker.
 3. Configure WiFi (use "Scan" to list nearby networks) plus:
-   - **Server Host**: IP address or domain name (e.g., `eink.example.com`)
+   - **Server Host**: your Worker's hostname (e.g., `eink.example.workers.dev`)
    - **Server Port**, **Use HTTPS**, **Image Endpoint**
    - **Refresh Interval**: Minutes between wakeups during active hours (1-1440)
    - **Active Start/End Hour**: Local hours bounding the active window (0-23)
@@ -244,13 +234,7 @@ never overwrite them).
 
 ### Remote Schedule Overrides
 
-The image server can override the local schedule by serving `device_config.json`.
-
-- Global override: `device_config.json` in the repository root
-- Default device override: `images/default/device_config.json`
-- Per-device override: `images/<mac-address>/device_config.json`
-
-Example:
+The Worker can override a device's local schedule — set this from `/admin`'s schedule editor (backed by `PUT /admin/schedule/{mac}`, one override per device MAC; there's no shared "all devices" tier).
 
 ```json
 {
@@ -261,9 +245,7 @@ Example:
 }
 ```
 
-Only the keys you include are overridden; everything else stays on the device's locally stored configuration.
-
-If you prefer not to edit JSON by hand, start `image_server.py` and open the main page at `http://your-server:5000/`. It includes embedded schedule editors for the global fallback, the default schedule, and each device that has already contacted the server.
+Only the keys you include are overridden; clearing the override (`DELETE /admin/schedule/{mac}`) falls back to the device's locally stored configuration from Bluetooth provisioning.
 
 ## Troubleshooting
 
@@ -281,22 +263,19 @@ If you prefer not to edit JSON by hand, start `image_server.py` and open the mai
 
 ### HTTP requests fail (code: -1)
 
-- Verify the server is running: `curl http://your-server:5000/hash`
-- Check the server IP address matches your configuration
-- Ensure firewall allows connections on port 5000
+- Verify the Worker is reachable: `curl https://your-worker.workers.dev/`
+- Check the server host/port/HTTPS settings saved during Bluetooth provisioning
+- If pointed at a local `wrangler dev` server instead of a deployed Worker, confirm **Use HTTPS** is unchecked and the board is on the same network as your dev machine
 
 ### Display doesn't refresh
 
 - Check serial output for errors
-- Verify the image server returns valid data: `curl http://localhost:5000/hash`
-- The refresh takes 20-30 seconds, and the server may need extra time to process a large image before the download starts
-- HEIC files often take longer to process than JPEG or PNG
+- Verify the Worker is returning valid data: `curl -H "X-Device-MAC: <your-mac>" https://your-worker.workers.dev/hash`
+- The refresh takes 20-30 seconds
 
 ### Image appears rotated
 
-The image orientation depends on how you position the display. You can:
-- Rotate the source image before serving
-- Or modify the image processing in `image_server.py`
+Images are EXIF-corrected and dithered server-side on upload (see `worker/src/lib/decode.ts` and `dither.ts`). Re-upload the source photo from `/admin` if its orientation looks wrong.
 
 ## File Structure
 
@@ -360,9 +339,10 @@ section for the full flow; the short version:
 2. `git tag vX.Y.Z && git push mine vX.Y.Z` (must match, with a leading `v`).
 3. GitHub Actions builds and attaches `firmware.bin` to a new release automatically.
 4. In the Worker's `/admin` page's Firmware panel, sync the release (or wait up to
-   6h for the automatic sync), then set a target version — start with a single
-   device's MAC before promoting to `'default'`/`'global'`, since a bad release
-   isn't automatically rolled back if it boots but misbehaves.
+   6h for the automatic sync), then set a target version for a specific device
+   MAC — there's no shared "every device" target, so roll out one MAC at a
+   time and confirm it's healthy before targeting the next, since a bad
+   release isn't automatically rolled back if it boots but misbehaves.
 
 ## Power Consumption
 

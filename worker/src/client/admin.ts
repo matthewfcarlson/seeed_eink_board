@@ -292,10 +292,28 @@ el("schedule-modal-close-btn").addEventListener("click", () => {
   el("schedule-modal-overlay").classList.remove("open");
 });
 
+// "Uptime" here means wall-clock time since the device's row was first created
+// (its initial registration/provisioning), not continuous runtime — the board
+// deep-sleeps between wake cycles, so there's no meaningful "time since last boot".
+function formatUptime(createdAtSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - createdAtSeconds);
+  const days = Math.floor(seconds / 86400);
+  if (days > 0) {
+    const hours = Math.floor((seconds % 86400) / 3600);
+    return days + "d" + (hours > 0 ? " " + hours + "h" : "");
+  }
+  const hours = Math.floor(seconds / 3600);
+  if (hours > 0) {
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return hours + "h" + (minutes > 0 ? " " + minutes + "m" : "");
+  }
+  return Math.floor(seconds / 60) + "m";
+}
+
 function renderDevicesTable(devices: any[]) {
   const tbody = el("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="hint">No devices registered yet.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -308,6 +326,9 @@ function renderDevicesTable(devices: any[]) {
     const firmware = d.running_firmware_version
       ? escapeHtml(d.running_firmware_version)
       : '<span class="hint">unknown</span>';
+    const uptime = d.created_at
+      ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatUptime(d.created_at) + "</span>"
+      : '<span class="hint">n/a</span>';
     const currentImage = !d.current_image
       ? '<span class="hint">n/a</span>'
       : d.current_image.thumbnail_data_url && d.current_image.id
@@ -321,6 +342,7 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + escapeHtml(d.label || "") + "</td>" +
       "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
+      "<td>" + uptime + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
       "<td>" + bucketLabelsFor(d.bucket_ids) + '<br><button class="ghost" onclick="openBucketModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +

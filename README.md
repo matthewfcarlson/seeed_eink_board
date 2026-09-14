@@ -1,235 +1,164 @@
 # Seeed EE02 E-Ink Display Project
 
-Display images on a 13.3" Spectra 6 color e-ink display using custom firmware for the Seeed Studio XIAO ePaper Display Board (EE02).
+Display images on a 13.3" Spectra 6 color e-ink display using custom firmware for the Seeed Studio XIAO ePaper Display Board (EE02), backed by a Cloudflare Worker.
 
-##  So what does this project do
+## So what does this project do
 
 Replaces the Seeed factory-installed firmware on the EE02 board with custom firmware that:
 
 1. Connects to your WiFi network
-2. Wakes up from deep sleep to fetch an image from an image server that you can run locally or on a remote server
-3. Displays the image on a spectra 6 eink screen
-4. Goes back to sleep to conserve battery (can vary sleep interval)
+2. Wakes up from deep sleep to fetch an image from a Cloudflare Worker you deploy to your own Cloudflare account
+3. Displays the image on a Spectra 6 e-ink screen
+4. Goes back to sleep to conserve battery (sleep interval is configurable)
 5. Skips wakeups during configurable quiet hours (like overnight when no one is seeing the display)
 6. Wakes up periodically to check for new images and only refreshes the image if it has changed
+7. Can update its own firmware over the air, with automatic rollback if a bad build fails to boot or never proves itself healthy
+
+There is no local Python server or filesystem-based image folder anymore — every device, image, schedule, and firmware target is managed through the Worker's `/admin` dashboard and stored in Cloudflare D1/KV.
+
+---
+
+## Architecture
+
+```
+┌───────────────────────┐              ┌─────────────────┐
+│   Cloudflare Worker    │              │   EE02 Board    │
+│  (Hono + D1 + KV)       │              │ Arduino Firmware │
+│                         │              │                 │
+│  GET /device_config     │◄─────────────│ (wake from deep │
+│  GET /hash               │              │  sleep)         │
+│  GET /image_packed       │─────────────►│                 │
+│  GET /firmware_bin        │              │ Display image   │
+│  POST /crash_report       │◄─────────────│ (dual-controller│
+│                         │              │  SPI)           │
+│  /admin (dashboard)      │              │                 │
+│  /provision (BLE setup)  │              │ Deep sleep      │
+└───────────────────────┘              └─────────────────┘
+```
+
+- The **Worker** (`worker/`) is the entire backend: device registry, per-device image buckets (with server-side dithering to the 6-color palette), schedules/quiet hours, firmware catalog + rollout targets, and crash report collection. It's deployed to your own Cloudflare account.
+- The **firmware** (`firmware/`) runs on the ESP32-S3 and talks to the Worker over plain HTTPS, authenticated per-request with an HMAC device signature (not the admin API key).
+- Accounts are passkey-only (Face ID / Touch ID / Windows Hello / security key) — there's no email or password anywhere in this system.
+
+See `worker/openapi.yaml` for the full API reference (importable into Postman/Insomnia/Swagger UI).
 
 ---
 
 ## What's required
 
-- Python 3.10 or newer
-- `uv`
+- Node.js and npm
+- A [Cloudflare account](https://dash.cloudflare.com/sign-up) (the Worker needs D1, KV, and a paid Workers plan — see "Deploy the Worker" below for why)
+- [PlatformIO](https://platformio.org/) (CLI or VSCode extension)
 - A Seeed EE02 / XIAO ePaper board with a 13.3" Spectra 6 panel
 - A USB-C data cable
 - A 2.4 GHz WiFi network
+- Chrome or Edge (desktop or Android) for the Bluetooth provisioning page — Web Bluetooth isn't supported in Safari/iOS
 
 ---
 
 ## Step-by-Step Setup Guide
 
-### Step 1: Install `uv`
+### Step 1: Deploy the Cloudflare Worker
 
-If you do not already have `uv`, install it with:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Step 2: Download This Project
+The Worker is the server half of this project — it replaces what used to be a local Python script.
 
 ```bash
-git clone <repository-url>
-cd seeed_eink_board
+cd worker
+npm install
+npx wrangler login
 ```
 
-Or download and extract the ZIP file from the repository.
-
-### Step 3: Install Project Dependencies
-
-This installs Python packages and PlatformIO:
+Create the resources the Worker needs, then wire their ids into `wrangler.toml`:
 
 ```bash
-uv sync
+npx wrangler d1 create eink
+npx wrangler kv namespace create eink-kv
 ```
 
-This may take a few minutes the first time as it downloads PlatformIO and the ESP32 toolchain.
+Edit `worker/wrangler.toml`'s top-level `[[d1_databases]]` and `[[kv_namespaces]]` blocks with the `database_id` / `id` values those commands print (the `[env.local]` block underneath is for local dev only — leave its dummy ids alone).
 
-### Step 4: WiFi Credentials
+Apply the database schema and deploy:
 
-Nothing to configure here before building — WiFi isn't compiled into the
-firmware. You'll provision it over Bluetooth after flashing (Step 6), since a
-freshly flashed board boots straight into Bluetooth setup mode with no WiFi
-credentials saved yet. Note the ESP32 only supports **2.4GHz WiFi** (not 5GHz).
-
-### Step 5: Find Your Computer's IP Address
-
-The board needs the IP address of the computer that will run `image_server.py`.
-
-Linux:
 ```bash
-hostname -I
+npm run db:migrate:remote
+npm run deploy
 ```
 
-macOS:
+`npm run deploy` prints your Worker's URL (`https://<name>.<subdomain>.workers.dev`, or your own custom domain if you've attached one). Note it — you'll need it during device provisioning.
+
+**Note:** `/admin/images/upload` does server-side image decoding and dithering, which is CPU-heavy enough that it needs the higher `cpu_ms` limit set in `wrangler.toml` — that only works on a paid Workers plan, not the free tier.
+
+**Optional:** for automatic OTA firmware cataloging from GitHub releases, set a `GITHUB_TOKEN` secret:
+
 ```bash
-ipconfig getifaddr en0
+npx wrangler secret put GITHUB_TOKEN
 ```
 
-The address can be on your local network or a remote server depending on where you want to run the image server.
+Without it, you can still sync releases manually from `/admin`'s Firmware panel.
 
-### Step 6: Configure the Image Server Address
+### Step 2: Create Your Account
 
-Assuming at least for testing purposes you are running the image server from this repository.  Of course you can run it from wherever you like.
+Open your deployed Worker's URL in a browser, click **Open Admin Dashboard**, then **Create account** and follow your browser/OS prompt to create a passkey. That passkey *is* your account — there's no separate signup form. Save the API key shown once if you want scripted (non-browser) access to the admin API; otherwise you can always log back in with the same passkey.
 
-Edit `firmware/src/config_manager.h`:
-
-Find this line and change the IP address to your server's IP:
-
-```cpp
-#define DEFAULT_SERVER_HOST "192.168.86.33"  // Change this to your image server's IP address
-```
-
-The other settings should be fine:
-- `DEFAULT_SERVER_PORT 5000` - The server runs on port 5000
-- `DEFAULT_IMAGE_ENDPOINT "/image_packed"` - The URL path for images
-- `DEFAULT_SLEEP_MINUTES 15` - minutes between wakeups during active hours
-- `DEFAULT_ACTIVE_START_HOUR 8` - local hour when normal refreshes begin
-- `DEFAULT_ACTIVE_END_HOUR 20` - local hour when quiet hours begin
-- `DEFAULT_TIMEZONE_OFFSET_MINUTES 0` - minutes from UTC, for example `-300` for EST without DST
-
-The device can also pull these schedule settings from the server later, so this default only has to be good enough to get you started.
-
-### Step 7: Build the Firmware
+### Step 3: Build the Firmware
 
 ```bash
 cd firmware
-uv run pio run
+pio run
 ```
 
-The first build takes several minutes as it downloads the ESP32 compiler and libraries. Subsequent builds are much faster.
+The first build takes several minutes as it downloads the ESP32 compiler and libraries. Subsequent builds are much faster. Nothing needs editing before this build — WiFi and server settings are provisioned at runtime, not compiled in.
 
-You should see:
-```
-========================= [SUCCESS] Took XX.XX seconds =========================
-```
+### Step 4: Connect and Flash the EE02 Board
 
-### Step 8: Connect the EE02 Board
+1. Connect the EE02 board via USB-C. **Note:** if nothing seems to happen, your cable might be charge-only.
+2. Check the port is detected:
+   - Linux: `ls /dev/ttyACM*`
+   - macOS: `ls /dev/cu.usb*`
+3. You may need to press the reset button on the board to get it into a state PlatformIO can flash.
+4. Flash:
+   ```bash
+   pio run -t upload --upload-port /dev/ttyACM0   # adjust the port
+   ```
 
-1. Connect the EE02 board to your computer using a USB-C cable
-2. **Note:** If nothing seems to be happening, your cable might be charge-only.
+### Step 5: Provision WiFi and the Server Address (Bluetooth)
 
-Check if you can see the device:
+A freshly flashed board has no WiFi credentials saved, so it boots straight into Bluetooth setup mode advertising itself as `EInk-Setup`.
 
-Linux:
-```bash
-ls /dev/ttyACM*
-```
+1. From Chrome or Edge, open `https://<your-worker-url>/provision` and click **Connect to device**.
+2. Pick `EInk-Setup` from the browser's device picker.
+3. Fill in your WiFi network/password, and the server host (your Worker's hostname), port `443`, and check **Use HTTPS**. Leave the other fields at their defaults unless you want a different refresh interval or active hours.
+4. Click **Save & Reboot**.
 
-macOS:
-```bash
-ls /dev/cu.usb*
-```
+### Step 6: Register the Device
 
-You should see something like `/dev/ttyACM0` (Linux), `/dev/cu.usbmodem14101` (macOS), or `COM3` (Windows).
+An unregistered board's display shows a QR code plus its MAC address instead of your photos.
 
-You'll probably have to Press the reset button (#4) on the board to upload the firmware.
+1. Scan the QR code with your phone (or manually open `/admin?claim=<mac>` in a browser). This opens the admin dashboard with the device's MAC (and a one-time registration secret) pre-filled.
+2. Log in with your passkey if you aren't already, then confirm registration.
 
-### Step 9: Flash the Firmware
+The device now belongs to your account and is ready to display images.
 
-**Linux (adjust port if different):**
-```bash
-uv run pio run -t upload --upload-port /dev/ttyACM0
-```
+### Step 7: Upload Images
 
-**macOS:**
-```bash
-uv run pio run -t upload --upload-port /dev/cu.usbmodem14101
-```
+From `/admin`:
 
-You should see progress bars and finally:
-```
-========================= [SUCCESS] Took XX.XX seconds =========================
-```
+1. Create a bucket (a named image collection) if you don't already have one, and assign it to your device.
+2. Upload photos — JPEG, PNG, WebP, GIF, or BMP (**not** HEIC; convert iPhone photos to JPEG first). The Worker handles EXIF rotation, cropping, and dithering to the 6-color palette server-side.
+3. Images rotate in upload order each time the device wakes and its hash check shows a change.
 
-**Provision WiFi over Bluetooth (required before the board can do anything):**
-A freshly flashed board has no WiFi credentials, so it boots straight into
-Bluetooth setup mode. From Chrome or Edge (desktop or Android — Web Bluetooth
-isn't supported in Safari/iOS), open your worker's `/provision` page, click
-"Connect to device", pick `EInk-Setup` from the browser's device picker, and
-fill in your WiFi network plus server address. See `firmware/README.md`'s
-"Changing Configuration at Runtime" section for details.
+### Step 8: Test the Display
 
-### Step 10: Prepare Images
+Press the reset button on the EE02 board. It should:
 
-Go back to the project root directory:
-```bash
-cd ..
-```
-
-Create the images directory and add some images:
-```bash
-mkdir -p images/default
-cp your_photo.jpg images/default/
-```
-
-Images will be automatically resized and converted to the display's 6-color palette. You can add multiple images and they will rotate on each refresh.
-
-JPEG, PNG and HEIC are suppported.
-
-Optional: add a schedule override file so frames only wake during the hours you care about:
-
-```bash
-cp device_config.example.json images/default/device_config.json
-```
-
-The same file can also live in `images/<mac-address>/device_config.json` for a specific board.
-
-If you prefer not to edit JSON manually, open `http://YOUR_SERVER_IP:5000/` after starting the server. The main page now includes embedded schedule editors for the global fallback, the default device schedule, and any devices that have already connected. The focused editor remains available at `http://YOUR_SERVER_IP:5000/schedule`.
-
-### Step 11: Start the Image Server
-
-```bash
-uv run python image_server.py
-```
-
-You should see:
-```
-Starting E-Ink Image Server (Multi-Device)...
-PIL available: True
-HEIC support: True
-Default image: image.jpg
-Images directory: /path/to/seeed_eink_board/images
-Display size: 1600x1200
-Device directories found: default, d0cf1326f7e8
- * Serving Flask app 'image_server'
- * Running on all addresses (0.0.0.0)
- * Running on http://127.0.0.1:5000
- * Running on http://192.168.86.34:5000
-```
-
-Leave this running and open a new terminal for the next steps.
-
-Open `http://YOUR_SERVER_IP:5000/` in a browser. That page shows:
-
-- connected devices
-- battery voltage reported by each device
-- the current image directory for each device
-- embedded schedule editors for global, default, and per-device overrides
-
-### Step 12: Test the Display
-
-Press the **reset button** on the EE02 board.
-
-The display should:
 1. Connect to WiFi (a few seconds)
-2. Sync current time and any schedule overrides from the server
-3. Download the image if needed
-4. Refresh the display (usually 20-30 seconds of flickering)
-5. Go to sleep
+2. Fetch its config, schedule, and image hash from the Worker
+3. Download and display the image if it changed (usually 20-30 seconds of flickering)
+4. Go back to sleep
 
-Do not worry if the first image takes a while. The server may spend extra time resizing and converting a large image before it starts sending the 960 KB packed display buffer.
+**Congratulations!** Your e-ink display should be showing your image.
 
-**Congratulations! (if that actually worked)** Your e-ink display should be showing your image. 
+Optionally, set per-device quiet hours and refresh interval from `/admin`'s schedule editor.
 
 ---
 
@@ -249,27 +178,19 @@ Press reset on the board to see output.
 
 ```bash
 cd firmware
-uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+pio device monitor --port /dev/ttyACM0 --baud 115200
 ```
 
 ### Following logs across deep sleep
 
-The USB serial device disappears when the board enters deep sleep, so a single `pio device monitor` session usually stops after the first sleep cycle.
-
-This loop reattaches each time the board wakes up:
+The USB serial device disappears when the board enters deep sleep, so a single `pio device monitor` session usually stops after the first sleep cycle. This loop reattaches each time the board wakes up:
 
 ```bash
 cd firmware
 while true; do
-  uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+  pio device monitor --port /dev/ttyACM0 --baud 115200
   sleep 1
 done
-```
-
-To save that output to a file at the same time:
-
-```bash
-script -f /tmp/ee02-monitor.log -c 'bash -lc "cd /home/slzatz/seeed_eink_board/firmware; while true; do uv run pio device monitor --port /dev/ttyACM0 --baud 115200; sleep 1; done"'
 ```
 
 ### What You'll See
@@ -289,12 +210,13 @@ Battery: ADC=2413, voltage=4.21V
 Connecting to WiFi: YourNetwork
 .
 Connected! IP: 192....
-Checking image hash at: http://192.168.86.34:5000/hash
+Fetching device config from: https://your-worker.workers.dev/device_config
+Checking image hash at: https://your-worker.workers.dev/hash
 Sending X-Device-MAC: d0cf1326f7e8
 Last known hash: (none)
 Server hash: 942d3cfc05c8fa41
 Image changed - will download new image
-Fetching image from: http://192.168.86.34:5000/image_packed
+Fetching image from: https://your-worker.workers.dev/image_packed
 Content length: 960000 bytes
 Downloaded 960000 bytes in 10395 ms
 Spectra6: Starting display refresh...
@@ -306,7 +228,7 @@ Going to sleep now...
 
 When the image hasn't changed:
 ```
-Checking image hash at: http://192.168.86.34:5000/hash
+Checking image hash at: https://your-worker.workers.dev/hash
 Last known hash: 942d3cfc05c8fa41
 Server hash: 942d3cfc05c8fa41
 Image unchanged - skipping download
@@ -319,88 +241,40 @@ Entering deep sleep for 15 minutes...
 
 ## Changing Settings Without Reflashing
 
-You can change WiFi credentials, the server address, sleep interval, and other
-settings without reflashing the firmware — over Bluetooth LE, not a web server
-hosted by the board.
+WiFi credentials, the server address, sleep interval, and other settings can all be changed without reflashing — over Bluetooth LE, not a web server hosted by the board.
 
 ### Entering Configuration Mode
 
-1. Hold Button 1 (GPIO2 - the button closest to the USB connector)
-2. While holding Button 1, press and release the reset button (Button 4 next to on/off switch)
+1. Hold Button 1 (GPIO2 — the button closest to the USB connector)
+2. While holding Button 1, press and release the reset button
 3. Continue holding Button 1 for an additional second
-4. Release Button 1 - the device will enter configuration mode
+4. Release Button 1 — the device enters configuration mode
 
-A device with no WiFi credentials saved yet (e.g. right after first flashing)
-enters configuration mode automatically — no button needed.
+A device with no WiFi credentials saved yet (e.g. right after first flashing) enters configuration mode automatically — no button needed.
 
 ### Using the Bluetooth Configuration Interface
 
-The board advertises itself as **"EInk-Setup"** over Bluetooth in config mode —
-open your worker's `/provision` page from Chrome or Edge (desktop or Android;
-Web Bluetooth isn't supported in Safari/iOS) and click "Connect to device" to
-pair with it.
+Open `/provision` on your Worker from Chrome or Edge, click **Connect to device**, select `EInk-Setup`, and update any of:
 
-1. Select `EInk-Setup` from the browser's device picker
-2. You'll see a configuration form where you can change:
-   - **WiFi Network / Password:** use "Scan" to list nearby networks
-   - **Server Host:** The IP address or domain of your image server
-   - **Server Port:** Usually 5000
-   - **Image Endpoint:** Usually `/image_packed`
-   - **Refresh Interval:** How often to check for new images during active hours (1-1440 minutes)
-   - **Active Start / End Hour:** Local wall-clock active window
-   - **Timezone Offset:** Minutes from UTC for local scheduling
-3. Click **Save & Reboot**
+- **WiFi Network / Password** — use "Scan" to list nearby networks
+- **Server Host / Port / Use HTTPS** — your Worker's hostname
+- **Image Endpoint** — usually `/image_packed`
+- **Refresh Interval** — how often to check for new images during active hours (1-1440 minutes)
+- **Active Start / End Hour** — local wall-clock active window
+- **Timezone Offset** — minutes from UTC for local scheduling
+
+Click **Save & Reboot**.
 
 ---
 
-## Support for multiple boards with different image collections
+## Multiple boards, images, schedules, and firmware rollout
 
-You can run multiple EE02 boards from a single image server, each displaying different content. Each board is identified by its MAC address.
+Everything below is per-device, managed from `/admin`. There's deliberately no shared "apply to every device" toggle for images, schedules, or firmware — each device (or bucket of images) is configured on its own, and multiple people can be invited to collaborate on a shared bucket via an invite link.
 
-### Directory Structure
-
-```
-seeed_eink_board/
-└── images/
-    ├── default/          # Fallback for unknown devices
-    │   ├── image1.jpg
-    │   └── image2.png
-    ├── d0cf1326f7e8/     # First board (MAC without separators)
-    │   ├── photo1.jpg
-    │   └── photo2.heic
-    └── aabbccddeeff/     # Second board
-        └── artwork.png
-```
-
-### Finding Your Board's MAC Address
-
-1. Enter configuration mode (hold Button 1 during reset)
-2. Connect to the configuration page
-3. The **Device Info** section shows the MAC address and IP
-4. Use the MAC address (lowercase, no colons) as the directory name
-
-### How It Works
-
-1. Each board sends its MAC address with every request via the `X-Device-MAC` header
-2. The server looks for `images/<mac-address>/` directory
-3. If not found, falls back to `images/default/`
-4. Each board maintains its own rotation state independently
-
-### Example Setup for Two Boards
-
-```bash
-# Create directories
-mkdir -p images/default
-mkdir -p images/d0cf1326f7e8    # Kitchen display
-mkdir -p images/a1b2c3d4e5f6    # Living room display
-
-# Add images for each
-cp kitchen_photos/*.jpg images/d0cf1326f7e8/
-cp artwork/*.png images/a1b2c3d4e5f6/
-cp fallback.jpg images/default/
-```
-
-Each board will cycle through its own set of images independently.
+- **Multiple boards:** register as many device MACs as you like under one account, each pointed at its own bucket (or sharing one).
+- **Shared buckets:** an owner can generate an invite link (`/admin/buckets/{id}/invite`) so a collaborator's account gets read/write access to the same image collection without owning it.
+- **Schedules:** set per-device refresh interval, active hours, and timezone offset from the schedule editor; clearing an override falls back to the firmware's own locally stored defaults.
+- **OTA firmware:** see `CLAUDE.md`'s "OTA Firmware Updates" section for the full release → catalog → per-device target flow, and its rollback safety model.
 
 ---
 
@@ -409,94 +283,63 @@ Each board will cycle through its own set of images independently.
 ### "No such file or directory: /dev/ttyACM0"
 
 The device isn't detected. Try:
-1. **Different USB cable** - This is the most common issue! Many cables are charge-only.
-2. **Press the reset button** - The device may be in deep sleep
-3. **Check the port name** - Run `ls /dev/ttyACM*` (Linux) or `ls /dev/cu.usb*` (macOS)
+1. **Different USB cable** — this is the most common issue! Many cables are charge-only.
+2. **Press the reset button** — the device may be in deep sleep.
+3. **Check the port name** — run `ls /dev/ttyACM*` (Linux) or `ls /dev/cu.usb*` (macOS).
 
 ### WiFi won't connect
 
-- Make sure your network is **2.4GHz**
-- Re-enter Bluetooth config mode (hold Button 1 during reset) and re-provision
-  the SSID/password from `/provision` — WiFi credentials live in NVS, set over
-  Bluetooth, not in `firmware/src/config.h`
+- Make sure your network is **2.4GHz**.
+- Re-enter Bluetooth config mode (hold Button 1 during reset) and re-provision the SSID/password from `/provision` — WiFi credentials live in NVS, set over Bluetooth, not in `firmware/src/config.h`.
 
-### "HTTP GET failed, code: -1"
+### "HTTP GET failed" / device can't reach the server
 
-The device can't reach the image server:
-1. Make sure the image server is running (`uv run python image_server.py`)
-2. Check that the server IP address is correct
-3. Make sure your firewall allows connections on port 5000
-4. Test from another device: `curl http://YOUR_SERVER_IP:5000/hash`
+1. Confirm the Worker is deployed and reachable: `curl https://your-worker.workers.dev/`
+2. Double check the host/port/HTTPS settings saved during provisioning.
+3. If using a plain-HTTP local dev server (`npm run dev` inside `worker/`) instead of a deployed Worker, make sure **Use HTTPS** is unchecked and the board and your dev machine are on the same network.
+
+### Device shows a QR code instead of my photos
+
+The MAC is unregistered (or was unregistered again after a delete). Scan the QR code, or open `/admin?claim=<mac>` manually, to claim it.
 
 ### The server is reachable, but image updates feel slow
 
 - This display is inherently slow to refresh. A full refresh often takes 20-30 seconds.
-- The server may also need extra time to resize and quantize a source image before it can send `/image_packed`.
-- HEIC images are usually slower to process than JPEG or PNG.
-- Watch the server terminal and the firmware log together if you need to separate server processing time from panel refresh time.
-
-### Image is rotated incorrectly
-
-The display is designed for portrait orientation with the board at the bottom. If your image appears rotated, you can edit `image_server.py` and change the rotation value (line with `img.rotate(270,`)
+- The Worker also needs time to decode, dither, and pack a newly uploaded source image — this happens once at upload time, not on every device fetch, so subsequent wakeups are fast.
 
 ---
 
 ## File Structure
 
 ```
-seeed_eink_board/
+eink_pictureframe/
 ├── README.md              # This file
-├── image_server.py        # Python server that serves images to the display
-├── image.jpg              # Fallback image (optional)
-├── images/                # Multi-device image directories
-│   ├── default/           # Fallback for unknown devices
-│   └── d0cf1326f7e8/      # Device-specific (MAC address)
-├── firmware/              # ESP32 firmware
-│   ├── platformio.ini     # Build configuration
-│   ├── README.md          # Detailed firmware documentation
+├── firmware/               # ESP32 firmware
+│   ├── platformio.ini       # Build configuration
+│   ├── README.md            # Detailed firmware documentation
 │   └── src/
-│       ├── config.h          # Pin definitions and non-secret defaults
-│       ├── config_manager.h  # Default server settings; WiFi creds live in NVS
-│       ├── ble_provisioning.h  # Bluetooth LE configuration interface
-│       └── ...             # Other source files
-└── pyproject.toml         # Python project configuration
+│       ├── config.h            # Pin definitions and non-secret defaults
+│       ├── config_manager.h/.cpp  # NVS-persisted configuration, incl. WiFi creds
+│       ├── ble_provisioning.h/.cpp  # Bluetooth LE configuration interface
+│       ├── display.h/.cpp      # Spectra 6 display driver
+│       ├── ota_health.h/.cpp   # OTA rollback / crash reporting
+│       └── main.cpp            # Main loop: WiFi, fetch, display, deep sleep
+└── worker/                 # Cloudflare Worker backend (Hono + D1 + KV)
+    ├── wrangler.toml          # Deployment config (D1/KV bindings, cron trigger)
+    ├── openapi.yaml           # Full API reference
+    └── src/
+        ├── index.ts              # Route registration + scheduled() cron handler
+        ├── admin-ui.ts / provision-ui.ts / landing-ui.ts  # Server-rendered pages
+        ├── routes/               # Device-facing and /admin/* endpoints
+        ├── lib/                  # Dithering, rotation, auth, schedules, OTA, etc.
+        └── db/migrations/        # D1 schema migrations
 ```
 
----
-
-## How It Works
-
-```
-┌─────────────────┐         ┌─────────────────┐
-│  Your Computer  │         │   EE02 Board    │
-│                 │         │                 │
-│  image_server.py│◄────────│  ESP32 Firmware │
-│       :5000     │  WiFi   │                 │
-│                 │         │                 │
-│   image.jpg     │         │  E-Ink Display  │
-└─────────────────┘         └─────────────────┘
-
-1. ESP32 wakes from deep sleep
-2. Reads battery voltage via on-board ADC
-3. Connects to WiFi
-4. Requests `/device_config` from server to sync time and optional schedule overrides
-5. If local time is outside the active window: go back to deep sleep until the next start hour
-6. Requests `/hash` from server (small request to check if image changed)
-   - Every server request includes `X-Device-MAC` and `X-Battery-Voltage` headers
-7. If hash matches previous: go back to sleep (saves battery!)
-8. If hash is different: download `/image_packed` (960KB)
-9. Send data to e-ink display
-10. Display refreshes
-11. ESP32 enters deep sleep for the configured interval or until the next active window
-12. Repeat from step 1
-```
 ---
 
 ## Battery Monitoring
 
-The firmware reads battery voltage on each wake cycle and sends it to the image server via the `X-Battery-Voltage` HTTP header on every request. The server records the latest value for device status and logs one battery line at the start of each wake cycle during `/device_config`. Server logs also include wall-clock timestamps plus the device MAC/IP prefix to make multi-device activity easier to follow.
-
-### Voltage Levels
+The firmware reads battery voltage once per boot (before WiFi, to avoid ADC noise) and sends it to the Worker via the `X-Battery-Voltage` header on every request. The Worker records the latest value per device and shows it in `/admin` and the `/current` status endpoint.
 
 | Voltage | Capacity | Status |
 |---------|----------|--------|
@@ -504,8 +347,6 @@ The firmware reads battery voltage on each wake cycle and sends it to the image 
 | 3.7V    | ~50% | GOOD |
 | 3.3V    | ~10% | LOW |
 | 3.0V    | Empty (cutoff) | LOW |
-
-Battery status is visible on the server index page and in the `/current` JSON endpoint.
 
 ---
 

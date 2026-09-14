@@ -8,7 +8,9 @@ Note that in this repository there is also documentation of the 13.3 inch spectr
 
 Seeed provides a web app called the SenseCraft HMI platform to communicate with the e ink display. However. we don't want to go through the WebApp to display images, we want to directly hit the api endpoints that the custom firmware that we build in this repository supports.  If you look at the ~/eink repository on this computer, you will see that I have done something similar with the GooDisplay e ink driver board. We used the GooDisplay web app to reverse engineer the api endpoints and then wrote a python script to hit those endpoints directly but the GooDisplay web app was pretty simple.
 
-This repository now contains custom firmware for the ESP32 on the EEO2 board that runs a web client that generates http requests to our custom image server to display images on the 13.3 inch spectra 6 display.  We also have the capability to put the ESP32 to sleep and have it wake up at intervals to update the display.  The ESP32 wakes up, connects to WiFi, makes a request to the image server to get the image to display, displays the image, and then goes back to sleep.  The image server rotates through the various images in folders that use the MAC address of the EEO@ board.  We can manage the images that each screen displays by adding or deleting images from that screen's image folder (named for its MAC address)
+This repository now contains custom firmware for the ESP32 on the EEO2 board that runs a web client that generates http requests to our backend (a Cloudflare Worker — see `worker/`) to display images on the 13.3 inch spectra 6 display.  We also have the capability to put the ESP32 to sleep and have it wake up at intervals to update the display.  The ESP32 wakes up, connects to WiFi, makes a request to the Worker to get the image to display, displays the image, and then goes back to sleep.  The Worker rotates through the images in each device's bucket (a named image collection, assigned per device MAC via `/admin`). We can manage the images that each screen displays by uploading or deleting them from that screen's bucket in the admin dashboard.
+
+There used to be a local Python (`image_server.py`, Flask) implementation of this same server, used for early development. It has been removed entirely — all image storage, rotation, scheduling, and device management now live in the Cloudflare Worker (`worker/`), backed by D1 and KV. Do not reintroduce a Python server; any new backend behavior belongs in `worker/src/`.
 
 ## Custom Firmware Implementation
 
@@ -17,8 +19,8 @@ We have implemented custom Arduino/PlatformIO firmware in the `firmware/` direct
 ### Architecture
 
 ```
-[Home Server]                    [EE02 Board]
-image_server.py                  Arduino Firmware
+[Cloudflare Worker]              [EE02 Board]
+worker/ (Hono + D1 + KV)          Arduino Firmware
       │                                │
       │ GET /image_packed              │
       │◄──────────────────────────────│ (wake from deep sleep)
@@ -65,8 +67,10 @@ The 13.3" Spectra 6 display uses dual UC8179 controllers in master/slave configu
 - `firmware/src/ble_provisioning.h/.cpp` - Bluetooth LE GATT configuration interface (NimBLE)
 - `firmware/src/display.h/.cpp` - Spectra 6 display driver (ported from esphome-bigink)
 - `firmware/src/main.cpp` - Main loop: WiFi, fetch, display, deep sleep, config mode
-- `image_server.py` - Flask server with image rotation and `/image_packed` endpoint
-- `.eink_rotation_state.json` - Persisted rotation state (auto-generated, gitignored)
+- `worker/` - Cloudflare Worker backend (Hono + D1 + KV): device registry, image
+  buckets/rotation, schedules, firmware catalog/targets, crash reports. See
+  `worker/openapi.yaml` for the full API and `worker/src/index.ts` for route
+  registration.
 
 ### Runtime Configuration (Bluetooth Provisioning)
 
@@ -116,78 +120,57 @@ reboots and OTA updates.
 5. Provision WiFi over Bluetooth (see "Runtime Configuration" above) — a fresh
    flash has no WiFi credentials, so the device boots straight into config mode.
 
-### Running the Image Server
+### Running the Worker Backend
 
-1. Install dependencies: `uv sync`
-2. Create the images directory structure (see Multi-Device Support below)
-3. Run: `uv run python image_server.py`
-4. Server listens on http://0.0.0.0:5000
+1. `cd worker && npm install`
+2. Create D1/KV resources and wire their ids into `wrangler.toml` (see repository
+   root `README.md`'s "Deploy the Cloudflare Worker" step)
+3. `npm run db:migrate:remote` then `npm run deploy` — or `npm run dev` for a
+   local `wrangler dev --env local` instance against `[env.local]`'s dummy ids
 
-**Endpoints:**
-- `/image_packed` - Returns 960KB of pre-processed 4bpp binary data (advances to next image)
-- `/hash` - Returns 16-char MD5 hash for change detection
-- `/current` - Returns JSON with current rotation status (all devices or specific device)
-- `/` - Index page with multi-device status overview
+**Device-facing endpoints:**
+- `/image_packed` - Returns 960KB of pre-processed 4bpp binary data (advances rotation)
+- `/hash` - Returns 16-char hash for change detection
+- `/device_config` - Resolved schedule/firmware target, plus epoch time for clock sync
+- `/firmware_bin` - OTA firmware binary download
+- `/crash_report` - Crash/rollback reporting (POST)
 
-All endpoints accept the `X-Device-MAC` header to identify which device is making the request.
-The firmware also sends an `X-Battery-Voltage` header with the current battery voltage (e.g., "3.85").
+All device-facing endpoints require an `X-Device-MAC` header plus an HMAC
+`X-Device-Nonce`/`X-Device-Signature` pair (see `worker/src/lib/device-signature.ts`) —
+not the admin Bearer API key. The firmware also sends an `X-Battery-Voltage` header
+with the current battery voltage (e.g., "3.85"). Full schema: `worker/openapi.yaml`.
 
 ### Multi-Device Support
 
-The server supports multiple EE02 boards, each with their own image rotation. Devices are identified by their MAC address (sent via `X-Device-MAC` HTTP header).
-
-**Directory Structure:**
-```
-seeed_eink_board/
-├── images/
-│   ├── default/          # Fallback for unknown devices
-│   │   ├── image1.jpg
-│   │   └── image2.png
-│   ├── d0cf1326f7e8/     # Device-specific (MAC without separators)
-│   │   ├── photo1.jpg
-│   │   └── photo2.heic
-│   └── aabbccddeeff/     # Another device
-│       └── ...
-├── image_server.py
-└── .eink_rotation_state.json  # Tracks state per-device
-```
+The Worker supports multiple EE02 boards under one account, each identified by
+MAC address and assigned to one or more **buckets** (named image collections;
+see `worker/src/lib/rotation.ts` and the `buckets`/`bucket_subscriptions` D1
+tables). A bucket can be shared between accounts via an invite link
+(`POST /admin/buckets/{id}/invite`), so multiple people can collaborate on one
+device's images without transferring ownership.
 
 **How it works:**
-1. Each ESP32 sends its MAC address (lowercase, no separators) via the `X-Device-MAC` header
-2. The server looks for a directory named `images/<mac-address>/`
-3. If not found, it falls back to `images/default/`
-4. Each device maintains its own rotation state (current index, last returned image)
+1. Each ESP32 sends its MAC address (lowercase, no separators) via `X-Device-MAC`
+2. An unregistered MAC gets a "scan to register" QR code instead of any bucket's
+   content (see `worker/src/lib/qr-registration.ts`) — never a shared/default
+   fallback (see `migrations/0009_bucket_ownership.sql`)
+3. Once claimed via `/admin?claim=<mac>`, the device rotates through the images
+   in its assigned bucket(s)
+4. Each device maintains its own rotation cursor in D1
 
-**Finding your device's MAC:**
-- Enter configuration mode on the EE02 (hold Button 1 during reset)
-- The configuration page shows the device's MAC address and IP
-- Use this MAC address (without colons, lowercase) as the directory name
-
-**State File Format:**
-```json
-{
-  "d0cf1326f7e8": {
-    "current_index": 3,
-    "last_returned": "image.jpg"
-  },
-  "default": {
-    "current_index": 0,
-    "last_returned": "fallback.png"
-  }
-}
-```
+**Finding your device's MAC:** shown on the device's own display (as part of the
+registration QR screen) and in `/admin`'s device list once registered.
 
 ### Image Rotation
 
-The server rotates through images in device-specific or default directories:
-
-- **Supported formats:** `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.heic`, `.webp`
-- **HEIC support:** Enabled via `pillow-heif` library (handles iPhone photos directly)
-- **Rotation order:** Alphabetical by filename
-- **Persistence:** Rotation state (per-device) saved to `.eink_rotation_state.json`
-- **Symlinks:** Supported - can link to images stored elsewhere
-- **Fallback:** If device directory doesn't exist, uses `images/default/`; if that's empty, falls back to `image.jpg` in repository root
-- **Dynamic updates:** Directory is scanned on each request, so adding/removing images takes effect immediately
+- **Accepted upload formats:** JPEG, PNG, WebP, GIF, BMP — HEIC/HEIF is rejected
+  by `/admin/images/upload` (convert to JPEG client-side first)
+- **Processing:** done once, server-side, at upload time — EXIF correction,
+  crop/resize, dithering (Floyd-Steinberg/Atkinson/ordered/none) to the 6-color
+  palette, and packing to 4bpp (`worker/src/lib/decode.ts`, `dither.ts`)
+- **Rotation order:** upload order, tracked per-device in D1 (`worker/src/lib/rotation.ts`)
+- **Dynamic updates:** uploading/deleting an image in `/admin` takes effect on
+  the device's next `/image_packed` request
 
 Each request to `/image_packed` advances to the next image in rotation for that specific device.
 
@@ -200,10 +183,7 @@ The EE02 board has a voltage divider circuit (same as the EE04 board) that allow
 - **Scaling factor:** 7.16 (voltage divider ratio, from EE04 reference)
 - **Note:** GPIO1 is NOT a button despite earlier assumptions. The three physical keys on the board are on GPIO2, GPIO3, and GPIO5 (matching EE04 layout).
 
-The firmware reads battery voltage once per boot (before WiFi to avoid ADC noise) and sends it to the server via the `X-Battery-Voltage` HTTP header. The server logs voltage levels and displays them on the status page with color coding:
-- **RED:** < 3.3V (low, charge soon)
-- **YELLOW:** 3.3V - 3.7V (OK)
-- **GREEN:** > 3.7V (good)
+The firmware reads battery voltage once per boot (before WiFi to avoid ADC noise) and sends it to the Worker via the `X-Battery-Voltage` HTTP header. The Worker stores the latest value per device (D1) and `/admin`'s device list renders it as a percentage (`worker/src/client/admin.ts`'s `batteryPercent()`, calibrated to that same 3.0V–4.2V range).
 
 Typical LiPo voltage range: 3.0V (empty) to 4.2V (full). Readings above 4.2V indicate USB power.
 

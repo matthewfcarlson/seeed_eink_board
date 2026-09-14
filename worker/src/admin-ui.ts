@@ -124,7 +124,7 @@ export function renderAdminPage(): string {
     <h2>Devices</h2>
     <p class="hint">"Last image sent" is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
     <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Last image sent</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th>Label</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
       <tbody id="devices-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
