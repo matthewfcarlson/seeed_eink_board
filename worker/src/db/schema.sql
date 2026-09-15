@@ -2,7 +2,8 @@
 -- migrations/0001_init.sql, 0002_firmware.sql, 0003_include_default_images.sql,
 -- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
 -- 0007_buckets.sql, 0008_user_display_name.sql, 0009_bucket_ownership.sql,
--- 0010_remove_shared_targets.sql, and 0011_crash_reports.sql (wrangler d1
+-- 0010_remove_shared_targets.sql, 0011_crash_reports.sql, 0012_device_board.sql,
+-- 0013_firmware_releases_board.sql, and 0014_firmware_channel.sql (wrangler d1
 -- migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -34,7 +35,11 @@ CREATE TABLE devices (
   last_nonce   INTEGER NOT NULL DEFAULT 0,
   -- Version this device last reported running, via X-Firmware-Version on every
   -- request — distinct from firmware_targets, which is the desired version.
-  running_firmware_version   TEXT
+  running_firmware_version   TEXT,
+  -- Which board this device is (e.g. 'ee02-13in3', 'ee04-7in3'), self-reported
+  -- via X-Device-Board the same way — see migrations/0012. NULL until a
+  -- device's first successful request.
+  board                       TEXT
 );
 
 -- Image buckets: independently-owned, shareable entities a device subscribes to
@@ -127,21 +132,34 @@ CREATE TABLE credentials (
 );
 CREATE INDEX idx_credentials_user_id ON credentials(user_id);
 
--- Firmware OTA: releases Cloudflare has fetched from GitHub, and which version
--- each device (mac only, no shared 'default'/'global' target — see
--- schedule_overrides above for the matching rationale) should be running.
+-- Firmware OTA: releases Cloudflare has fetched from GitHub. Board-scoped
+-- (migrations/0013) — two boards built from the same version tag are two
+-- separate rows (different sha256/binary), not one. `board` values match
+-- devices.board, the PlatformIO environment name, and the GitHub release
+-- asset suffix (firmware-<board>.bin) — one board-id vocabulary used
+-- everywhere.
 CREATE TABLE firmware_releases (
-  version     TEXT PRIMARY KEY, -- e.g. "1.2.0" (tag_name with leading 'v' stripped)
-  tag         TEXT NOT NULL,    -- raw GitHub tag_name, e.g. "v1.2.0"
+  board       TEXT NOT NULL,   -- e.g. 'ee02-13in3', 'ee04-7in3'
+  version     TEXT NOT NULL,   -- e.g. "1.2.0" (tag_name with leading 'v' stripped)
+  tag         TEXT NOT NULL,   -- raw GitHub tag_name, e.g. "v1.2.0"
   sha256      TEXT NOT NULL,
   size_bytes  INTEGER NOT NULL,
-  source_url  TEXT NOT NULL,    -- GitHub release asset download URL, for reference/debugging
-  created_at  INTEGER NOT NULL
+  source_url  TEXT NOT NULL,   -- GitHub release asset download URL, for reference/debugging
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (board, version)
 );
 
+-- Which channel each device (mac only, no shared 'default'/'global' target —
+-- see schedule_overrides above for the matching rationale) tracks, rather
+-- than an admin-picked exact version (migrations/0014 removed that). No
+-- `board`/`version`/FK here — see lib/firmware-target.ts's resolveFirmwareTarget:
+-- 'stable' always resolves to the newest firmware_releases row for whatever
+-- board the device reports on that request (via X-Device-Board), so there's
+-- no fixed release row to reference. 'beta' currently resolves to nothing
+-- (no beta pipeline exists yet) — same as no row at all.
 CREATE TABLE firmware_targets (
   target      TEXT PRIMARY KEY, -- mac, owned via devices.user_id
-  version     TEXT NOT NULL REFERENCES firmware_releases(version),
+  channel     TEXT NOT NULL,    -- 'stable' | 'beta'
   updated_at  INTEGER NOT NULL
 );
 

@@ -1,9 +1,12 @@
 import type { Hono } from "hono";
 import type { Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { fetchLatestFirmwareRelease, downloadFirmwareAsset } from "../../lib/github-release";
+import { fetchLatestGitHubRelease, resolveBoardAsset, downloadFirmwareAsset, KNOWN_BOARDS } from "../../lib/github-release";
+import type { GitHubRelease } from "../../lib/github-release";
 import { computeSha256Hex, putFirmwareBinary } from "../../lib/firmware-store";
-import { invalidateFirmwareTargetCache } from "../../lib/firmware-target";
+import { invalidateFirmwareTargetCache, type FirmwareChannel } from "../../lib/firmware-target";
+
+const FIRMWARE_CHANNELS: FirmwareChannel[] = ["stable", "beta"];
 
 /** Same ownership model as admin/schedule.ts's assertTargetOwnership: every target
  *  must be a device MAC owned by the caller — no shared 'default'/'global' tier. */
@@ -15,33 +18,57 @@ async function assertTargetOwnership(env: Env, target: string, userId: string): 
 }
 
 /**
- * Pulls the latest GitHub release into the worker's own catalog (D1 metadata +
- * KV blob). This never rolls anything out to devices by itself — see
- * lib/firmware-target.ts — it only makes a version available to be targeted.
- * Shared between the manual /admin/firmware/sync route and index.ts's scheduled()
- * cron handler, so "let Cloudflare pick up new releases" works without a click,
- * while actual device rollout still requires an explicit admin action.
+ * Pulls one board's asset out of an already-fetched GitHub release into the
+ * worker's own catalog (D1 metadata + KV blob). Devices on the 'stable'
+ * channel start receiving this as soon as it's cataloged — there's no
+ * separate "roll it out" step anymore (see lib/firmware-target.ts's
+ * resolveFirmwareTarget). `null` means this board has no asset in this
+ * release (not an error — see resolveBoardAsset).
  */
-export async function syncLatestFirmwareRelease(env: Env): Promise<{ version: string; isNew: boolean }> {
-  const latest = await fetchLatestFirmwareRelease(env);
+async function syncBoardRelease(
+  env: Env,
+  board: string,
+  release: GitHubRelease
+): Promise<{ version: string; isNew: boolean } | null> {
+  const latest = resolveBoardAsset(release, board);
+  if (!latest) return null;
 
-  const existing = await env.DB.prepare("SELECT version FROM firmware_releases WHERE version = ?")
-    .bind(latest.version)
+  const existing = await env.DB.prepare("SELECT version FROM firmware_releases WHERE board = ? AND version = ?")
+    .bind(board, latest.version)
     .first();
   if (existing) return { version: latest.version, isNew: false };
 
   const bytes = await downloadFirmwareAsset(env, latest.downloadUrl);
   const sha256 = await computeSha256Hex(bytes);
 
-  await putFirmwareBinary(env, latest.version, bytes);
+  await putFirmwareBinary(env, board, latest.version, bytes);
   await env.DB.prepare(
-    `INSERT INTO firmware_releases (version, tag, sha256, size_bytes, source_url, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO firmware_releases (board, version, tag, sha256, size_bytes, source_url, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(latest.version, latest.tag, sha256, bytes.byteLength, latest.downloadUrl, Math.floor(Date.now() / 1000))
+    .bind(board, latest.version, latest.tag, sha256, bytes.byteLength, latest.downloadUrl, Math.floor(Date.now() / 1000))
     .run();
 
   return { version: latest.version, isNew: true };
+}
+
+/**
+ * Syncs every known board's asset from the latest GitHub release. Shared
+ * between the manual /admin/firmware/sync route and index.ts's scheduled()
+ * cron handler, so "let Cloudflare pick up new releases" works without a
+ * click. A board with no asset in this release is skipped, not a failure for
+ * the others — see syncBoardRelease. Fetches the release once and reuses it
+ * across every board, rather than one GitHub API call per board.
+ */
+export async function syncLatestFirmwareRelease(
+  env: Env
+): Promise<Record<string, { version: string; isNew: boolean } | null>> {
+  const release = await fetchLatestGitHubRelease(env);
+  const results: Record<string, { version: string; isNew: boolean } | null> = {};
+  for (const board of KNOWN_BOARDS) {
+    results[board] = await syncBoardRelease(env, board, release);
+  }
+  return results;
 }
 
 export function registerAdminFirmwareRoutes(app: Hono<{ Bindings: Env }>) {
@@ -56,14 +83,14 @@ export function registerAdminFirmwareRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.get("/admin/firmware/releases", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      "SELECT version, tag, sha256, size_bytes, created_at FROM firmware_releases ORDER BY created_at DESC"
+      "SELECT board, version, tag, sha256, size_bytes, created_at FROM firmware_releases ORDER BY created_at DESC"
     ).all();
     return c.json({ releases: rows.results });
   });
 
-  // Exact override rows for every target, so the UI can show current state before editing.
+  // Current channel for every target, so the UI can show state before editing.
   app.get("/admin/firmware/targets", requireAdmin, async (c) => {
-    const rows = await c.env.DB.prepare("SELECT target, version, updated_at FROM firmware_targets").all();
+    const rows = await c.env.DB.prepare("SELECT target, channel, updated_at FROM firmware_targets").all();
     return c.json({ targets: rows.results });
   });
 
@@ -74,24 +101,21 @@ export function registerAdminFirmwareRoutes(app: Hono<{ Bindings: Env }>) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
-    const body = await c.req.json<{ version?: string }>().catch(() => ({}) as never);
-    if (!body.version) return c.json({ error: "version is required" }, 400);
-
-    const release = await c.env.DB.prepare("SELECT version FROM firmware_releases WHERE version = ?")
-      .bind(body.version)
-      .first();
-    if (!release) return c.json({ error: `Unknown firmware version ${body.version}` }, 400);
+    const body = await c.req.json<{ channel?: string }>().catch(() => ({}) as never);
+    if (!body.channel || !FIRMWARE_CHANNELS.includes(body.channel as FirmwareChannel)) {
+      return c.json({ error: `channel must be one of: ${FIRMWARE_CHANNELS.join(", ")}` }, 400);
+    }
 
     const now = Math.floor(Date.now() / 1000);
     await c.env.DB.prepare(
-      `INSERT INTO firmware_targets (target, version, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(target) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at`
+      `INSERT INTO firmware_targets (target, channel, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(target) DO UPDATE SET channel = excluded.channel, updated_at = excluded.updated_at`
     )
-      .bind(target, body.version, now)
+      .bind(target, body.channel, now)
       .run();
 
     await invalidateFirmwareTargetCache(c.env, target);
-    return c.json({ target, version: body.version });
+    return c.json({ target, channel: body.channel });
   });
 
   app.delete("/admin/firmware/target/:target", requireAdmin, async (c) => {

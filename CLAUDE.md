@@ -61,12 +61,26 @@ The 13.3" Spectra 6 display uses dual UC8179 controllers in master/slave configu
 
 ### Files
 
-- `firmware/platformio.ini` - PlatformIO project configuration
-- `firmware/src/config.h` - Pin definitions and non-secret defaults (no WiFi credentials — see below)
-- `firmware/src/config_manager.h/.cpp` - Persistent configuration storage (NVS), including WiFi credentials
-- `firmware/src/ble_provisioning.h/.cpp` - Bluetooth LE GATT configuration interface (NimBLE)
-- `firmware/src/display.h/.cpp` - Spectra 6 display driver (ported from esphome-bigink)
-- `firmware/src/main.cpp` - Main loop: WiFi, fetch, display, deep sleep, config mode
+`firmware/` is one PlatformIO project with three environments — `ee02-13in3`
+and `ee04-7in3` (this board and a second board, both full product firmware,
+sharing almost all their logic via `lib/common/` — see "EE04 Firmware" below)
+and `ee04-7in3-bringup` (EE04's standalone display-driver bring-up sketch,
+predates and is unrelated to normal operation). Each environment compiles
+only its own `src/<board>/` subdirectory via `build_src_filter` (`src_dir`
+itself isn't overridable per-environment in PlatformIO); `lib/common/` (unlike
+`src_dir`) *is* project-global and automatically shared by every environment.
+
+- `firmware/platformio.ini` - PlatformIO project configuration (all three environments)
+- `firmware/lib/common/config_manager.h/.cpp` - Persistent configuration storage (NVS), including WiFi credentials
+- `firmware/lib/common/ble_provisioning.h/.cpp` - Bluetooth LE GATT configuration interface (NimBLE)
+- `firmware/lib/common/ota_health.h/.cpp` - bootloader-rollback + crash-report safety net (see "OTA Firmware Updates" below)
+- `firmware/lib/common/version.h` - one shared `FIRMWARE_VERSION` for every board
+- `firmware/lib/common/device_app.h` - the shared app logic (WiFi, HMAC signing, `/device_config` sync,
+  image fetch, OTA download/flash, schedule math, deep sleep), templated on each board's `Display` type
+- `firmware/src/ee02/config.h` - Pin definitions, `BOARD_ID`, non-secret defaults (no WiFi credentials — see below)
+- `firmware/src/ee02/display.h/.cpp` - Spectra 6 display driver (ported from esphome-bigink)
+- `firmware/src/ee02/main.cpp` - Board-specific wiring (instantiate `Display`/`ConfigManager`/etc., config-mode screen) + `setup()`/`loop()`
+- `firmware/src/ee04/` - EE04's equivalent of the above, plus its `#ifdef EE04_BRINGUP_TEST_MODE`-gated standalone bring-up path — see "EE04 Firmware" below
 - `worker/` - Cloudflare Worker backend (Hono + D1 + KV): device registry, image
   buckets/rotation, schedules, firmware catalog/targets, crash reports. See
   `worker/openapi.yaml` for the full API and `worker/src/index.ts` for route
@@ -97,7 +111,7 @@ the device anymore (that approach, and `config_server.h/.cpp`, were removed).
 - Image endpoint path, refresh interval, active-hours window, timezone offset
 
 All of this is exchanged as JSON over a custom GATT service
-(`firmware/src/ble_provisioning.h` documents the exact characteristic schema);
+(`firmware/lib/common/ble_provisioning.h` documents the exact characteristic schema);
 the browser-side implementation is `worker/src/provision-ui.ts`. Characteristics
 are plain (not encryption-required) — an earlier version required BLE bonding,
 but Web Bluetooth has no API to trigger that pairing itself, so a browser
@@ -110,15 +124,41 @@ reboots and OTA updates.
 ### Building and Flashing
 
 1. Install PlatformIO (VSCode extension or CLI)
-2. Optionally edit `firmware/src/config_manager.h` to change default server settings
+2. Optionally edit `firmware/lib/common/config_manager.h` to change default server settings
 3. Connect EE02 board via USB
 4. Build and upload:
    ```bash
    cd firmware
-   pio run -t upload
+   pio run -e ee02-13in3 -t upload
    ```
 5. Provision WiFi over Bluetooth (see "Runtime Configuration" above) — a fresh
    flash has no WiFi credentials, so the device boots straight into config mode.
+
+### EE04 Firmware
+
+A second board, `firmware/src/ee04/` (env `ee04-7in3`), targets the EE04
+board + a 7.3" Six-Color 800×480 panel (single ED2208 controller, vs. this
+board's dual UC8179s). It has the same feature set as EE02 — WiFi, Worker
+sync, BLE provisioning, OTA, deep sleep, battery monitoring — sharing that
+logic via `firmware/lib/common/`'s templated `device_app.h` (see "Files"
+above); its own `main.cpp`/`display.h/.cpp`/`config.h` hold only the ED2208
+driver, pin map, and buffer geometry that are genuinely different from EE02.
+Build with `pio run -e ee04-7in3 -t upload`.
+
+A separate `ee04-7in3-bringup` environment (same `src/ee04/main.cpp`, gated
+behind `#ifdef EE04_BRINGUP_TEST_MODE`) is a standalone display-driver
+smoke test — no WiFi/BLE/OTA, just draws a color-bar test pattern and
+refreshes once. This is what originally verified the ED2208 driver
+(pin mapping, busy-pin polarity, register sequence, color codes) before the
+full app existed, and stays available for the same purpose later. See
+`firmware/README.md`'s "EE04 Display Bring-Up" section for the pin table
+and an ordered verification checklist.
+
+Multi-device-model support on the Worker's *image* pipeline (so EE02 and
+EE04 devices can eventually share buckets with per-model resolution/palette
+image variants) is still a separate, not-yet-started effort — what's
+described here and in "OTA Firmware Updates" below is only about firmware
+delivery, not image content.
 
 ### Running the Worker Backend
 
@@ -137,8 +177,11 @@ reboots and OTA updates.
 
 All device-facing endpoints require an `X-Device-MAC` header plus an HMAC
 `X-Device-Nonce`/`X-Device-Signature` pair (see `worker/src/lib/device-signature.ts`) —
-not the admin Bearer API key. The firmware also sends an `X-Battery-Voltage` header
-with the current battery voltage (e.g., "3.85"). Full schema: `worker/openapi.yaml`.
+not the admin Bearer API key. The firmware also sends `X-Battery-Voltage` (e.g.,
+"3.85") and `X-Device-Board` (e.g. "ee02-13in3") headers, self-reporting battery
+level and which board this is — the latter is how `/device_config` resolves the
+right per-board firmware release (see "OTA Firmware Updates"). Full schema:
+`worker/openapi.yaml`.
 
 ### Multi-Device Support
 
@@ -193,33 +236,71 @@ Firmware updates are delivered over the same channel as images/config — the ES
 already wakes, connects to WiFi, and talks to the Worker every cycle, so OTA piggybacks
 on that instead of adding a separate update mechanism.
 
+**Channel-based, not admin-picked versions (migrations/0014):** there is no
+UI or API to target a specific version string anymore. Each device is set to
+either the `stable` or `beta` channel (`firmware_targets.channel`); `beta`
+currently resolves to nothing (no beta pipeline exists yet — same as no
+channel set), and `stable` always resolves to whatever is the *newest*
+cataloged release for that device's own board — see
+`worker/src/lib/firmware-target.ts`'s `resolveFirmwareTarget()`. Board-aware
+throughout: every device self-reports its board via `X-Device-Board` (see
+"Device-facing endpoints" above), and `firmware_releases` is keyed by
+`(board, version)`, not just `version`, since the same version tag produces
+a different binary/SHA-256 per board.
+
 **Flow:**
-1. Bump `FIRMWARE_VERSION` in `firmware/src/version.h`, commit, then `git tag vX.Y.Z`
+1. Bump `FIRMWARE_VERSION` in `firmware/lib/common/version.h` — **one shared
+   version number for every board**, not one per board, so a single tag
+   releases all boards' binaries together. Commit, then `git tag vX.Y.Z`
    (matching, with a leading `v`) and push the tag.
-2. `.github/workflows/release-firmware.yml` builds the firmware with PlatformIO and
-   attaches `firmware.bin` to a new GitHub release.
+2. `.github/workflows/release-firmware.yml` builds **every** product-firmware
+   environment (`ee02-13in3`, `ee04-7in3`) with PlatformIO and attaches each
+   as its own board-specific asset (`firmware-ee02-13in3.bin`,
+   `firmware-ee04-7in3.bin`) to the same GitHub release — never the generic
+   `firmware.bin`, and never `ee04-7in3-bringup` (a standalone manual-use
+   environment, not a release target — see "EE04 Firmware" above).
 3. The Cloudflare Worker catalogs new releases automatically (a `scheduled()` Cron
    Trigger polls the GitHub releases API every 6h — see `wrangler.toml`'s `[triggers]`
    and `worker/src/routes/admin/firmware.ts`), or an admin can click "Sync from GitHub"
-   in `/admin` for it immediately. Either way this only stores the binary (worker KV,
-   byte-exact — no gzip) and its SHA-256 in D1's `firmware_releases` table; it does
-   **not** roll anything out to devices by itself.
-4. An admin explicitly sets a firmware **target** version for a specific device MAC
-   in `/admin`'s Firmware panel (see `worker/src/lib/firmware-target.ts`, mirroring
-   `lib/schedule.ts`'s per-device-only schedule overrides). There is deliberately no
-   shared `'default'`/`'global'` target any authenticated user could set for every
-   device on the server at once — that was removed as a cross-tenant risk (see
-   privacy review, 2026-07-13): even with the rollback safety net below, a firmware
-   that boots but is silently broken can still take several wake cycles to recover
-   from, so letting any signed-up account force-flash every other tenant's devices
-   was a real risk to other tenants' hardware, not just a config convenience. No
-   target ever set means a device's firmware is never touched.
+   in `/admin` for it immediately — this loops over every known board id, syncing
+   whichever assets are present in that release, one row per board in D1's
+   `firmware_releases` table (worker KV holds the binary itself, byte-exact —
+   no gzip). **Every `stable`-channel device on that board starts receiving
+   it on its very next wake** — unlike the old exact-version model, there is
+   no separate "now roll it out" step once a release is cataloged.
+4. An admin sets a device's **channel** (`stable` or `beta`) for a specific
+   device MAC in `/admin`'s Firmware panel (`PUT /admin/firmware/target/:target`
+   in `routes/admin/firmware.ts`, via `worker/src/lib/firmware-target.ts` —
+   mirrors `lib/schedule.ts`'s per-device-only schedule overrides). There is
+   deliberately no shared `'default'`/`'global'` target any authenticated
+   user could set for every device on the server at once — that was removed
+   as a cross-tenant risk (see privacy review, 2026-07-13): even with the
+   rollback safety net below, a firmware that boots but is silently broken
+   can still take several wake cycles to recover from, so letting any
+   signed-up account force-flash every other tenant's devices was a real
+   risk to other tenants' hardware, not just a config convenience. No
+   channel ever set means a device's firmware is never touched.
 5. On its next wake, `GET /device_config` includes `firmware_version` /
-   `firmware_sha256` when a target resolves for that device. If it differs from the
-   firmware's own compiled-in `FIRMWARE_VERSION`, the device downloads
-   `GET /firmware_bin?version=X`, verifies the streamed SHA-256 (via mbedtls, before
-   committing), flashes it with the ESP32 `Update` library, and reboots. A failed or
-   corrupt download aborts cleanly and leaves the running firmware untouched.
+   `firmware_sha256` when the device's channel resolves to a release —
+   resolved using *that same request's* `X-Device-Board` header directly
+   (not a stale DB read-back), so this works correctly even on a device's
+   very first request. If it differs from the firmware's own compiled-in
+   `FIRMWARE_VERSION`, the device downloads `GET /firmware_bin?version=X`,
+   verifies the streamed SHA-256 (via mbedtls, before committing), flashes
+   it with the ESP32 `Update` library, and reboots. A failed or corrupt
+   download aborts cleanly and leaves the running firmware untouched.
+
+**Tradeoff worth knowing:** removing exact-version picking also removes the
+ability to *pin* a device to a known-good version or stage a rollout across
+devices one at a time — every `stable`-channel device on a board moves to
+the newest release together, as soon as it's cataloged. The rollback safety
+net below still protects against a release that crashes or fails to connect;
+it does not protect against one that's "healthy" but wrong (see the note at
+the end of this section). If that tradeoff ever stops being acceptable, the
+fix is re-introducing an optional per-device version pin *on top of* the
+channel model (e.g. a nullable `firmware_targets.pinned_version` that
+overrides channel resolution when set) rather than reverting the channel
+model itself.
 
 **Safety model:** the stock Arduino-ESP32 core for esp32s3 (as pulled by this
 project's unpinned `platform = espressif32`) ships with both
@@ -227,8 +308,8 @@ project's unpinned `platform = espressif32`) ships with both
 (ELF format) on by default, and the board's own `default_8MB.csv` (already in
 place — no partition change or one-time USB reflash was needed) already reserves a
 64KB `coredump` partition alongside the two 3264KB OTA app slots (versus the
-~1.1MB firmware.bin this project currently produces). `firmware/src/ota_health.h/
-.cpp` drives both:
+~1.1MB firmware-ee02-13in3.bin this project currently produces).
+`firmware/lib/common/ota_health.h/.cpp` (shared by every board) drives both:
   - **Boot-time crash → automatic rollback.** `Update.end(true)` (called from
     `performFirmwareOTA()`) leaves the freshly-flashed partition in the bootloader's
     `PENDING_VERIFY` state. If it panics/watchdog-resets before confirming itself,
@@ -248,10 +329,13 @@ place — no partition change or one-time USB reflash was needed) already reserv
     crashing task/PC/backtrace when available) and queues it in NVS. `main.cpp`'s
     `sendCrashReportIfPending()` uploads it to `POST /crash_report` once connectivity
     is confirmed each wake; `/admin`'s Firmware panel lists recent reports per device.
-  - This is still not a substitute for staged rollout — a bad firmware that neither
-    crashes nor fails its `/device_config` round trip (e.g. one that garbles the
-    display but is otherwise "healthy") won't trigger any of the above. Target one
-    device's MAC, confirm it's actually behaving correctly, then target the next.
+  - This is not a substitute for staged rollout, and the channel model above
+    (deliberately) no longer offers one — a bad firmware that neither crashes
+    nor fails its `/device_config` round trip (e.g. one that garbles the
+    display but is otherwise "healthy") won't trigger any of the above, and
+    every `stable`-channel device on a board updates together. Mitigate by
+    watching a release's first few devices closely after it's synced (crash
+    reports, `/admin`'s device list) rather than by staging targets.
 
 ### Color Palette
 

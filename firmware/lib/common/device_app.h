@@ -1,3 +1,27 @@
+#ifndef DEVICE_APP_H
+#define DEVICE_APP_H
+
+// Shared firmware core for every board (EE02, EE04, ...). Header-only so it
+// compiles as ordinary translation-unit-local code with no extra .cpp to add
+// to the build — each board's own PlatformIO environment only ever compiles
+// one main.cpp (via build_src_filter), so there is never more than one
+// translation unit including this header, and no ODR risk from that.
+//
+// IMPORTANT: each board's main.cpp MUST `#include "config.h"` (its own,
+// board-specific one, e.g. src/ee04/config.h) BEFORE `#include "device_app.h"`.
+// This header relies on macros from that file (BOARD_ID, pin numbers, buffer
+// size, timeouts, and optionally PIN_POWER) already being defined in the
+// translation unit by the time these function bodies are compiled - it does
+// NOT #include "config.h" itself, since a quote-include from lib/common/
+// would not reliably resolve to a specific board's src/<board>/config.h.
+//
+// Display-specific code (the `DisplayT` template parameter here) only needs
+// to expose begin()/loadImageData()/refresh()/clear()/drawString()/sleep()/
+// getBufferSize() - the same shape Spectra6Display and SixColor73Display
+// already share. Templating (not a virtual interface) avoids any vtable/
+// flash overhead, and each environment only ever instantiates its own board's
+// Display type.
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -8,64 +32,49 @@
 #include <mbedtls/md.h>
 #include <sys/time.h>
 #include <time.h>
-#include "config.h"
-#include "display.h"
 #include "config_manager.h"
-#include "ble_provisioning.h"
 #include "ota_health.h"
 #include "version.h"
 
 #ifndef IMAGE_INITIAL_RESPONSE_TIMEOUT_MS
-#if defined(IMAGE_HTTP_TIMEOUT_MS) && (IMAGE_HTTP_TIMEOUT_MS <= 65535)
-#define IMAGE_INITIAL_RESPONSE_TIMEOUT_MS IMAGE_HTTP_TIMEOUT_MS
-#else
 #define IMAGE_INITIAL_RESPONSE_TIMEOUT_MS 60000
-#endif
 #endif
 
 #ifndef IMAGE_STALL_TIMEOUT_MS
-#if defined(IMAGE_HTTP_TIMEOUT_MS) && (IMAGE_HTTP_TIMEOUT_MS <= 65535)
-#define IMAGE_STALL_TIMEOUT_MS IMAGE_HTTP_TIMEOUT_MS
-#else
 #define IMAGE_STALL_TIMEOUT_MS 20000
 #endif
-#endif
 
-// Global instances
-Spectra6Display display;
-ConfigManager configManager;
-BLEProvisioning bleProvisioning(configManager);
-OtaHealth otaHealth;
-
-// Boot count stored in RTC memory (survives deep sleep)
-RTC_DATA_ATTR int bootCount = 0;
-
-// Last image hash stored in RTC memory (survives deep sleep)
-// Used to skip download if image hasn't changed
-RTC_DATA_ATTR char lastImageHash[17] = {0};  // 16 chars + null terminator
-
-// Last-associated AP, stored in RTC memory (survives deep sleep). Lets
-// connectWiFi() skip the channel scan on the next wake - see connectWiFi().
-RTC_DATA_ATTR uint8_t lastApBssid[6] = {0};
-RTC_DATA_ATTR uint8_t lastApChannel = 0;
-RTC_DATA_ATTR bool haveLastAp = false;
-
-// Firmware target reported by /device_config this wake, if any (see
-// syncRemoteConfigAndTime() and version.h). Empty means "no target set" —
-// never do OTA in that case, not even to re-flash the same version.
-String firmwareTargetVersion = "";
-String firmwareTargetSha256 = "";
-
-// Battery voltage (read once per boot, sent to server with requests)
-float batteryVoltage = -1.0;
-
-// Configuration mode: hold Button 1 during boot for 1 second
-#define CONFIG_BUTTON_HOLD_MS 1000
 #define DEVICE_CONFIG_ENDPOINT "/device_config"
 #define MIN_SLEEP_SECONDS 60
 #define VALID_UNIX_TIME 1704067200LL  // 2024-01-01 00:00:00 UTC
 
-String getBaseURL() {
+namespace DeviceApp {
+
+// RTC-persisted state (survives deep sleep) - each board declares its own
+// instance with RTC_DATA_ATTR in its own main.cpp (that attribute can't be
+// applied safely from inside a shared/templated header), e.g.:
+//   RTC_DATA_ATTR DeviceApp::RtcState rtcState;
+// A plain aggregate with no constructor, so normal C++ static-storage
+// zero-initialization applies on first power-on only - the same guarantee
+// the original per-field RTC_DATA_ATTR globals in main.cpp relied on.
+struct RtcState {
+    int bootCount;
+    char lastImageHash[17];  // 16 hex chars + null terminator
+    uint8_t lastApBssid[6];
+    uint8_t lastApChannel;
+    bool haveLastAp;
+};
+
+// Regular (non-RTC) per-boot state - re-derived fresh every wake.
+struct RunState {
+    String firmwareTargetVersion;
+    String firmwareTargetSha256;
+    float batteryVoltage = -1.0;
+};
+
+enum class ImageFetchResult { UNCHANGED, UPDATED, FAILED };
+
+inline String getBaseURL(ConfigManager& configManager) {
     String scheme = configManager.getUseHttps() ? "https://" : "http://";
     return scheme + configManager.getServerHost() + ":" + String(configManager.getServerPort());
 }
@@ -79,7 +88,7 @@ String getBaseURL() {
  * platform/board without hardware access to verify; hardening to setCACert()/
  * setCACertBundle() is a follow-up, not a blocker for moving off plain HTTP.
  */
-bool beginRequest(HTTPClient& http, WiFiClientSecure& secureClient, const String& url) {
+inline bool beginRequest(HTTPClient& http, WiFiClientSecure& secureClient, ConfigManager& configManager, const String& url) {
     if (configManager.getUseHttps()) {
         secureClient.setInsecure();
         return http.begin(secureClient, url);
@@ -87,11 +96,8 @@ bool beginRequest(HTTPClient& http, WiFiClientSecure& secureClient, const String
     return http.begin(url);
 }
 
-/**
- * Get the WiFi MAC address as a clean string (lowercase, no separators).
- * Used to identify this device to the image server.
- */
-String getMACAddressClean() {
+/** Get the WiFi MAC address as a clean string (lowercase, no separators). */
+inline String getMACAddressClean() {
     uint8_t mac[6];
     WiFi.macAddress(mac);
     char macStr[13];
@@ -102,29 +108,27 @@ String getMACAddressClean() {
 
 /**
  * Read battery voltage via the on-board voltage divider.
- * GPIO6 enables the divider circuit, GPIO1 reads the divided voltage.
+ * GPIO6 enables the divider circuit, GPIO1 reads the divided voltage - same
+ * circuit on every board (EE02's was copied from EE04's reference docs).
  * Returns voltage in volts (e.g., 3.85), or -1.0 if reading seems invalid.
  */
-float readBatteryVoltage() {
+inline float readBatteryVoltage() {
     pinMode(PIN_ADC_ENABLE, OUTPUT);
     digitalWrite(PIN_ADC_ENABLE, HIGH);
     delay(10);  // Let the ADC circuit stabilize
 
     analogReadResolution(12);
 
-    // Average 16 samples to filter noise
     uint32_t sum = 0;
     for (int i = 0; i < 16; i++) {
         sum += analogRead(PIN_BATTERY_ADC);
     }
     float avgAdc = sum / 16.0;
 
-    // Disable the voltage divider to save power
     digitalWrite(PIN_ADC_ENABLE, LOW);
 
     float voltage = (avgAdc / 4096.0) * BATTERY_SCALE;
 
-    // Sanity check: LiPo range is roughly 2.5V-4.3V
     if (voltage < 0.5 || voltage > 5.0) {
         Serial.printf("Battery: ADC=%.0f, voltage=%.2fV (out of range)\n", avgAdc, voltage);
         return -1.0;
@@ -134,7 +138,7 @@ float readBatteryVoltage() {
     return voltage;
 }
 
-String bytesToHex(const uint8_t* bytes, size_t len) {
+inline String bytesToHex(const uint8_t* bytes, size_t len) {
     static const char* hexChars = "0123456789abcdef";
     String result;
     result.reserve(len * 2);
@@ -145,7 +149,7 @@ String bytesToHex(const uint8_t* bytes, size_t len) {
     return result;
 }
 
-void hexToBytes(const String& hex, uint8_t* out, size_t outLen) {
+inline void hexToBytes(const String& hex, uint8_t* out, size_t outLen) {
     for (size_t i = 0; i < outLen; i++) {
         out[i] = static_cast<uint8_t>(strtoul(hex.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16));
     }
@@ -157,7 +161,7 @@ void hexToBytes(const String& hex, uint8_t* out, size_t outLen) {
  * public and trivially spoofable — is what proves a request actually came from
  * this device. Mirrors worker/src/lib/device-signature.ts's verification exactly.
  */
-String computeDeviceSignature(const String& secretHex, const String& message) {
+inline String computeDeviceSignature(const String& secretHex, const String& message) {
     uint8_t secretBytes[32];
     size_t secretLen = min(secretHex.length() / 2, sizeof(secretBytes));
     hexToBytes(secretHex, secretBytes, secretLen);
@@ -178,17 +182,17 @@ String computeDeviceSignature(const String& secretHex, const String& message) {
  * Adds identity/auth headers common to every request. `path` must match the
  * route being called (e.g. "/hash", "/image_packed") — it's folded into the
  * signature so a captured signature for one endpoint can't be replayed against
- * another. X-Device-Secret is only sent pre-registration, to bootstrap the
+ * another. X-Device-Board is the compiled-in BOARD_ID (see each board's
+ * config.h) - the same string used for the GitHub release asset name and the
+ * worker's firmware_releases.board column, so the worker can serve the right
+ * binary back. X-Device-Secret is only sent pre-registration, to bootstrap the
  * registration QR (see qr-registration.ts) — after the server confirms this
  * device is claimed (device_config's device_id field), it's never sent again.
  *
- * X-Device-Nonce is an NVS-persisted counter, NOT a timestamp — time(nullptr)
- * was tried first and doesn't survive a real power loss (deep sleep keeps the
- * RTC running, a brownout/reset doesn't), so a device that ever loses power
- * would send a "time" behind what the server already had on file and get
- * stuck 401ing forever. See ConfigManager::nextNonce().
+ * X-Device-Nonce is an NVS-persisted counter, NOT a timestamp — see
+ * ConfigManager::nextNonce().
  */
-void addCommonHeaders(HTTPClient& http, const String& path) {
+inline void addCommonHeaders(HTTPClient& http, const String& path, ConfigManager& configManager, float batteryVoltage) {
     String macAddress = getMACAddressClean();
     http.addHeader("X-Device-MAC", macAddress);
 
@@ -197,6 +201,7 @@ void addCommonHeaders(HTTPClient& http, const String& path) {
     }
 
     http.addHeader("X-Firmware-Version", FIRMWARE_VERSION);
+    http.addHeader("X-Device-Board", BOARD_ID);
 
     String secret = configManager.getDeviceSecret();
     String nonce = String(configManager.nextNonce());
@@ -210,15 +215,8 @@ void addCommonHeaders(HTTPClient& http, const String& path) {
         http.addHeader("X-Device-Secret", secret);
     }
 
-    // Logged so a request can be replayed by hand with curl, e.g.:
-    //   curl -H "X-Device-MAC: <mac>" -H "X-Device-Nonce: <nonce>" \
-    //        -H "X-Device-Signature: <signature>" <url>
-    // Note X-Device-Nonce is single-use — the server rejects any nonce that
-    // isn't strictly greater than the last one it accepted for this mac, so a
-    // logged request can only be replayed once, immediately, before the real
-    // device's next wake advances the counter past it.
-    Serial.printf("Request headers -> X-Device-MAC: %s, X-Device-Nonce: %s, X-Device-Signature: %s%s\n",
-                  macAddress.c_str(), nonce.c_str(), signature.c_str(),
+    Serial.printf("Request headers -> X-Device-MAC: %s, X-Device-Board: %s, X-Device-Nonce: %s, X-Device-Signature: %s%s\n",
+                  macAddress.c_str(), BOARD_ID, nonce.c_str(), signature.c_str(),
                   sendingSecret ? (", X-Device-Secret: " + secret).c_str() : "");
 }
 
@@ -226,24 +224,18 @@ void addCommonHeaders(HTTPClient& http, const String& path) {
  * Downloads /firmware_bin?version=<version>, verifying its SHA-256 against
  * expectedSha256Hex while streaming — before Update.end() commits to booting it —
  * then flashes it to the inactive OTA partition. Caller reboots on success.
- *
- * A corrupt/incomplete download or hash mismatch aborts the write and leaves the
- * currently-running firmware untouched, so a bad transfer can't brick the device.
- * It does NOT protect against a *logically* broken release (one that flashes clean
- * but crashes or loops on boot) — this board's stock Arduino/ESP-IDF build doesn't
- * have automatic rollback-on-crash enabled. The safety net for that case is staged
- * rollout: target one device's MAC in /admin before promoting to 'default'/'global'.
  */
-bool performFirmwareOTA(const String& version, const String& expectedSha256Hex) {
-    String url = getBaseURL() + "/firmware_bin?version=" + version;
+inline bool performFirmwareOTA(const String& version, const String& expectedSha256Hex,
+                                ConfigManager& configManager, float batteryVoltage) {
+    String url = getBaseURL(configManager) + "/firmware_bin?version=" + version;
     Serial.printf("Firmware update available: %s -> %s\n", FIRMWARE_VERSION, version.c_str());
     Serial.printf("Downloading from: %s\n", url.c_str());
 
     HTTPClient http;
     WiFiClientSecure secureClient;
-    beginRequest(http, secureClient, url);
+    beginRequest(http, secureClient, configManager, url);
     http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
-    addCommonHeaders(http, "/firmware_bin");
+    addCommonHeaders(http, "/firmware_bin", configManager, batteryVoltage);
 
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
@@ -340,15 +332,15 @@ bool performFirmwareOTA(const String& version, const String& expectedSha256Hex) 
  * wake, so there's nothing new to prove here. Leaves the queued report in place on
  * any failure - NVS storage is cheap and it'll just retry next wake.
  */
-void sendCrashReportIfPending() {
+inline void sendCrashReportIfPending(OtaHealth& otaHealth, ConfigManager& configManager, float batteryVoltage) {
     if (!otaHealth.hasPendingReport()) return;
 
-    String url = getBaseURL() + "/crash_report";
+    String url = getBaseURL(configManager) + "/crash_report";
     HTTPClient http;
     WiFiClientSecure secureClient;
-    beginRequest(http, secureClient, url);
+    beginRequest(http, secureClient, configManager, url);
     http.setTimeout(HTTP_TIMEOUT_MS);
-    addCommonHeaders(http, "/crash_report");
+    addCommonHeaders(http, "/crash_report", configManager, batteryVoltage);
     http.addHeader("Content-Type", "application/json");
 
     String body = otaHealth.getPendingReportJson();
@@ -363,18 +355,18 @@ void sendCrashReportIfPending() {
     }
 }
 
-bool isClockValid(time_t now = time(nullptr)) {
+inline bool isClockValid(time_t now = time(nullptr)) {
     return now >= VALID_UNIX_TIME;
 }
 
-void setClockFromEpoch(time_t epochSeconds) {
+inline void setClockFromEpoch(time_t epochSeconds) {
     struct timeval tv;
     tv.tv_sec = epochSeconds;
     tv.tv_usec = 0;
     settimeofday(&tv, nullptr);
 }
 
-int32_t getLocalSecondsOfDay(time_t utcNow, int16_t timezoneOffsetMinutes) {
+inline int32_t getLocalSecondsOfDay(time_t utcNow, int16_t timezoneOffsetMinutes) {
     int64_t localSeconds = static_cast<int64_t>(utcNow) + static_cast<int64_t>(timezoneOffsetMinutes) * 60LL;
     int32_t secondsOfDay = static_cast<int32_t>(localSeconds % 86400LL);
     if (secondsOfDay < 0) {
@@ -383,7 +375,7 @@ int32_t getLocalSecondsOfDay(time_t utcNow, int16_t timezoneOffsetMinutes) {
     return secondsOfDay;
 }
 
-bool isWithinActiveWindow(time_t utcNow, uint8_t startHour, uint8_t endHour, int16_t timezoneOffsetMinutes) {
+inline bool isWithinActiveWindow(time_t utcNow, uint8_t startHour, uint8_t endHour, int16_t timezoneOffsetMinutes) {
     if (startHour == endHour) {
         return true;  // Same start/end means always active.
     }
@@ -399,7 +391,7 @@ bool isWithinActiveWindow(time_t utcNow, uint8_t startHour, uint8_t endHour, int
     return secondsOfDay >= startSeconds || secondsOfDay < endSeconds;
 }
 
-uint32_t secondsUntilNextActiveWindow(time_t utcNow, uint8_t startHour, int16_t timezoneOffsetMinutes) {
+inline uint32_t secondsUntilNextActiveWindow(time_t utcNow, uint8_t startHour, int16_t timezoneOffsetMinutes) {
     int32_t secondsOfDay = getLocalSecondsOfDay(utcNow, timezoneOffsetMinutes);
     int32_t startSeconds = static_cast<int32_t>(startHour) * 3600;
 
@@ -410,7 +402,7 @@ uint32_t secondsUntilNextActiveWindow(time_t utcNow, uint8_t startHour, int16_t 
     return static_cast<uint32_t>((86400 - secondsOfDay) + startSeconds);
 }
 
-uint32_t secondsUntilWindowEnd(time_t utcNow, uint8_t startHour, uint8_t endHour, int16_t timezoneOffsetMinutes) {
+inline uint32_t secondsUntilWindowEnd(time_t utcNow, uint8_t startHour, uint8_t endHour, int16_t timezoneOffsetMinutes) {
     if (startHour == endHour) {
         return UINT32_MAX;
     }
@@ -430,7 +422,7 @@ uint32_t secondsUntilWindowEnd(time_t utcNow, uint8_t startHour, uint8_t endHour
     return static_cast<uint32_t>(endSeconds - secondsOfDay);
 }
 
-void printClockStatus() {
+inline void printClockStatus(ConfigManager& configManager) {
     time_t now = time(nullptr);
     if (!isClockValid(now)) {
         Serial.println("Clock status: invalid (no recent server time sync yet)");
@@ -450,7 +442,7 @@ void printClockStatus() {
                   isActive ? "yes" : "no");
 }
 
-uint32_t calculateSleepSeconds() {
+inline uint32_t calculateSleepSeconds(ConfigManager& configManager) {
     uint32_t refreshSeconds = static_cast<uint32_t>(configManager.getSleepMinutes()) * 60U;
     time_t now = time(nullptr);
 
@@ -479,15 +471,15 @@ uint32_t calculateSleepSeconds() {
     return max(untilNextWindow, static_cast<uint32_t>(MIN_SLEEP_SECONDS));
 }
 
-bool syncRemoteConfigAndTime() {
-    String configUrl = getBaseURL() + DEVICE_CONFIG_ENDPOINT;
+inline bool syncRemoteConfigAndTime(ConfigManager& configManager, RunState& run) {
+    String configUrl = getBaseURL(configManager) + DEVICE_CONFIG_ENDPOINT;
     Serial.printf("Fetching device config from: %s\n", configUrl.c_str());
 
     HTTPClient http;
     WiFiClientSecure secureClient;
-    beginRequest(http, secureClient, configUrl);
+    beginRequest(http, secureClient, configManager, configUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
-    addCommonHeaders(http, DEVICE_CONFIG_ENDPOINT);
+    addCommonHeaders(http, DEVICE_CONFIG_ENDPOINT, configManager, run.batteryVoltage);
 
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
@@ -515,11 +507,6 @@ bool syncRemoteConfigAndTime() {
     setClockFromEpoch(serverEpoch);
     Serial.printf("Clock synchronized from server epoch: %lld\n", static_cast<long long>(serverEpoch));
 
-    // device_id echoes back our own mac once the server has bound a secret to
-    // it (see resolveDeviceKey() in auth-device.ts); it's 'default' otherwise.
-    // Flipping this both ways keeps us self-healing if an admin deletes the
-    // device server-side — we start advertising X-Device-Secret again so it
-    // can be reclaimed via the registration QR.
     const char* deviceId = doc["device_id"] | "";
     bool nowRegistered = strcasecmp(deviceId, getMACAddressClean().c_str()) == 0;
     if (nowRegistered != configManager.getDeviceRegistered()) {
@@ -580,20 +567,17 @@ bool syncRemoteConfigAndTime() {
     const char* configSource = doc["config_source"] | "none";
     Serial.printf("Remote config source: %s\n", configSource);
 
-    // Only set when an admin has explicitly targeted a firmware version somewhere
-    // in the fallback chain (device MAC -> 'default' -> 'global') — see
-    // lib/firmware-target.ts. Missing fields here mean "leave firmware alone."
-    firmwareTargetVersion = "";
-    firmwareTargetSha256 = "";
+    run.firmwareTargetVersion = "";
+    run.firmwareTargetSha256 = "";
     if (doc["firmware_version"].is<const char*>() && doc["firmware_sha256"].is<const char*>()) {
-        firmwareTargetVersion = doc["firmware_version"].as<String>();
-        firmwareTargetSha256 = doc["firmware_sha256"].as<String>();
+        run.firmwareTargetVersion = doc["firmware_version"].as<String>();
+        run.firmwareTargetSha256 = doc["firmware_sha256"].as<String>();
     }
 
     return true;
 }
 
-void printWakeupReason() {
+inline void printWakeupReason() {
     esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
     switch (wakeupReason) {
         case ESP_SLEEP_WAKEUP_TIMER:
@@ -613,27 +597,23 @@ void printWakeupReason() {
 
 /**
  * True only for a genuine deep-sleep timer/pin wakeup — false for a cold boot
- * (power-on, reset button, fresh flash). Used to let quiet hours only skip the
- * fetch on a *scheduled* wake, since a cold boot means the display might not be
- * showing anything meaningful yet and is worth populating once regardless of
- * the active window; the next real deep-sleep wake goes back to respecting it.
+ * (power-on, reset button, fresh flash).
  */
-bool wasDeepSleepWakeup() {
+inline bool wasDeepSleepWakeup() {
     esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
     return wakeupReason == ESP_SLEEP_WAKEUP_TIMER ||
            wakeupReason == ESP_SLEEP_WAKEUP_EXT0 ||
            wakeupReason == ESP_SLEEP_WAKEUP_EXT1;
 }
 
-bool checkConfigButton() {
-    // Configure button pin with internal pull-up
+#define CONFIG_BUTTON_HOLD_MS 1000
+
+inline bool checkConfigButton() {
     pinMode(PIN_BUTTON_1, INPUT_PULLUP);
 
-    // Check if button is pressed (LOW = pressed)
     if (digitalRead(PIN_BUTTON_1) == LOW) {
         Serial.println("Config button pressed - hold for 1 second to enter config mode...");
 
-        // Wait and check if button is held for the required duration
         uint32_t startTime = millis();
         while (digitalRead(PIN_BUTTON_1) == LOW) {
             if (millis() - startTime >= CONFIG_BUTTON_HOLD_MS) {
@@ -648,7 +628,7 @@ bool checkConfigButton() {
     return false;
 }
 
-bool connectWiFi() {
+inline bool connectWiFi(ConfigManager& configManager, RtcState& rtc) {
     String ssid = configManager.getWifiSsid();
     if (ssid.length() == 0) {
         Serial.println("No WiFi credentials configured - skipping connect attempt");
@@ -659,14 +639,10 @@ bool connectWiFi() {
     String password = configManager.getWifiPassword();
 
     // Fast reconnect: skip the AP scan by reusing the channel/BSSID we associated
-    // with last time (cached in RTC memory, so it survives deep sleep). Home APs
-    // essentially never change channel/BSSID on their own, and this only ever
-    // saves time - if the cache is stale this attempt just times out quickly and
-    // we fall through to the normal full-scan connect below, so there's no
-    // downside versus today's behavior beyond the short extra timeout.
-    if (haveLastAp) {
-        Serial.printf("Connecting to WiFi: %s (fast reconnect, channel %d)\n", ssid.c_str(), lastApChannel);
-        WiFi.begin(ssid.c_str(), password.c_str(), lastApChannel, lastApBssid);
+    // with last time (cached in RTC memory, so it survives deep sleep).
+    if (rtc.haveLastAp) {
+        Serial.printf("Connecting to WiFi: %s (fast reconnect, channel %d)\n", ssid.c_str(), rtc.lastApChannel);
+        WiFi.begin(ssid.c_str(), password.c_str(), rtc.lastApChannel, rtc.lastApBssid);
 
         uint32_t fastStart = millis();
         while (WiFi.status() != WL_CONNECTED) {
@@ -674,7 +650,7 @@ bool connectWiFi() {
             if (millis() - fastStart > WIFI_FAST_RECONNECT_TIMEOUT_MS) {
                 Serial.println("\nFast reconnect failed - falling back to full scan");
                 WiFi.disconnect();
-                haveLastAp = false;
+                rtc.haveLastAp = false;
                 break;
             }
         }
@@ -699,47 +675,44 @@ bool connectWiFi() {
 
     Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
-    // Cache this AP for next wake's fast reconnect.
     uint8_t* bssid = WiFi.BSSID();
     if (bssid != nullptr) {
-        memcpy(lastApBssid, bssid, sizeof(lastApBssid));
-        lastApChannel = WiFi.channel();
-        haveLastAp = true;
+        memcpy(rtc.lastApBssid, bssid, sizeof(rtc.lastApBssid));
+        rtc.lastApChannel = WiFi.channel();
+        rtc.haveLastAp = true;
     }
 
     return true;
 }
 
-void disconnectWiFi() {
+inline void disconnectWiFi() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     Serial.println("WiFi disconnected");
 }
 
-enum class ImageFetchResult { UNCHANGED, UPDATED, FAILED };
-
 /**
  * Fetches the pending image, folding the old separate hash pre-check into this
- * same request via ?known_hash= (see worker/src/routes/image-packed.ts and
- * image_server.py) - one fewer full request/TLS-handshake per wake versus the
- * previous checkImageChanged() + fetchAndDisplayImage() pair. A 304 means the
- * server confirmed the image is unchanged; the display buffer is only allocated
- * and display.begin() only called once we know we actually have bytes to show.
+ * same request via ?known_hash= (see worker/src/routes/image-packed.ts). A 304
+ * means the server confirmed the image is unchanged; the display buffer is only
+ * allocated and display.begin() only called once we know we actually have bytes
+ * to show.
  */
-ImageFetchResult fetchAndDisplayImage() {
+template <typename DisplayT>
+ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configManager, RtcState& rtc, RunState& run) {
     String url = configManager.getFullURL();
-    if (lastImageHash[0] != '\0') {
+    if (rtc.lastImageHash[0] != '\0') {
         url += (url.indexOf('?') >= 0 ? "&" : "?");
         url += "known_hash=";
-        url += lastImageHash;
+        url += rtc.lastImageHash;
     }
     Serial.printf("Fetching image from: %s\n", url.c_str());
 
     HTTPClient http;
     WiFiClientSecure secureClient;
-    beginRequest(http, secureClient, url);
+    beginRequest(http, secureClient, configManager, url);
     http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
-    addCommonHeaders(http, configManager.getImageEndpoint());
+    addCommonHeaders(http, configManager.getImageEndpoint(), configManager, run.batteryVoltage);
 
     int httpCode = http.GET();
 
@@ -768,44 +741,44 @@ ImageFetchResult fetchAndDisplayImage() {
     int contentLength = http.getSize();
     Serial.printf("Content length: %d bytes\n", contentLength);
 
-    if (contentLength <= 0 || contentLength > BUFFER_SIZE) {
-        Serial.printf("Invalid content length: %d (expected %d)\n", contentLength, BUFFER_SIZE);
+    if (contentLength <= 0 || contentLength > (int)display.getBufferSize()) {
+        Serial.printf("Invalid content length: %d (expected %d)\n", contentLength, (int)display.getBufferSize());
         http.end();
         return ImageFetchResult::FAILED;
     }
 
-    // Allocate the buffer only now that we know there's actually a new image to
-    // download - a 304 above never reaches here, so an unchanged-image wake
-    // never touches PSRAM or the display at all.
-    uint8_t* imageBuffer = (uint8_t*)ps_malloc(BUFFER_SIZE);
-    if (imageBuffer == nullptr) {
-        Serial.println("Failed to allocate image buffer!");
+    // Stream directly into the display's own buffer rather than a separate
+    // temp allocation + copy - on a PSRAM-less board (EE04) a second
+    // full-size buffer alongside the display's own wouldn't reliably fit in
+    // ~320KB of internal SRAM once WiFi/TLS/BLE overhead is accounted for,
+    // and it's wasted PSRAM churn on EE02 too. display.begin() must run
+    // first so the buffer is actually allocated/valid before writing into it.
+    if (!display.begin()) {
+        Serial.println("Display initialization failed!");
         http.end();
         return ImageFetchResult::FAILED;
     }
+    uint8_t* imageBuffer = display.getBuffer();
 
-    // Stream the response directly into our buffer
     WiFiClient* stream = http.getStreamPtr();
     size_t bytesRead = 0;
     uint32_t startTime = millis();
     uint32_t lastDataTime = startTime;
 
-    while (bytesRead < contentLength && http.connected()) {
+    while (bytesRead < (size_t)contentLength && http.connected()) {
         size_t available = stream->available();
         if (available > 0) {
             size_t toRead = min(available, (size_t)(contentLength - bytesRead));
-            size_t read = stream->readBytes(imageBuffer + bytesRead, toRead);
-            bytesRead += read;
+            size_t n = stream->readBytes(imageBuffer + bytesRead, toRead);
+            bytesRead += n;
             lastDataTime = millis();
 
-            // Progress update every 100KB
             if ((bytesRead % 102400) == 0) {
                 Serial.printf("Downloaded: %d / %d bytes\n", bytesRead, contentLength);
             }
         }
         yield();
 
-        // Abort only if the stream stops producing data for too long.
         if (millis() - lastDataTime > IMAGE_STALL_TIMEOUT_MS) {
             Serial.printf("Download stalled - no data for %u ms\n", IMAGE_STALL_TIMEOUT_MS);
             break;
@@ -816,138 +789,92 @@ ImageFetchResult fetchAndDisplayImage() {
 
     Serial.printf("Downloaded %d bytes in %lu ms\n", bytesRead, millis() - startTime);
 
-    if (bytesRead != contentLength) {
-        Serial.println("Incomplete download!");
-        free(imageBuffer);
+    if (bytesRead != (size_t)contentLength) {
+        Serial.println("Incomplete download! Display buffer now holds a partial/garbled image - "
+                        "will retry next wake since lastImageHash is left unset below.");
+        // display.begin() above already powered the panel on - power it back
+        // down without drawing the partial buffer, or it stays powered (and
+        // draining battery) for the whole sleep interval on a board with no
+        // PIN_POWER rail-cut (e.g. EE04).
+        display.sleep();
         return ImageFetchResult::FAILED;
     }
 
-    if (!display.begin()) {
-        Serial.println("Display initialization failed!");
-        free(imageBuffer);
-        return ImageFetchResult::FAILED;
-    }
-
-    // Load image data into display buffer
-    display.loadImageData(imageBuffer, bytesRead);
-
-    // Free the temporary buffer
-    free(imageBuffer);
-
-    // Refresh the display
     display.refresh();
 
     if (responseImageHash.length() == 16) {
-        strncpy(lastImageHash, responseImageHash.c_str(), 16);
-        lastImageHash[16] = '\0';
+        strncpy(rtc.lastImageHash, responseImageHash.c_str(), 16);
+        rtc.lastImageHash[16] = '\0';
     } else {
         Serial.println("Warning: response had no X-Image-Hash - next wake will re-fetch this image");
     }
-    Serial.printf("Committed displayed image hash: %s\n", lastImageHash[0] ? lastImageHash : "(none)");
+    Serial.printf("Committed displayed image hash: %s\n", rtc.lastImageHash[0] ? rtc.lastImageHash : "(none)");
 
     return ImageFetchResult::UPDATED;
 }
 
-void enterDeepSleep(uint32_t sleepSeconds) {
+inline void enterDeepSleep(uint32_t sleepSeconds) {
     uint32_t sleepMinutes = sleepSeconds / 60;
     uint32_t remainderSeconds = sleepSeconds % 60;
     Serial.printf("Entering deep sleep for %lu minutes %lu seconds...\n", sleepMinutes, remainderSeconds);
 
-    // Configure timer wakeup
     uint64_t sleepTime = static_cast<uint64_t>(sleepSeconds) * 1000000ULL;
     esp_sleep_enable_timer_wakeup(sleepTime);
 
-    // Turn off display power to save energy
+#ifdef PIN_POWER
+    // Turn off display power to save energy - only boards with a dedicated
+    // power-enable pin (currently just EE02) need this.
     digitalWrite(PIN_POWER, LOW);
+#endif
 
-    // Enter deep sleep
     Serial.println("Going to sleep now...");
     Serial.flush();
     esp_deep_sleep_start();
 }
 
 /**
- * Renders a plain-text banner on the e-ink panel so a device sitting in config
- * mode is self-explanatory without a serial console attached - it's otherwise
- * indistinguishable from a hung or dead board. Uses the built-in 5x7 font
- * (see Spectra6Display::drawString) since there's no image/graphics pipeline
- * available yet at this point in boot.
+ * The full normal-operation wake cycle: WiFi, device_config/time sync, OTA
+ * check, quiet-hours check, image fetch/display, sleep. Each board's own
+ * main.cpp calls this from setup() after handling config-mode/first-boot
+ * cases itself (those still need board-specific display layout - see
+ * showConfigModeScreen() in each board's main.cpp).
  */
-void showConfigModeScreen() {
-    if (!display.begin()) {
-        Serial.println("Config mode: display init failed - skipping screen render");
-        return;
-    }
-
-    String mac = getMACAddressClean();
-    mac.toUpperCase();
-
-    display.clear(Spectra6Color::WHITE);
-    display.drawString(40, 40, "E-INK SETUP MODE", Spectra6Color::BLACK, 6);
-    display.drawString(40, 200, "CONNECT VIA BLUETOOTH TO", Spectra6Color::BLACK, 4);
-    display.drawString(40, 260, "DEVICE NAME: EINK-SETUP", Spectra6Color::BLACK, 4);
-    display.drawString(40, 340, "THEN OPEN /PROVISION FROM", Spectra6Color::BLACK, 4);
-    display.drawString(40, 400, "CHROME OR EDGE (NOT SAFARI)", Spectra6Color::BLACK, 4);
-    display.drawString(40, 480, "MAC:", Spectra6Color::BLACK, 4);
-    display.drawString(40, 540, mac, Spectra6Color::BLACK, 5);
-    display.refresh();
-}
-
-void runConfigMode() {
-    Serial.println("\n========================================");
-    Serial.println("CONFIGURATION MODE (Bluetooth)");
-    Serial.println("========================================\n");
-
-    showConfigModeScreen();
-
-    bleProvisioning.start();
-    // getBaseURL() reflects whatever server is currently configured (the compiled-in
-    // default on a never-provisioned device) — this is where /provision is served
-    // from, not something the device itself hosts.
-    Serial.printf("Pair over Bluetooth (device name 'EInk-Setup') from %s/provision to configure WiFi/server settings\n",
-                  getBaseURL().c_str());
-
-    // Runs until BLEProvisioning triggers a reboot (see handleCommand("save")).
-    while (true) {
-        bleProvisioning.loop();
-        delay(10);
-    }
-}
-
-void runNormalMode() {
+template <typename DisplayT>
+void runNormalMode(DisplayT& display, ConfigManager& configManager, OtaHealth& otaHealth, RtcState& rtc, RunState& run) {
     Serial.println("\n========================================");
     Serial.println("NORMAL OPERATION MODE");
     Serial.println("========================================\n");
 
     // Read battery voltage before WiFi (ADC can be noisy during WiFi)
-    batteryVoltage = readBatteryVoltage();
+    run.batteryVoltage = readBatteryVoltage();
 
-    // Connect to WiFi first (needed for device_config and the image fetch)
-    if (!connectWiFi()) {
+    if (!connectWiFi(configManager, rtc)) {
         Serial.println("WiFi connection failed!");
-        // Keep previous image, just go to sleep
         disconnectWiFi();
-        enterDeepSleep(calculateSleepSeconds());
+        enterDeepSleep(calculateSleepSeconds(configManager));
+        return;
     }
 
-    bool remoteConfigSynced = syncRemoteConfigAndTime();
-    printClockStatus();
+    bool remoteConfigSynced = syncRemoteConfigAndTime(configManager, run);
+    printClockStatus(configManager);
 
     if (remoteConfigSynced) {
         // A successful authenticated round trip is our proof this firmware actually
         // works - cancel any pending OTA rollback watch and flush any queued crash/
         // rollback report now that we have connectivity. See ota_health.h.
         otaHealth.confirmHealthy();
-        sendCrashReportIfPending();
+        sendCrashReportIfPending(otaHealth, configManager, run.batteryVoltage);
     }
 
     // Firmware OTA check happens regardless of quiet hours — it's rare and the
     // device is already awake and connected. firmwareTargetVersion is only ever
-    // non-empty when an admin explicitly set a target (see syncRemoteConfigAndTime).
-    if (firmwareTargetVersion.length() > 0 && firmwareTargetVersion != FIRMWARE_VERSION) {
-        if (performFirmwareOTA(firmwareTargetVersion, firmwareTargetSha256)) {
+    // non-empty when this device's channel (stable/beta - set in /admin, not
+    // a device-side concept) resolves to a release for THIS board (see
+    // syncRemoteConfigAndTime / worker's lib/firmware-target.ts).
+    if (run.firmwareTargetVersion.length() > 0 && run.firmwareTargetVersion != FIRMWARE_VERSION) {
+        if (performFirmwareOTA(run.firmwareTargetVersion, run.firmwareTargetSha256, configManager, run.batteryVoltage)) {
             Serial.println("Rebooting into new firmware...");
-            otaHealth.recordOtaAttempt(FIRMWARE_VERSION, firmwareTargetVersion);
+            otaHealth.recordOtaAttempt(FIRMWARE_VERSION, run.firmwareTargetVersion);
             disconnectWiFi();
             ESP.restart();
         } else {
@@ -963,12 +890,11 @@ void runNormalMode() {
                               configManager.getTimezoneOffsetMinutes())) {
         Serial.println("Currently in quiet hours - skipping image fetch");
         disconnectWiFi();
-        enterDeepSleep(calculateSleepSeconds());
+        enterDeepSleep(calculateSleepSeconds(configManager));
+        return;
     }
 
-    // Fetch (and display, if changed) the pending image. The hash check is
-    // folded into this same request via ?known_hash= - see fetchAndDisplayImage().
-    switch (fetchAndDisplayImage()) {
+    switch (fetchAndDisplayImage(display, configManager, rtc, run)) {
         case ImageFetchResult::UNCHANGED:
             Serial.println("Image unchanged - going back to sleep");
             break;
@@ -979,67 +905,10 @@ void runNormalMode() {
             break;
     }
 
-    // Disconnect WiFi to save power
     disconnectWiFi();
-
-    // Enter deep sleep
-    enterDeepSleep(calculateSleepSeconds());
+    enterDeepSleep(calculateSleepSeconds(configManager));
 }
 
-void setup() {
-    Serial.begin(115200);
+} // namespace DeviceApp
 
-    // Give the USB serial port time to enumerate/attach before we start logging -
-    // but only on a cold boot (power-on/reset button), where someone plausibly has
-    // a serial monitor open. A scheduled deep-sleep wakeup has nobody watching, so
-    // skip it there to save ~2s of active current on every single wake cycle.
-    if (!wasDeepSleepWakeup()) {
-        delay(2000);
-    }
-
-    // WiFi/BT need >=80MHz; running the rest of the active window here too (rather
-    // than the 240MHz default) cuts active-mode current draw for the whole cycle.
-    setCpuFrequencyMhz(ACTIVE_CPU_FREQ_MHZ);
-
-    Serial.println("\n========================================");
-    Serial.println("Seeed EE02 E-Ink Display Firmware");
-    Serial.printf("Version: %s\n", FIRMWARE_VERSION);
-    Serial.println("========================================");
-
-    bootCount++;
-    Serial.printf("Boot count: %d\n", bootCount);
-    printWakeupReason();
-
-    // Initialize configuration manager
-    configManager.begin();
-    configManager.ensureDeviceSecret();
-
-    // Rollback safety net: as early as possible, before anything else has a chance
-    // to crash. May not return (forces a reboot) if a just-flashed OTA has failed to
-    // confirm itself healthy too many wake cycles in a row - see ota_health.h.
-    otaHealth.begin();
-    otaHealth.checkBootHealth();
-
-    // Check if config button (Button 1 / GPIO2) is held to enter config mode
-    if (checkConfigButton()) {
-        runConfigMode();
-        // runConfigMode never returns
-    }
-
-    // First boot (or after an NVS reset) has no WiFi credentials yet, so there's
-    // nothing useful runNormalMode() can do — go straight to provisioning instead
-    // of silently failing to connect every wake cycle until someone notices.
-    if (configManager.getWifiSsid().length() == 0) {
-        Serial.println("No WiFi credentials configured - entering config mode automatically");
-        runConfigMode();
-        // runConfigMode never returns
-    }
-
-    // Normal operation
-    runNormalMode();
-}
-
-void loop() {
-    // This should never be reached due to deep sleep
-    delay(1000);
-}
+#endif // DEVICE_APP_H

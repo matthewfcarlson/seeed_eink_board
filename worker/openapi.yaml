@@ -104,6 +104,12 @@ components:
         running_firmware_version:
           type: string
           nullable: true
+        board:
+          type: string
+          nullable: true
+          description: >-
+            Self-reported via X-Device-Board (e.g. `ee02-13in3`, `ee04-7in3`).
+            Null until the device's first successful request.
         bucket_ids:
           type: array
           items:
@@ -173,6 +179,18 @@ components:
       schema:
         type: string
       description: Device MAC address, no separators (e.g. `d0cf1326f7e8`).
+    XDeviceBoard:
+      name: X-Device-Board
+      in: header
+      required: false
+      schema:
+        type: string
+      description: >-
+        Compiled-in board id (e.g. `ee02-13in3`, `ee04-7in3`) — same string
+        used for the GitHub release asset name and firmware_releases.board.
+        Only absent for firmware older than this header's introduction; when
+        absent, /device_config omits firmware_version/firmware_sha256 rather
+        than guessing which board's release to resolve.
     MacPath:
       name: mac
       in: path
@@ -599,8 +617,11 @@ paths:
 
   /admin/firmware/sync:
     post:
-      summary: Pull the latest GitHub release into the firmware catalog
-      description: Only catalogs the binary (D1 + KV) — never rolls it out to any device.
+      summary: Pull the latest GitHub release into the firmware catalog, per board
+      description: >-
+        Only catalogs the binaries (D1 + KV), one row per known board. Devices
+        on the 'stable' channel start receiving a newly-synced release
+        immediately on their next wake — there's no separate rollout step.
       responses:
         '200': { description: OK }
         '502': { description: GitHub fetch failed }
@@ -608,18 +629,28 @@ paths:
   /admin/firmware/releases:
     get:
       summary: List cataloged firmware releases
+      description: >-
+        Board-scoped: the same version tag can appear as one row per board
+        (`ee02-13in3`, `ee04-7in3`, ...), each with its own sha256/binary.
+        Informational only — devices don't target a specific row from here,
+        see /admin/firmware/target/{target}.
       responses:
         '200': { description: OK }
 
   /admin/firmware/targets:
     get:
-      summary: List current firmware targets
+      summary: List each device's firmware channel
       responses:
         '200': { description: OK }
 
   /admin/firmware/target/{target}:
     put:
-      summary: Set the firmware target for a device MAC
+      summary: Set the firmware channel for a device MAC
+      description: >-
+        No admin-picked exact version — just a channel choice. 'stable'
+        always resolves to the newest cataloged release for whatever board
+        the device reports on each request; 'beta' currently resolves to
+        nothing (no beta pipeline exists yet), same as no channel set.
       parameters:
         - $ref: '#/components/parameters/TargetPath'
       requestBody:
@@ -629,14 +660,14 @@ paths:
             schema:
               type: object
               properties:
-                version: { type: string }
-              required: [version]
+                channel: { type: string, enum: [stable, beta] }
+              required: [channel]
       responses:
         '200': { description: OK }
-        '400': { description: Unknown firmware version }
+        '400': { description: channel must be 'stable' or 'beta' }
         '403': { description: Forbidden }
     delete:
-      summary: Clear the firmware target for a device MAC
+      summary: Clear the firmware channel for a device MAC
       parameters:
         - $ref: '#/components/parameters/TargetPath'
       responses:
@@ -737,6 +768,7 @@ paths:
         - name: X-Firmware-Version
           in: header
           schema: { type: string }
+        - $ref: '#/components/parameters/XDeviceBoard'
       responses:
         '200': { description: OK }
         '401': { description: Invalid or missing device signature }
@@ -745,11 +777,11 @@ paths:
     post:
       summary: "[Device-facing] Report a crash and/or OTA rollback"
       description: >-
-        Called by firmware/src/ota_health.cpp + main.cpp's sendCrashReportIfPending(),
-        at most once per boot, only after a device has already proven connectivity via
-        /device_config this wake. Same auth as /device_config. An unclaimed device
-        (unresolved X-Device-MAC) still gets a 200 so it stops retrying, but nothing
-        is persisted.
+        Called by firmware/lib/common/ota_health.cpp + device_app.h's
+        sendCrashReportIfPending(), at most once per boot, only after a device
+        has already proven connectivity via /device_config this wake. Same
+        auth as /device_config. An unclaimed device (unresolved X-Device-MAC)
+        still gets a 200 so it stops retrying, but nothing is persisted.
       security: []
       parameters:
         - $ref: '#/components/parameters/XDeviceMac'
@@ -837,17 +869,30 @@ paths:
   /firmware_bin:
     get:
       summary: "[Device-facing] Download a cataloged firmware binary"
+      description: >-
+        firmware_releases is keyed by (board, version) — the same version tag
+        is deliberately reused across boards — so X-Device-Board is required
+        here (unlike its optional use elsewhere) to disambiguate which
+        board's binary to serve.
       security: []
       parameters:
         - name: version
           in: query
           required: true
           schema: { type: string }
+        - name: X-Device-Board
+          in: header
+          required: true
+          schema: { type: string }
+          description: >-
+            Compiled-in board id (e.g. `ee02-13in3`, `ee04-7in3`) — same
+            string used for the GitHub release asset name and
+            firmware_releases.board.
       responses:
         '200':
           description: OK
           content:
             application/octet-stream: { schema: { type: string, format: binary } }
-        '400': { description: version query param is required }
+        '400': { description: version query param or X-Device-Board header is required }
         '404': { description: Unknown firmware version }
         '500': { description: Firmware binary missing from storage }

@@ -313,7 +313,7 @@ function formatUptime(createdAtSeconds: number): string {
 function renderDevicesTable(devices: any[]) {
   const tbody = el("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="hint">No devices registered yet.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -325,6 +325,9 @@ function renderDevicesTable(devices: any[]) {
       : '<span class="hint">never</span>';
     const firmware = d.running_firmware_version
       ? escapeHtml(d.running_firmware_version)
+      : '<span class="hint">unknown</span>';
+    const board = d.board
+      ? "<code>" + escapeHtml(d.board) + "</code>"
       : '<span class="hint">unknown</span>';
     const uptime = d.created_at
       ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatUptime(d.created_at) + "</span>"
@@ -340,6 +343,7 @@ function renderDevicesTable(devices: any[]) {
     return "<tr>" +
       "<td><code>" + escapeHtml(d.mac) + "</code></td>" +
       "<td>" + escapeHtml(d.label || "") + "</td>" +
+      "<td>" + board + "</td>" +
       "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
       "<td>" + uptime + "</td>" +
@@ -645,8 +649,12 @@ el("create-bucket-btn").addEventListener("click", async () => {
 
 el("firmware-sync-btn").addEventListener("click", async () => {
   try {
-    const result = await apiFetch("/admin/firmware/sync", { method: "POST" });
-    showMessage("app-message", result.isNew ? "Synced new firmware " + result.version : "Already up to date (" + result.version + ")", "success");
+    // Keyed by board — see routes/admin/firmware.ts's syncLatestFirmwareRelease.
+    const result: Record<string, { version: string; isNew: boolean } | null> = await apiFetch("/admin/firmware/sync", { method: "POST" });
+    const summary = Object.entries(result)
+      .map(([board, r]) => board + ": " + (r ? (r.isNew ? "synced " + r.version : "up to date (" + r.version + ")") : "no release found"))
+      .join(", ");
+    showMessage("app-message", summary, "success");
     await renderApp();
   } catch (err: any) {
     showMessage("app-message", "Failed to sync firmware: " + err.message, "error");
@@ -665,17 +673,17 @@ async function clearFirmwareTarget(target: string) {
 
 el("firmware-target-save-btn").addEventListener("click", async () => {
   const target = el<HTMLSelectElement>("firmware-target-select").value;
-  const version = el<HTMLSelectElement>("firmware-version-select").value;
-  if (!target || !version) return;
+  const channel = el<HTMLSelectElement>("firmware-channel-select").value;
+  if (!target || !channel) return;
   try {
     await apiFetch("/admin/firmware/target/" + encodeURIComponent(target), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version }),
+      body: JSON.stringify({ channel }),
     });
     await renderApp();
   } catch (err: any) {
-    showMessage("app-message", "Failed to set firmware target: " + err.message, "error");
+    showMessage("app-message", "Failed to set firmware channel: " + err.message, "error");
   }
 });
 
@@ -684,6 +692,7 @@ function renderFirmwareReleasesTable(releases: any[]) {
   tbody.innerHTML = releases.length
     ? releases.map((r) =>
         "<tr>" +
+        "<td><code>" + escapeHtml(r.board) + "</code></td>" +
         "<td><code>" + escapeHtml(r.version) + "</code></td>" +
         "<td>" + escapeHtml(r.tag) + "</td>" +
         "<td>" + Math.round(r.size_bytes / 1024) + " KB</td>" +
@@ -691,7 +700,7 @@ function renderFirmwareReleasesTable(releases: any[]) {
         "<td>" + new Date(r.created_at * 1000).toLocaleString() + "</td>" +
         "</tr>"
       ).join("")
-    : '<tr><td colspan="5" class="hint">No releases synced yet.</td></tr>';
+    : '<tr><td colspan="6" class="hint">No releases synced yet.</td></tr>';
 }
 
 function renderFirmwareTargetsTable(targets: any[]) {
@@ -700,22 +709,19 @@ function renderFirmwareTargetsTable(targets: any[]) {
     ? targets.map((t) =>
         "<tr>" +
         "<td><code>" + escapeHtml(t.target) + "</code></td>" +
-        "<td><code>" + escapeHtml(t.version) + "</code></td>" +
+        "<td><code>" + escapeHtml(t.channel) + "</code></td>" +
         "<td>" + new Date(t.updated_at * 1000).toLocaleString() + "</td>" +
         '<td><button class="ghost" onclick="clearFirmwareTarget(\'' + escapeHtml(t.target) + '\')">Clear</button></td>' +
         "</tr>"
       ).join("")
-    : '<tr><td colspan="4" class="hint">No targets set — no device will OTA.</td></tr>';
+    : '<tr><td colspan="4" class="hint">No channels set — no device will OTA.</td></tr>';
 }
 
-function renderFirmwareTargetForm(targetOptions: any[], releases: any[]) {
+function renderFirmwareTargetForm(devices: any[]) {
   const targetSelect = el<HTMLSelectElement>("firmware-target-select");
-  targetSelect.innerHTML = targetOptions.map((o) => '<option value="' + o.key + '">' + escapeHtml(o.label) + "</option>").join("");
-
-  const versionSelect = el<HTMLSelectElement>("firmware-version-select");
-  versionSelect.innerHTML = releases.length
-    ? releases.map((r) => '<option value="' + r.version + '">' + r.version + "</option>").join("")
-    : '<option value="">(sync a release first)</option>';
+  targetSelect.innerHTML = devices
+    .map((d) => '<option value="' + escapeHtml(d.mac) + '">' + escapeHtml((d.label || d.mac) + " (" + d.mac + ")") + "</option>")
+    .join("");
 }
 
 function renderCrashReportsTable(reports: any[]) {
@@ -829,8 +835,7 @@ async function renderApp() {
   ]);
   renderFirmwareReleasesTable(releasesResult.releases);
   renderFirmwareTargetsTable(targetsResult.targets);
-  const targetOptions = devices.map((d: any) => ({ key: d.mac, label: (d.label || d.mac) + " (" + d.mac + ")" }));
-  renderFirmwareTargetForm(targetOptions, releasesResult.releases);
+  renderFirmwareTargetForm(devices);
   renderCrashReportsTable(crashReportsResult.reports);
 }
 

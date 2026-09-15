@@ -124,7 +124,7 @@ export function renderAdminPage(): string {
     <h2>Devices</h2>
     <p class="hint">"Last image sent" is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
     <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
       <tbody id="devices-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -176,9 +176,9 @@ export function renderAdminPage(): string {
 
   <div class="card">
     <h2>Firmware (OTA)</h2>
-    <p class="hint">Devices only ever update their firmware when a target version is set below — syncing a release from GitHub just makes it available to target.</p>
+    <p class="hint">Devices on the "stable" channel always run whichever release below was synced most recently for their own board &mdash; there's no picking a specific version. "beta" doesn't do anything yet (no beta channel exists).</p>
     <table>
-      <thead><tr><th>Version</th><th>Tag</th><th>Size</th><th>SHA-256</th><th>Synced</th></tr></thead>
+      <thead><tr><th>Board</th><th>Version</th><th>Tag</th><th>Size</th><th>SHA-256</th><th>Synced</th></tr></thead>
       <tbody id="firmware-releases-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -186,10 +186,10 @@ export function renderAdminPage(): string {
       <span class="hint">Also runs automatically every 6 hours.</span>
     </div>
 
-    <h3 style="margin-top:22px;">Targets</h3>
-    <p class="hint">Each device only ever runs a version an admin has explicitly targeted for its own MAC &mdash; there's no shared fallback. Clearing a target leaves that device on whatever it's already running.</p>
+    <h3 style="margin-top:22px;">Channels</h3>
+    <p class="hint">Each device only ever updates when a channel is set for its own MAC &mdash; there's no shared fallback. Clearing a device's channel leaves it on whatever it's already running.</p>
     <table>
-      <thead><tr><th>Target</th><th>Version</th><th>Updated</th><th></th></tr></thead>
+      <thead><tr><th>Target</th><th>Channel</th><th>Updated</th><th></th></tr></thead>
       <tbody id="firmware-targets-table"></tbody>
     </table>
     <div class="inline-form" style="margin-top:14px;">
@@ -198,10 +198,13 @@ export function renderAdminPage(): string {
         <select id="firmware-target-select"></select>
       </div>
       <div class="row">
-        <label>Version</label>
-        <select id="firmware-version-select"></select>
+        <label>Channel</label>
+        <select id="firmware-channel-select">
+          <option value="stable">stable</option>
+          <option value="beta">beta (no-op for now)</option>
+        </select>
       </div>
-      <button id="firmware-target-save-btn">Set Target</button>
+      <button id="firmware-target-save-btn">Set Channel</button>
     </div>
 
     <h3 style="margin-top:22px;">Crash &amp; Rollback Reports</h3>

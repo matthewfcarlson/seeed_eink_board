@@ -73,7 +73,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.get("/admin/devices", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at, running_firmware_version FROM devices WHERE user_id = ?"
+      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at, running_firmware_version, board FROM devices WHERE user_id = ?"
     )
       .bind(c.var.user.id)
       .all<Record<string, unknown> & { mac: string }>();

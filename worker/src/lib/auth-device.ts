@@ -46,21 +46,25 @@ export async function recordDeviceSeen(
   mac: string,
   ip: string | null,
   batteryVoltage: number | null,
-  firmwareVersion: string | null
+  firmwareVersion: string | null,
+  board: string | null
 ): Promise<void> {
   if (mac === DEFAULT_DEVICE_KEY) return; // matches Python: record_device_request no-ops for 'default'
   const now = Math.floor(Date.now() / 1000);
   // COALESCE keeps the previous value when this particular request didn't carry
-  // one (older firmware without X-Firmware-Version, or a failed battery read).
+  // one (older firmware without X-Firmware-Version/X-Device-Board, or a failed
+  // battery read). `board` never changes for a real device once set, but stays
+  // self-reported (not admin-set) for consistency with the other fields here.
   await env.DB.prepare(
     `UPDATE devices SET
        last_seen_at = ?,
        last_seen_ip = ?,
        last_battery_voltage = COALESCE(?, last_battery_voltage),
        last_battery_at = COALESCE(?, last_battery_at),
-       running_firmware_version = COALESCE(?, running_firmware_version)
+       running_firmware_version = COALESCE(?, running_firmware_version),
+       board = COALESCE(?, board)
      WHERE mac = ?`
   )
-    .bind(now, ip, batteryVoltage, batteryVoltage !== null ? now : null, firmwareVersion, mac)
+    .bind(now, ip, batteryVoltage, batteryVoltage !== null ? now : null, firmwareVersion, board, mac)
     .run();
 }

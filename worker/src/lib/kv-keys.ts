@@ -14,5 +14,9 @@ export const kvKeys = {
   // single browser round trip.
   passkeyAttempt: (attemptId: string) => `passkey_attempt:${attemptId}`,
   firmwareTarget: (target: string) => `firmware_target:${target}`,
-  firmwareBin: (version: string) => `firmware:bin:${version}`,
+  // Board-scoped: firmware_releases' key is (board, version), and a release
+  // deliberately reuses the same version tag across boards (one shared
+  // FIRMWARE_VERSION — see firmware/lib/common/version.h), so keying on
+  // version alone would let one board's sync overwrite another's binary.
+  firmwareBin: (board: string, version: string) => `firmware:bin:${board}:${version}`,
 };

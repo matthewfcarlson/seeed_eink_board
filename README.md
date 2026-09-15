@@ -104,7 +104,7 @@ Open your deployed Worker's URL in a browser, click **Open Admin Dashboard**, th
 
 ```bash
 cd firmware
-pio run
+pio run -e ee02-13in3
 ```
 
 The first build takes several minutes as it downloads the ESP32 compiler and libraries. Subsequent builds are much faster. Nothing needs editing before this build — WiFi and server settings are provisioned at runtime, not compiled in.
@@ -118,7 +118,7 @@ The first build takes several minutes as it downloads the ESP32 compiler and lib
 3. You may need to press the reset button on the board to get it into a state PlatformIO can flash.
 4. Flash:
    ```bash
-   pio run -t upload --upload-port /dev/ttyACM0   # adjust the port
+   pio run -e ee02-13in3 -t upload --upload-port /dev/ttyACM0   # adjust the port
    ```
 
 ### Step 5: Provision WiFi and the Server Address (Bluetooth)
@@ -290,7 +290,7 @@ The device isn't detected. Try:
 ### WiFi won't connect
 
 - Make sure your network is **2.4GHz**.
-- Re-enter Bluetooth config mode (hold Button 1 during reset) and re-provision the SSID/password from `/provision` — WiFi credentials live in NVS, set over Bluetooth, not in `firmware/src/config.h`.
+- Re-enter Bluetooth config mode (hold Button 1 during reset) and re-provision the SSID/password from `/provision` — WiFi credentials live in NVS, set over Bluetooth, not in `firmware/src/ee02/config.h`.
 
 ### "HTTP GET failed" / device can't reach the server
 

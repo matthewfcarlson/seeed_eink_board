@@ -1,6 +1,12 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// Identifies this firmware build to the Worker (X-Device-Board header, see
+// lib/common/device_app.h's addCommonHeaders()) and must exactly match the
+// PlatformIO environment name and the GitHub release asset suffix
+// (firmware-ee02-13in3.bin) — one board-id vocabulary used everywhere.
+#define BOARD_ID "ee02-13in3"
+
 // WiFi credentials are NOT compiled in here — they live in NVS, set via Bluetooth
 // provisioning (see ble_provisioning.h/.cpp and ConfigManager::setWifiCredentials()).
 // This keeps them out of the firmware binary entirely, so an OTA update (which
