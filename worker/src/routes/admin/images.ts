@@ -1,23 +1,16 @@
 import type { Hono } from "hono";
-import { DITHER_ALGORITHMS, PACKED_BYTES, type DitherAlgorithm, type Env } from "../../types";
+import { DITHER_ALGORITHMS, type DitherAlgorithm, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketAccess } from "../../lib/bucket-access";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
-import { decodeToLandscapeBuffer, isHeic, isSupportedImageType, sniffImageContentType } from "../../lib/decode";
-import { computeHash16, ditherImage, enhance, packToNibbles } from "../../lib/dither";
 import {
   deleteImageBlobs,
   getRawImage,
-  getThumbnailDataUrl,
+  getThumbnailCiphertextB64,
   putPackedImage,
   putRawImage,
   putThumbnail,
 } from "../../lib/image-store";
-import { makeThumbnailJpeg } from "../../lib/thumbnail";
-
-const DEFAULT_BRIGHTNESS = 1.0;
-const DEFAULT_CONTRAST = 1.2;
-const DEFAULT_SATURATION = 1.2;
 
 function isValidDitherAlgorithm(value: string): value is DitherAlgorithm {
   return (DITHER_ALGORITHMS as string[]).includes(value);
@@ -32,62 +25,54 @@ async function findImageDeviceKey(env: Env, id: string): Promise<string | null> 
 }
 
 /**
- * Ingestion runs entirely in the Worker (decode -> EXIF-correct -> resize/crop ->
- * rotate -> enhance -> dither -> pack -> hash -> store), per the user's explicit
- * requirement that this not be a local CLI. HEIC/HEIF is intentionally rejected —
- * no reliable JS/WASM decoder exists for it and it's just an intermediate format.
+ * Ingestion (decode -> EXIF-correct -> resize/crop -> rotate -> enhance ->
+ * dither -> pack -> hash -> encrypt) runs entirely client-side now — see root
+ * CLAUDE.md's encrypted-buckets plan. This route never sees plaintext: it
+ * receives three already-encrypted blobs (raw original, packed 4bpp, thumbnail)
+ * plus a client-computed content hash, and its only job is validate-and-store,
+ * gated by the same assertBucketAccess check as before. `dither_algorithm` and
+ * `packed_hash` are trusted client-reported metadata (display/change-detection
+ * only) — the Worker has no way to verify them without the bucket key, same
+ * trust boundary it always implicitly had for upload *content*, now extended
+ * to these two fields as well.
  */
 export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/images/upload", requireAdmin, async (c) => {
     const deviceKey = c.req.query("device_key");
     const filename = c.req.query("filename");
-    const ditherParam = c.req.query("dither") ?? "floyd_steinberg";
 
     if (!deviceKey || !filename) {
       return c.json({ error: "device_key and filename query params are required" }, 400);
-    }
-    if (!isValidDitherAlgorithm(ditherParam)) {
-      return c.json({ error: `dither must be one of: ${DITHER_ALGORITHMS.join(", ")}` }, 400);
     }
     if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
-    const contentType = c.req.header("Content-Type");
-    if (isHeic(contentType ?? null, filename)) {
-      return c.json(
-        { error: "HEIC/HEIF is not supported — convert to JPEG first (e.g. iOS share sheet 'Most Compatible', or `sips -s format jpeg`)." },
-        415
-      );
-    }
-    if (!isSupportedImageType(contentType ?? null)) {
-      return c.json({ error: "Unsupported Content-Type. Use image/jpeg, image/png, image/webp, image/gif, or image/bmp." }, 415);
-    }
+    const body = await c.req.parseBody();
+    const ditherParam = typeof body.dither_algorithm === "string" ? body.dither_algorithm : "floyd_steinberg";
+    const packedHash = body.packed_hash;
+    const raw = body.raw;
+    const packed = body.packed;
+    const thumb = body.thumb;
 
-    const rawBytes = new Uint8Array(await c.req.arrayBuffer());
-    if (rawBytes.byteLength === 0) return c.json({ error: "Empty request body" }, 400);
-
-    let landscape;
-    try {
-      landscape = await decodeToLandscapeBuffer(rawBytes);
-    } catch (err) {
-      return c.json({ error: `Failed to decode image: ${(err as Error).message}` }, 422);
+    if (!isValidDitherAlgorithm(ditherParam)) {
+      return c.json({ error: `dither_algorithm must be one of: ${DITHER_ALGORITHMS.join(", ")}` }, 400);
+    }
+    if (typeof packedHash !== "string" || packedHash.length !== 16) {
+      return c.json({ error: "packed_hash (16-char hex string) is required" }, 400);
+    }
+    if (!(raw instanceof File) || !(packed instanceof File) || !(thumb instanceof File)) {
+      return c.json({ error: "raw, packed, and thumb ciphertext files are required" }, 400);
     }
 
-    // Generated from the pre-enhance, pre-dither portrait crop so the dashboard
-    // preview shows true color and the exact framing the firmware will display —
-    // this is also the easiest way to see how a non-native aspect ratio got cropped.
-    const thumbnail = makeThumbnailJpeg(landscape.portrait.rgba, landscape.portrait.width, landscape.portrait.height);
-
-    enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-    const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherParam);
-    const packed = packToNibbles(indices);
-
-    if (packed.byteLength !== PACKED_BYTES) {
-      return c.json({ error: `Internal error: packed output was ${packed.byteLength} bytes, expected ${PACKED_BYTES}` }, 500);
+    const [rawBytes, packedBytes, thumbBytes] = await Promise.all([
+      raw.arrayBuffer().then((b) => new Uint8Array(b)),
+      packed.arrayBuffer().then((b) => new Uint8Array(b)),
+      thumb.arrayBuffer().then((b) => new Uint8Array(b)),
+    ]);
+    if (rawBytes.byteLength === 0 || packedBytes.byteLength === 0 || thumbBytes.byteLength === 0) {
+      return c.json({ error: "Empty ciphertext body" }, 400);
     }
-
-    const packedHash = await computeHash16(packed);
 
     // Reuse the existing row's id (if any) so KV blob keys stay stable on re-upload —
     // otherwise ON CONFLICT would silently leave the old id's blobs orphaned in KV.
@@ -97,9 +82,9 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     const id = existing?.id ?? crypto.randomUUID();
 
     await Promise.all([
-      putPackedImage(c.env, deviceKey, id, packed),
+      putPackedImage(c.env, deviceKey, id, packedBytes),
       putRawImage(c.env, deviceKey, id, rawBytes),
-      putThumbnail(c.env, deviceKey, id, thumbnail),
+      putThumbnail(c.env, deviceKey, id, thumbBytes),
     ]);
 
     const now = Math.floor(Date.now() / 1000);
@@ -113,14 +98,14 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
          raw_bytes = excluded.raw_bytes,
          created_at = excluded.created_at`
     )
-      .bind(id, deviceKey, filename, ditherParam, packedHash, packed.byteLength, rawBytes.byteLength, now)
+      .bind(id, deviceKey, filename, ditherParam, packedHash, packedBytes.byteLength, rawBytes.byteLength, now)
       .run();
 
     await invalidateRotationCache(c.env, deviceKey);
     await invalidateRotationCacheForBucketConsumers(c.env, deviceKey);
 
     return c.json(
-      { id, device_key: deviceKey, filename, dither_algorithm: ditherParam, packed_hash: packedHash, packed_bytes: packed.byteLength },
+      { id, device_key: deviceKey, filename, dither_algorithm: ditherParam, packed_hash: packedHash, packed_bytes: packedBytes.byteLength },
       201
     );
   });
@@ -138,10 +123,12 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       .bind(deviceKey)
       .all<{ id: string; filename: string; dither_algorithm: string; packed_hash: string; packed_bytes: number; raw_bytes: number; created_at: number }>();
 
+    // Ciphertext, base64-encoded — the dashboard decrypts and builds its own
+    // data URL client-side with the bucket key it already holds.
     const images = await Promise.all(
       rows.results.map(async (row) => ({
         ...row,
-        thumbnail_data_url: await getThumbnailDataUrl(c.env, deviceKey, row.id),
+        thumbnail_ciphertext_b64: await getThumbnailCiphertextB64(c.env, deviceKey, row.id),
       }))
     );
     return c.json({ images });
@@ -165,9 +152,10 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ deleted: id });
   });
 
-  // Serves the original as-uploaded bytes for the dashboard's hover-to-enlarge
-  // preview. Not cacheable by device_key/filename like the catalog list — callers
-  // only know the image id — so ownership is re-checked per request same as delete.
+  // Serves the original as-uploaded ciphertext for the dashboard's
+  // hover-to-enlarge preview — the browser decrypts it, not the Worker. Not
+  // cacheable by device_key/filename like the catalog list — callers only
+  // know the image id — so ownership is re-checked per request same as delete.
   app.get("/admin/images/:id/raw", requireAdmin, async (c) => {
     const id = c.req.param("id");
     if (!id) return c.json({ error: "id is required" }, 400);
@@ -183,10 +171,9 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
 
     // Not long-cacheable: re-uploading the same filename reuses this id (see the
     // upload handler above), so the bytes at this URL can change over time.
-    const bytes = new Uint8Array(raw);
-    return new Response(bytes, {
+    return new Response(new Uint8Array(raw), {
       headers: {
-        "Content-Type": sniffImageContentType(bytes),
+        "Content-Type": "application/octet-stream",
         "Cache-Control": "private, no-cache",
       },
     });

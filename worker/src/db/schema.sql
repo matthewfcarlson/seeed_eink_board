@@ -3,8 +3,9 @@
 -- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
 -- 0007_buckets.sql, 0008_user_display_name.sql, 0009_bucket_ownership.sql,
 -- 0010_remove_shared_targets.sql, 0011_crash_reports.sql, 0012_device_board.sql,
--- 0013_firmware_releases_board.sql, and 0014_firmware_channel.sql (wrangler d1
--- migrations tracks applied state per-database).
+-- 0013_firmware_releases_board.sql, 0014_firmware_channel.sql, and
+-- 0015_bucket_encryption.sql (wrangler d1 migrations tracks applied state
+-- per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -14,7 +15,11 @@ CREATE TABLE users (
   created_at    INTEGER NOT NULL,
   -- Human-settable name shown instead of "Account <id prefix>" (see migrations/0008) —
   -- also how a user identifies themselves in a shared bucket's collaborator list.
-  display_name  TEXT
+  display_name  TEXT,
+  -- P-256 public key, generated client-side at first passkey registration (see
+  -- migrations/0015). The matching private key is never stored in the clear —
+  -- see credentials.wrapped_sharing_key below.
+  sharing_public_key TEXT
 );
 
 CREATE TABLE devices (
@@ -39,7 +44,11 @@ CREATE TABLE devices (
   -- Which board this device is (e.g. 'ee02-13in3', 'ee04-7in3'), self-reported
   -- via X-Device-Board the same way — see migrations/0012. NULL until a
   -- device's first successful request.
-  board                       TEXT
+  board                       TEXT,
+  -- P-256 public key, generated on-device at first boot and handed to the
+  -- Worker at provisioning/claim time — see migrations/0015. Independent of
+  -- `board`; the matching private key never leaves the device's NVS.
+  sharing_public_key          TEXT
 );
 
 -- Image buckets: independently-owned, shareable entities a device subscribes to
@@ -78,6 +87,24 @@ CREATE TABLE bucket_invites (
   bucket_id  TEXT PRIMARY KEY REFERENCES buckets(id),
   token      TEXT NOT NULL UNIQUE,
   created_at INTEGER NOT NULL
+);
+
+-- Pure key distribution (see migrations/0015) — deliberately separate from
+-- bucket_shares/device_buckets above, which stay pure authorization tables.
+-- One row per (bucket, principal) holding that principal's ECIES-wrapped copy
+-- of the bucket's AES-256-GCM content-encryption key. ephemeral_pub/nonce/
+-- ciphertext are base64. Looked up by principal to answer "does this
+-- user/device already have a usable key for this bucket" — see
+-- lib/bucket-keys.ts.
+CREATE TABLE bucket_keys (
+  bucket_id      TEXT NOT NULL REFERENCES buckets(id),
+  principal_type TEXT NOT NULL CHECK (principal_type IN ('user', 'device')),
+  principal_id   TEXT NOT NULL, -- users.id or devices.mac, depending on principal_type
+  ephemeral_pub  TEXT NOT NULL,
+  nonce          TEXT NOT NULL,
+  ciphertext     TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  PRIMARY KEY (bucket_id, principal_type, principal_id)
 );
 
 -- Durable mirror of the live rotation cursor. KV is the hot path; this table is
@@ -128,7 +155,15 @@ CREATE TABLE credentials (
   public_key  TEXT NOT NULL,    -- base64url-encoded COSE public key
   counter     INTEGER NOT NULL DEFAULT 0,
   transports  TEXT,             -- JSON array of AuthenticatorTransportFuture, or null
-  created_at  INTEGER NOT NULL
+  created_at  INTEGER NOT NULL,
+  -- users.sharing_public_key's matching private key, AES-256-GCM-wrapped under a
+  -- key derived from *this credential's* WebAuthn PRF output (see migrations/0015).
+  -- Per-credential, not per-user: PRF output is scoped to the credential, so a
+  -- user with multiple registered passkeys needs one wrapping per passkey. NULL
+  -- when this credential's authenticator didn't return a PRF result at
+  -- registration time (see lib/webauthn.ts's documented fallback).
+  wrapped_sharing_key TEXT,
+  wrap_nonce          TEXT
 );
 CREATE INDEX idx_credentials_user_id ON credentials(user_id);
 

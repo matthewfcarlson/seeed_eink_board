@@ -3,9 +3,10 @@ import type { Env } from "../../types";
 import { normalizeMac } from "../../lib/mac";
 import { invalidateDeviceCache } from "../../lib/auth-device";
 import { getRotationSnapshot, invalidateRotationCache } from "../../lib/rotation";
-import { getThumbnailDataUrl } from "../../lib/image-store";
+import { getThumbnailCiphertextB64 } from "../../lib/image-store";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketAccess } from "../../lib/bucket-access";
+import { deleteBucketKey, parseWrappedBucketKey, upsertBucketKey } from "../../lib/bucket-keys";
 
 // The device's self-generated HMAC key (hex), scanned off its own display via the
 // registration QR — see lib/device-signature.ts. Loose length bound since the
@@ -24,17 +25,19 @@ async function buildCurrentImage(env: Env, deviceKey: string) {
   const snapshot = await getRotationSnapshot(env, deviceKey);
   if (!snapshot.lastReturned) return null;
   const image = snapshot.images.find((img) => img.id === snapshot.lastReturned);
-  if (!image) return { id: null, filename: snapshot.lastReturned, thumbnail_data_url: null };
+  if (!image) return { id: null, filename: snapshot.lastReturned, thumbnail_ciphertext_b64: null };
   return {
     id: image.id,
     filename: image.filename,
-    thumbnail_data_url: await getThumbnailDataUrl(env, image.sourceDeviceKey, image.id),
+    thumbnail_ciphertext_b64: await getThumbnailCiphertextB64(env, image.sourceDeviceKey, image.id),
   };
 }
 
 export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/devices", requireAdmin, async (c) => {
-    const body = await c.req.json<{ mac?: string; label?: string; secret?: string }>().catch(() => ({}) as never);
+    const body = await c.req
+      .json<{ mac?: string; label?: string; secret?: string; sharing_public_key?: string }>()
+      .catch(() => ({}) as never);
     if (!body.mac) return c.json({ error: "mac is required" }, 400);
     if (body.secret !== undefined && !SECRET_PATTERN.test(body.secret)) {
       return c.json({ error: "secret must be a hex string" }, 400);
@@ -57,14 +60,21 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     // the device's NVS was wiped (see ConfigManager::ensureDeviceSecret()), so its
     // nonce counter restarted at 0 too — carrying over the old high-water mark here
     // would reject every request from the "new" device as a replay forever.
+    // sharing_public_key: the device's own P-256 public key, generated on first
+    // boot and surfaced during provisioning/claim (see root CLAUDE.md's
+    // encrypted-buckets plan) — same out-of-band delivery pattern as `secret`.
+    // COALESCE'd the same way: never overwritten once set by a stray claim
+    // retry that omits it.
     await c.env.DB.prepare(
-      `INSERT INTO devices (mac, user_id, label, secret, last_nonce, created_at) VALUES (?, ?, ?, ?, 0, ?)
+      `INSERT INTO devices (mac, user_id, label, secret, last_nonce, created_at, sharing_public_key)
+       VALUES (?, ?, ?, ?, 0, ?, ?)
        ON CONFLICT(mac) DO UPDATE SET
          label = excluded.label,
          secret = COALESCE(excluded.secret, devices.secret),
-         last_nonce = CASE WHEN excluded.secret IS NOT NULL THEN 0 ELSE devices.last_nonce END`
+         last_nonce = CASE WHEN excluded.secret IS NOT NULL THEN 0 ELSE devices.last_nonce END,
+         sharing_public_key = COALESCE(devices.sharing_public_key, excluded.sharing_public_key)`
     )
-      .bind(mac, user.id, body.label ?? null, body.secret ?? null, now)
+      .bind(mac, user.id, body.label ?? null, body.secret ?? null, now, body.sharing_public_key ?? null)
       .run();
 
     await invalidateDeviceCache(c.env, mac);
@@ -73,7 +83,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.get("/admin/devices", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at, running_firmware_version, board FROM devices WHERE user_id = ?"
+      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at, running_firmware_version, board, sharing_public_key FROM devices WHERE user_id = ?"
     )
       .bind(c.var.user.id)
       .all<Record<string, unknown> & { mac: string }>();
@@ -125,11 +135,20 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
   // Replaces this device's full bucket subscription set. Every id must be
   // accessible to the caller (owned or shared) — see lib/bucket-access.ts.
+  // `keys`: the caller's own wrap of each bucket's raw key for this device's
+  // sharing_public_key (see client/crypto.ts's wrapKeyFor) — the Worker never
+  // computes these itself, it only stores what the browser (which already
+  // holds the raw key for every bucket_id it's allowed to assign) hands it.
+  // Required for every bucket_id in the new set; buckets dropped from the set
+  // have their now-stale device key cleaned up (cosmetic, not a real
+  // revocation — see root CLAUDE.md's Non-goals).
   app.patch("/admin/devices/:mac/buckets", requireAdmin, async (c) => {
     const macParam = c.req.param("mac");
     if (!macParam) return c.json({ error: "mac is required" }, 400);
     const mac = normalizeMac(macParam);
-    const body = await c.req.json<{ bucket_ids?: string[] }>().catch(() => ({}) as never);
+    const body = await c.req
+      .json<{ bucket_ids?: string[]; keys?: Record<string, unknown> }>()
+      .catch(() => ({}) as never);
     if (!Array.isArray(body.bucket_ids)) return c.json({ error: "bucket_ids must be an array" }, 400);
 
     const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
@@ -139,11 +158,19 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     if (row.user_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
 
     const bucketIds = [...new Set(body.bucket_ids)];
+    const wrappedKeys = new Map<string, ReturnType<typeof parseWrappedBucketKey>>();
     for (const bucketId of bucketIds) {
       if (!(await assertBucketAccess(c.env, bucketId, c.var.user.id))) {
         return c.json({ error: `Forbidden: no access to bucket ${bucketId}` }, 403);
       }
+      const key = parseWrappedBucketKey(body.keys?.[bucketId]);
+      if (!key) return c.json({ error: `keys.${bucketId} (wrapped bucket key for this device) is required` }, 400);
+      wrappedKeys.set(bucketId, key);
     }
+
+    const previousBucketIds = await c.env.DB.prepare("SELECT bucket_id FROM device_buckets WHERE device_mac = ?")
+      .bind(mac)
+      .all<{ bucket_id: string }>();
 
     await c.env.DB.batch([
       c.env.DB.prepare("DELETE FROM device_buckets WHERE device_mac = ?").bind(mac),
@@ -151,6 +178,9 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
         c.env.DB.prepare("INSERT INTO device_buckets (device_mac, bucket_id) VALUES (?, ?)").bind(mac, bucketId)
       ),
     ]);
+    await Promise.all(bucketIds.map((bucketId) => upsertBucketKey(c.env, bucketId, "device", mac, wrappedKeys.get(bucketId)!)));
+    const droppedBucketIds = previousBucketIds.results.map((r) => r.bucket_id).filter((id) => !bucketIds.includes(id));
+    await Promise.all(droppedBucketIds.map((bucketId) => deleteBucketKey(c.env, bucketId, "device", mac)));
 
     await invalidateRotationCache(c.env, mac);
     return c.json({ mac, bucket_ids: bucketIds });
@@ -169,6 +199,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
     await c.env.DB.batch([
       c.env.DB.prepare("DELETE FROM device_buckets WHERE device_mac = ?").bind(mac),
+      c.env.DB.prepare("DELETE FROM bucket_keys WHERE principal_type = 'device' AND principal_id = ?").bind(mac),
       c.env.DB.prepare("DELETE FROM devices WHERE mac = ?").bind(mac),
     ]);
     await invalidateDeviceCache(c.env, mac);

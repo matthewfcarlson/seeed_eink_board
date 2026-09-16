@@ -49,14 +49,9 @@ export interface FirmwareRelease {
 }
 
 export const DEFAULT_DEVICE_KEY = "default";
-export const PACKED_BYTES = 960000;
 
-// Buffer is 1600x1200 landscape to match firmware; source images are fit to
-// 1200x1600 portrait first, then rotated 270° — see image_server.py's process_image_to_packed.
-export const BUFFER_WIDTH = 1600;
-export const BUFFER_HEIGHT = 1200;
-export const PORTRAIT_WIDTH = 1200;
-export const PORTRAIT_HEIGHT = 1600;
-
-export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";
-export const DITHER_ALGORITHMS: DitherAlgorithm[] = ["floyd_steinberg", "atkinson", "ordered"];
+// Geometry/dither-algorithm constants live in lib/media-constants.ts (so
+// client/ code can import them without pulling in the Env interface above,
+// which references ambient Workers-only types) — re-exported here since
+// every existing Worker-side import expects them from "../types".
+export * from "./lib/media-constants";

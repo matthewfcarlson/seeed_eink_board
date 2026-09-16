@@ -3,9 +3,17 @@ import type { Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { deleteImageBlobs } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
+import { deleteBucketKey, deleteBucketKeysForBucket, getBucketKey, parseWrappedBucketKey, upsertBucketKey } from "../../lib/bucket-keys";
 
-/** Builds the admin join-bucket URL using the incoming request's own origin —
- *  mirrors lib/registration-url.ts's approach for device claim links. */
+/**
+ * Builds the admin join-bucket URL using the incoming request's own origin —
+ * mirrors lib/registration-url.ts's approach for device claim links. Only the
+ * `token` query param, used for the ordinary authorization check below —
+ * deliberately NOT the raw bucket key. The client (admin.ts) appends that
+ * itself as a `#key=` URL fragment before showing/copying the link, since a
+ * fragment is never sent to the server (not in this request, not in Referer
+ * headers, not in server logs) — see root CLAUDE.md's encrypted-buckets plan.
+ */
 function bucketJoinUrl(requestUrl: string, token: string): string {
   const origin = new URL(requestUrl).origin;
   const url = new URL(`${origin}/admin`);
@@ -18,16 +26,24 @@ function generateInviteToken(): string {
 }
 
 export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
+  // The bucket's AES-256-GCM content key is generated client-side and never
+  // uploaded raw — the caller must already have wrapped it for their own
+  // sharing_public_key (see client/crypto.ts's wrapKeyFor and root CLAUDE.md's
+  // encrypted-buckets plan) before calling this, same as any other owner
+  // access to their own bucket's key.
   app.post("/admin/buckets", requireAdmin, async (c) => {
-    const body = await c.req.json<{ label?: string }>().catch(() => ({}) as never);
+    const body = await c.req.json<{ label?: string; key?: unknown }>().catch(() => ({}) as never);
     const label = body.label?.trim();
     if (!label) return c.json({ error: "label is required" }, 400);
+    const key = parseWrappedBucketKey(body.key);
+    if (!key) return c.json({ error: "key (wrapped bucket key for the caller) is required" }, 400);
 
     const id = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);
     await c.env.DB.prepare("INSERT INTO buckets (id, owner_id, label, created_at) VALUES (?, ?, ?, ?)")
       .bind(id, c.var.user.id, label, now)
       .run();
+    await upsertBucketKey(c.env, id, "user", c.var.user.id, key);
 
     return c.json({ id, label, owner_id: c.var.user.id, is_owner: true }, 201);
   });
@@ -41,7 +57,18 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
       .bind(c.var.user.id)
       .all<{ id: string; owner_id: string | null; label: string; created_at: number }>();
 
-    const buckets = rows.results.map((row) => ({ ...row, is_owner: row.owner_id === c.var.user.id }));
+    // Each bucket's caller-specific wrapped key, so the dashboard can unwrap
+    // every bucket it has access to right after loading this list — null only
+    // for a bucket whose invite hasn't been fully accepted yet (see /join
+    // below), which shouldn't normally happen since join() writes both in the
+    // same request.
+    const buckets = await Promise.all(
+      rows.results.map(async (row) => ({
+        ...row,
+        is_owner: row.owner_id === c.var.user.id,
+        key: await getBucketKey(c.env, row.id, "user", c.var.user.id),
+      }))
+    );
     return c.json({ buckets });
   });
 
@@ -87,6 +114,7 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
       c.env.DB.prepare("DELETE FROM bucket_invites WHERE bucket_id = ?").bind(id),
       c.env.DB.prepare("DELETE FROM buckets WHERE id = ?").bind(id),
     ]);
+    await deleteBucketKeysForBucket(c.env, id);
 
     return c.json({ deleted: id });
   });
@@ -127,8 +155,13 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ revoked: id });
   });
 
+  // `key`: the joining client's own wrap of the raw bucket key it just read
+  // from the invite link's `#key=` fragment (never sent here — this body only
+  // carries the re-wrapped, durable copy). Not required when the caller turns
+  // out to already be the owner (below) — they already have their own key
+  // from bucket creation.
   app.post("/admin/buckets/join", requireAdmin, async (c) => {
-    const body = await c.req.json<{ token?: string }>().catch(() => ({}) as never);
+    const body = await c.req.json<{ token?: string; key?: unknown }>().catch(() => ({}) as never);
     if (!body.token) return c.json({ error: "token is required" }, 400);
 
     const invite = await c.env.DB.prepare(
@@ -141,7 +174,11 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     if (!invite) return c.json({ error: "Invalid or revoked invite link" }, 404);
     if (invite.owner_id === c.var.user.id) return c.json({ id: invite.bucket_id, label: invite.label });
 
+    const key = parseWrappedBucketKey(body.key);
+    if (!key) return c.json({ error: "key (wrapped bucket key for the caller) is required" }, 400);
+
     const now = Math.floor(Date.now() / 1000);
+    await upsertBucketKey(c.env, invite.bucket_id, "user", c.var.user.id, key);
     await c.env.DB.prepare(
       "INSERT INTO bucket_shares (bucket_id, user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(bucket_id, user_id) DO NOTHING"
     )
@@ -183,6 +220,11 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     if (bucket.owner_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
 
     await c.env.DB.prepare("DELETE FROM bucket_shares WHERE bucket_id = ? AND user_id = ?").bind(id, userId).run();
+    // Cosmetic, not a real revocation (see root CLAUDE.md's Non-goals: the
+    // removed user already unwrapped and could have cached the raw key) —
+    // still worth deleting so a re-invited user gets a clean re-wrap instead
+    // of a stale row.
+    await deleteBucketKey(c.env, id, "user", userId);
     return c.json({ removed: userId });
   });
 }

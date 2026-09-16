@@ -44,6 +44,19 @@ components:
         error:
           type: string
       required: [error]
+    WrappedKey:
+      type: object
+      description: >-
+        An ECIES-wrapped copy of a bucket's AES-256-GCM key for one principal
+        (a user or device) — see root CLAUDE.md's encrypted-buckets plan. The
+        Worker only ever stores and returns this ciphertext; it cannot unwrap
+        it (that needs the recipient's private key, which never leaves their
+        browser or device).
+      properties:
+        ephemeral_pub: { type: string, description: base64, raw uncompressed P-256 point }
+        nonce: { type: string, description: base64, 12 bytes }
+        ciphertext: { type: string, description: base64 }
+      required: [ephemeral_pub, nonce, ciphertext]
     Bucket:
       type: object
       properties:
@@ -58,6 +71,10 @@ components:
           type: integer
         is_owner:
           type: boolean
+        key:
+          allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
+          nullable: true
+          description: The caller's own wrapped copy of this bucket's key.
     Image:
       type: object
       properties:
@@ -76,9 +93,13 @@ components:
           type: integer
         created_at:
           type: integer
-        thumbnail_data_url:
+        thumbnail_ciphertext_b64:
           type: string
           nullable: true
+          description: >-
+            Base64 of the AES-256-GCM-encrypted thumbnail (12-byte nonce
+            prepended). The dashboard decrypts this client-side with the
+            bucket key — it is not a renderable data URL on its own.
     Device:
       type: object
       properties:
@@ -123,7 +144,7 @@ components:
               nullable: true
             filename:
               type: string
-            thumbnail_data_url:
+            thumbnail_ciphertext_b64:
               type: string
               nullable: true
     ScheduleConfig:
@@ -373,9 +394,17 @@ paths:
                 bucket_ids:
                   type: array
                   items: { type: string }
-              required: [bucket_ids]
+                keys:
+                  type: object
+                  description: >-
+                    Map of bucket_id -> WrappedKey, the caller's own wrap of
+                    each bucket's key for this device's public key. Required
+                    for every id in bucket_ids.
+                  additionalProperties: { $ref: '#/components/schemas/WrappedKey' }
+              required: [bucket_ids, keys]
       responses:
         '200': { description: OK }
+        '400': { description: Missing a required wrapped key for one of the bucket ids }
         '403': { description: Forbidden (device not yours, or no access to one of the bucket ids) }
         '404': { description: Device not found }
 
@@ -403,7 +432,10 @@ paths:
               type: object
               properties:
                 label: { type: string }
-              required: [label]
+                key:
+                  allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
+                  description: The caller's wrap of the newly-generated bucket key for their own sharing_public_key.
+              required: [label, key]
       responses:
         '201': { description: Created }
 
@@ -467,9 +499,17 @@ paths:
               type: object
               properties:
                 token: { type: string }
+                key:
+                  allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
+                  description: >-
+                    The joining client's own wrap of the raw bucket key it read
+                    from the invite link's `#key=` URL fragment (never sent to
+                    the server). Not required if the caller turns out to
+                    already be the bucket's owner.
               required: [token]
       responses:
         '200': { description: OK }
+        '400': { description: Missing key (required unless the caller is already the owner) }
         '404': { description: Invalid or revoked invite link }
 
   /admin/buckets/{id}/collaborators:
@@ -529,10 +569,15 @@ paths:
 
   /admin/images/upload:
     post:
-      summary: Upload an image into a bucket
+      summary: Upload an already-encrypted image into a bucket
       description: >-
-        Decodes, EXIF-corrects, crops, enhances, dithers, and packs the image
-        entirely server-side. HEIC/HEIF is rejected — convert to JPEG first.
+        Decode, EXIF-correct, crop, enhance, dither, pack, and AES-256-GCM-encrypt
+        all run client-side now — see root CLAUDE.md's encrypted-buckets plan. This
+        endpoint never sees plaintext: it stores three opaque ciphertext blobs
+        (raw original, packed 4bpp, thumbnail) plus a client-computed content hash,
+        gated by the same bucket-access check as before. `dither_algorithm` and
+        `packed_hash` are trusted client-reported metadata — the Worker has no way
+        to verify them without the bucket key.
       parameters:
         - name: device_key
           in: query
@@ -543,25 +588,28 @@ paths:
           in: query
           required: true
           schema: { type: string }
-        - name: dither
-          in: query
-          schema:
-            type: string
-            enum: [floyd_steinberg, atkinson, ordered, none]
-            default: floyd_steinberg
       requestBody:
         required: true
         content:
-          image/jpeg: { schema: { type: string, format: binary } }
-          image/png: { schema: { type: string, format: binary } }
-          image/webp: { schema: { type: string, format: binary } }
-          image/gif: { schema: { type: string, format: binary } }
-          image/bmp: { schema: { type: string, format: binary } }
+          multipart/form-data:
+            schema:
+              type: object
+              required: [raw, packed, thumb, packed_hash]
+              properties:
+                raw: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the original as-uploaded bytes }
+                packed: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the packed 4bpp buffer }
+                thumb: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the dashboard preview JPEG }
+                dither_algorithm:
+                  type: string
+                  enum: [floyd_steinberg, atkinson, ordered]
+                  default: floyd_steinberg
+                packed_hash:
+                  type: string
+                  description: 16-char hex content hash, computed client-side over the packed ciphertext.
       responses:
         '201': { description: Uploaded }
+        '400': { description: Missing or malformed field }
         '403': { description: No access to this bucket }
-        '415': { description: Unsupported or HEIC content type }
-        '422': { description: Failed to decode image }
 
   /admin/images/{id}:
     delete:
@@ -691,6 +739,13 @@ paths:
   /auth/register/verify:
     post:
       summary: Complete passkey registration
+      description: >-
+        The three sharing-key fields are optional and present as a set — only
+        when this ceremony's authenticator returned a WebAuthn PRF result (see
+        root CLAUDE.md's encrypted-buckets plan). `wrapped_sharing_key` is the
+        client's P-256 sharing private key, AES-256-GCM-encrypted under a key
+        derived from that PRF output — the Worker never sees the PRF output or
+        the raw private key, only this ciphertext.
       security: []
       requestBody:
         required: true
@@ -701,6 +756,9 @@ paths:
               properties:
                 attemptId: { type: string }
                 response: { type: object }
+                sharing_public_key: { type: string, description: base64, raw P-256 public key }
+                wrapped_sharing_key: { type: string, description: base64 }
+                wrap_nonce: { type: string, description: base64, 12 bytes }
               required: [attemptId, response]
       responses:
         '201':
@@ -722,7 +780,16 @@ paths:
   /auth/login/verify:
     post:
       summary: Complete passkey login
-      description: Mints a fresh API key on every successful login.
+      description: >-
+        Mints a fresh API key on every successful login. The request's three
+        sharing-key fields (see /auth/register/verify) are optional and only
+        sent to backfill this credential's wrapped sharing key the first time
+        its authenticator produces a usable PRF result (create()-time PRF
+        wasn't available, or this is this credential's very first login) — a
+        no-op if the credential already has one on file. The response always
+        echoes back whatever's now on file (freshly backfilled or pre-existing,
+        possibly still null) so the client can unwrap using this exact
+        ceremony's PRF output.
       security: []
       requestBody:
         required: true
@@ -733,6 +800,9 @@ paths:
               properties:
                 attemptId: { type: string }
                 response: { type: object }
+                sharing_public_key: { type: string }
+                wrapped_sharing_key: { type: string }
+                wrap_nonce: { type: string }
               required: [attemptId, response]
       responses:
         '200':
@@ -743,6 +813,9 @@ paths:
                 type: object
                 properties:
                   api_key: { type: string }
+                  sharing_public_key: { type: string, nullable: true }
+                  wrapped_sharing_key: { type: string, nullable: true }
+                  wrap_nonce: { type: string, nullable: true }
 
   /device_config:
     get:

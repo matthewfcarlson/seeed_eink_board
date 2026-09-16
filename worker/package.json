@@ -14,7 +14,6 @@
     "db:migrate:remote": "wrangler d1 migrations apply eink --remote"
   },
   "dependencies": {
-    "@cf-wasm/photon": "^0.3.6",
     "@simplewebauthn/server": "^13.3.2",
     "hono": "^4.6.0",
     "qrcode-generator": "^2.0.4"

@@ -7,6 +7,45 @@ export const imageStoreKeys = {
   thumb: (deviceKey: string, imageId: string) => `img:thumb:${deviceKey}:${imageId}`,
 };
 
+/**
+ * Every blob stored here is opaque AES-256-GCM ciphertext (nonce prepended),
+ * encrypted client-side under a bucket key the Worker never holds — see root
+ * CLAUDE.md's encrypted-buckets plan. The Worker's job is purely storage: no
+ * decode, no dither, no compression, and (unlike the pre-encryption version of
+ * this file) no gzip either — ciphertext is high-entropy by design, so
+ * compressing it here would buy nothing. If a blob is ever compressed, that
+ * happens client-side, before encryption, entirely outside this file's view.
+ */
+export async function putPackedImage(env: Env, deviceKey: string, imageId: string, ciphertext: Uint8Array): Promise<void> {
+  await env.KV.put(imageStoreKeys.packed(deviceKey, imageId), ciphertext);
+}
+
+export async function getPackedImage(env: Env, deviceKey: string, imageId: string): Promise<ArrayBuffer | null> {
+  return env.KV.get(imageStoreKeys.packed(deviceKey, imageId), "arrayBuffer");
+}
+
+export async function putRawImage(env: Env, deviceKey: string, imageId: string, ciphertext: Uint8Array): Promise<void> {
+  await env.KV.put(imageStoreKeys.raw(deviceKey, imageId), ciphertext);
+}
+
+/** Ciphertext of the original as-uploaded bytes, served back for the
+ *  dashboard's hover-to-enlarge preview — the browser decrypts it, the Worker
+ *  never does. */
+export async function getRawImage(env: Env, deviceKey: string, imageId: string): Promise<ArrayBuffer | null> {
+  return env.KV.get(imageStoreKeys.raw(deviceKey, imageId), "arrayBuffer");
+}
+
+export async function putThumbnail(env: Env, deviceKey: string, imageId: string, ciphertext: Uint8Array): Promise<void> {
+  await env.KV.put(imageStoreKeys.thumb(deviceKey, imageId), ciphertext);
+}
+
+/** Ciphertext of the thumbnail, for the dashboard gallery to decrypt and
+ *  render client-side. Returns null if no thumbnail was ever stored for this
+ *  image (e.g. it predates this feature). */
+export async function getThumbnail(env: Env, deviceKey: string, imageId: string): Promise<ArrayBuffer | null> {
+  return env.KV.get(imageStoreKeys.thumb(deviceKey, imageId), "arrayBuffer");
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunkSize = 0x8000;
@@ -16,89 +55,13 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-async function gzip(bytes: Uint8Array): Promise<ArrayBuffer> {
-  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
-  return new Response(stream).arrayBuffer();
-}
-
-async function gunzip(bytes: ArrayBuffer): Promise<ArrayBuffer> {
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-  return new Response(stream).arrayBuffer();
-}
-
-/**
- * The packed 4bpp binary is low-entropy (only 6 distinct nibble values) and
- * compresses very well, so it's always gzipped in KV and decompressed on the hot
- * path. Raw originals are typically already-compressed formats (JPEG/PNG/WebP),
- * so they're stored as-is — gzipping them again buys almost nothing.
- */
-export async function putPackedImage(
-  env: Env,
-  deviceKey: string,
-  imageId: string,
-  packedBytes: Uint8Array
-): Promise<void> {
-  const compressed = await gzip(packedBytes);
-  await env.KV.put(imageStoreKeys.packed(deviceKey, imageId), compressed);
-}
-
-export async function getPackedImage(
-  env: Env,
-  deviceKey: string,
-  imageId: string
-): Promise<ArrayBuffer | null> {
-  const stored = await env.KV.get(imageStoreKeys.packed(deviceKey, imageId), "arrayBuffer");
-  if (!stored) return null;
-
-  // Images uploaded before gzip compression was added here are still plain
-  // bytes in KV — gunzip-ing them unconditionally throws (DecompressionStream
-  // rejects non-gzip input), which surfaces as a bare 500 on /image_packed.
-  // Detect via the gzip magic number instead of assuming every stored blob is
-  // compressed, so pre-existing rotations don't break.
-  const bytes = new Uint8Array(stored);
-  const isGzipped = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-  return isGzipped ? gunzip(stored) : stored;
-}
-
-export async function putRawImage(
-  env: Env,
-  deviceKey: string,
-  imageId: string,
-  rawBytes: Uint8Array
-): Promise<void> {
-  await env.KV.put(imageStoreKeys.raw(deviceKey, imageId), rawBytes);
-}
-
-/** Original as-uploaded bytes, served back for the dashboard's hover-to-enlarge preview. */
-export async function getRawImage(
-  env: Env,
-  deviceKey: string,
-  imageId: string
-): Promise<ArrayBuffer | null> {
-  return env.KV.get(imageStoreKeys.raw(deviceKey, imageId), "arrayBuffer");
-}
-
-/** Thumbnails are tiny JPEGs (a few KB) so, unlike raw/packed, they're stored
- *  uncompressed — gzip wouldn't meaningfully shrink already-compressed JPEG bytes. */
-export async function putThumbnail(
-  env: Env,
-  deviceKey: string,
-  imageId: string,
-  thumbBytes: Uint8Array
-): Promise<void> {
-  await env.KV.put(imageStoreKeys.thumb(deviceKey, imageId), thumbBytes);
-}
-
-/** Returns a ready-to-embed `data:image/jpeg;base64,...` URL, or null if no
- *  thumbnail was ever stored for this image (e.g. it predates this feature). */
-export async function getThumbnailDataUrl(
-  env: Env,
-  deviceKey: string,
-  imageId: string
-): Promise<string | null> {
-  const bytes = await env.KV.get(imageStoreKeys.thumb(deviceKey, imageId), "arrayBuffer");
-  if (!bytes) return null;
-  return `data:image/jpeg;base64,${bytesToBase64(new Uint8Array(bytes))}`;
+/** Base64 of getThumbnail's ciphertext — the shape every admin route actually
+ *  wants to embed in a JSON response. Named `..._ciphertext_b64`, not
+ *  `..._data_url` (its pre-encryption name), so every call site is honest
+ *  that this isn't directly renderable without a client-side decrypt first. */
+export async function getThumbnailCiphertextB64(env: Env, deviceKey: string, imageId: string): Promise<string | null> {
+  const bytes = await getThumbnail(env, deviceKey, imageId);
+  return bytes ? bytesToBase64(new Uint8Array(bytes)) : null;
 }
 
 export async function deleteImageBlobs(env: Env, deviceKey: string, imageId: string): Promise<void> {

@@ -5,6 +5,7 @@ import { recordDeviceSeen, resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
 import { resolveScheduleConfig } from "../lib/schedule";
 import { resolveFirmwareTarget } from "../lib/firmware-target";
+import { getBucketKeysForDevice } from "../lib/bucket-keys";
 
 /**
  * GET /device_config — contract-critical (firmware/lib/common/device_app.h's
@@ -69,12 +70,29 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
       ? { firmware_version: resolvedFirmware.version, firmware_sha256: resolvedFirmware.sha256 }
       : {};
 
+    // Wrapped bucket keys this device already has an assignment for — see
+    // device_app.h's fetchAndDisplayImage(), which unwraps each via its own
+    // on-device P-256 private key (ECDH + HKDF + AES-GCM) before it can
+    // decrypt anything from /image_packed. Omitted (not an empty array) for
+    // an unregistered device, same "omit rather than send a meaningless
+    // value" convention as the schedule/firmware fields above.
+    const bucketKeys =
+      deviceKey !== DEFAULT_DEVICE_KEY
+        ? (await getBucketKeysForDevice(c.env, deviceKey)).map((k) => ({
+            bucket_id: k.bucketId,
+            ephemeral_pub: k.ephemeralPub,
+            nonce: k.nonce,
+            ciphertext: k.ciphertext,
+          }))
+        : undefined;
+
     return c.json({
       device_id: deviceKey,
       server_time_epoch: Math.floor(Date.now() / 1000),
       config_source: source,
       ...config,
       ...firmware,
+      ...(bucketKeys ? { bucket_keys: bucketKeys } : {}),
     });
   });
 }
