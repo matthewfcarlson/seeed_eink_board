@@ -1,0 +1,12 @@
+{
+  "name": "eink-simulator",
+  "private": true,
+  "description": "npm-script wrappers around the Makefile - see README.md for the full launch flow (a local `wrangler dev` in one terminal, one of these in another).",
+  "scripts": {
+    "build:ee02": "make BOARD=ee02",
+    "build:ee04": "make BOARD=ee04",
+    "start:ee02": "make BOARD=ee02 run",
+    "start:ee04": "make BOARD=ee04 run",
+    "clean": "make clean"
+  }
+}

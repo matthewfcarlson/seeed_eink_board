@@ -338,12 +338,30 @@ call into `DeviceApp::runNormalMode()`.
 quote-include from `lib/common/` wouldn't reliably resolve to a specific
 board's `src/<board>/config.h`.
 
+## Device Simulator
+
+`firmware/simulator/` (`make BOARD=ee02|ee04`) is a native Mac build of this
+*same* codebase — `lib/common/*.cpp` and the chosen board's `display.cpp`/
+`main.cpp` compiled directly, unmodified, against Arduino/ESP32/NimBLE stub
+headers, SDL2-windowed. It's a real way to exercise provisioning (via the
+real `/provision` page, bridged over HTTP instead of Web Bluetooth), the
+image-fetch/dithering flow, and the EE04 image-geometry gap below, against a
+**local** `wrangler dev` — see `firmware/simulator/README.md` for setup,
+flags, and how the BLE bridge works.
+
 ## File Structure
 
 ```
 firmware/
 ├── platformio.ini          # Three environments: ee02-13in3, ee04-7in3, ee04-7in3-bringup
 ├── README.md                # This file
+├── simulator/                # Native SDL2 build of this same codebase - see its own README.md
+│   ├── Makefile
+│   ├── main_native.cpp
+│   ├── gatt_bridge.h/.cpp    # BLE-over-HTTP bridge for ble_provisioning.cpp
+│   ├── display_render.h/.cpp # packed-buffer -> SDL window
+│   ├── stubs/                 # Arduino/ESP32/NimBLE API stand-ins
+│   └── vendor/ArduinoJson/    # vendored, unmodified
 ├── lib/
 │   └── common/               # Shared across every board — see "Shared Firmware Core" above
 │       ├── config_manager.h/.cpp

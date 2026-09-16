@@ -2,10 +2,17 @@
  * Client-side script for the BLE device-setup page (see ../provision-ui.ts).
  * Bundled by scripts/build-client.mjs into public/static/provision.js. Pairs
  * directly with the board's GATT service over Web Bluetooth — see
- * firmware/src/ble_provisioning.h for the characteristic schema. Web Bluetooth
- * isn't in TypeScript's bundled DOM lib, so navigator.bluetooth and the GATT
- * objects it returns are treated as `any` here rather than hand-rolling types
- * for an experimental API.
+ * firmware/lib/common/ble_provisioning.h for the characteristic schema. Web
+ * Bluetooth isn't in TypeScript's bundled DOM lib, so navigator.bluetooth and
+ * the GATT objects it returns are treated as `any` here rather than
+ * hand-rolling types for an experimental API.
+ *
+ * A `?sim=<origin>` query param switches the transport to the device
+ * simulator's fake GATT-over-HTTP+SSE server (simulator/src/server.ts)
+ * instead of real Web Bluetooth — see simulator/README.md. Same
+ * INFO/CONFIG_WRITE/COMMAND/SCAN_RESULTS JSON contract either way; only
+ * connect/disconnect/write plumbing branches on `simOrigin` below. No
+ * behavior change to the real BLE path when the param is absent.
  */
 export {};
 
@@ -15,11 +22,14 @@ const CHAR_CONFIG_UUID = "514a006a-319b-4e01-ba80-aa38bf8e5b1f";
 const CHAR_COMMAND_UUID = "1bc65320-3316-4de8-8a2c-89c89fa792ff";
 const CHAR_SCAN_RESULTS_UUID = "97c497fa-7e94-4fe6-bad2-68ffd9d34d5e";
 
+const simOrigin = new URLSearchParams(window.location.search).get("sim");
+
 let gattServer: any = null;
 let infoChar: any = null;
 let configWriteChar: any = null;
 let commandChar: any = null;
 let scanResultsChar: any = null;
+let simEvents: EventSource | null = null;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -73,7 +83,7 @@ el<HTMLSelectElement>("wifi-ssid-select").addEventListener("change", (e) => {
   if (value) el<HTMLInputElement>("wifi-ssid").value = value;
 });
 
-async function connect() {
+async function connectBle() {
   try {
     const device = await (navigator as any).bluetooth.requestDevice({
       filters: [{ services: [SERVICE_UUID] }],
@@ -120,6 +130,34 @@ async function connect() {
   }
 }
 
+/** Simulator transport: same INFO/SCAN_RESULTS payloads, delivered over a
+ *  plain fetch() + Server-Sent Events instead of Web Bluetooth GATT — see
+ *  simulator/src/server.ts's /gatt/* routes. */
+async function connectSim() {
+  try {
+    showMessage("Connecting to simulator...", "info");
+    const res = await fetch(`${simOrigin}/gatt/info`);
+    if (!res.ok) throw new Error(`simulator returned HTTP ${res.status}`);
+    applyInfo(await res.json());
+
+    simEvents?.close();
+    simEvents = new EventSource(`${simOrigin}/gatt/events`);
+    simEvents.addEventListener("info", (e: any) => applyInfo(JSON.parse(e.data)));
+    simEvents.addEventListener("scan_results", (e: any) => applyScanResults(JSON.parse(e.data)));
+    simEvents.onerror = () => showMessage("Lost connection to the simulator.", "error");
+
+    el("connect-card").style.display = "none";
+    el("form").style.display = "block";
+    showMessage("Connected to simulator.", "success");
+  } catch (err: any) {
+    showMessage("Failed to connect to simulator: " + err.message, "error");
+  }
+}
+
+function connect() {
+  return simOrigin ? connectSim() : connectBle();
+}
+
 function onDisconnected() {
   showMessage("Disconnected. If you just saved, the device is rebooting and connecting to your WiFi.", "info");
   el("connect-card").style.display = "block";
@@ -130,12 +168,22 @@ function onDisconnected() {
 el("connect-btn").addEventListener("click", connect);
 
 el("disconnect-btn").addEventListener("click", () => {
+  if (simOrigin) {
+    simEvents?.close();
+    simEvents = null;
+    onDisconnected();
+    return;
+  }
   if (gattServer && gattServer.connected) gattServer.disconnect();
 });
 
 el("scan-btn").addEventListener("click", async () => {
   try {
-    await commandChar.writeValueWithResponse(new TextEncoder().encode("scan"));
+    if (simOrigin) {
+      await fetch(`${simOrigin}/gatt/command`, { method: "POST", body: "scan" });
+    } else {
+      await commandChar.writeValueWithResponse(new TextEncoder().encode("scan"));
+    }
     showMessage("Scanning for networks...", "info");
   } catch (err: any) {
     showMessage("Failed to start scan: " + err.message, "error");
@@ -163,15 +211,23 @@ el("save-btn").addEventListener("click", async () => {
   }
 
   try {
-    await configWriteChar.writeValueWithResponse(new TextEncoder().encode(JSON.stringify(config)));
-    await commandChar.writeValueWithResponse(new TextEncoder().encode("save"));
+    if (simOrigin) {
+      await fetch(`${simOrigin}/gatt/config`, { method: "POST", body: JSON.stringify(config) });
+      await fetch(`${simOrigin}/gatt/command`, { method: "POST", body: "save" });
+    } else {
+      await configWriteChar.writeValueWithResponse(new TextEncoder().encode(JSON.stringify(config)));
+      await commandChar.writeValueWithResponse(new TextEncoder().encode("save"));
+    }
     showMessage("Saving and rebooting the device...", "info");
   } catch (err: any) {
     showMessage("Failed to save: " + err.message, "error");
   }
 });
 
-if (!(navigator as any).bluetooth) {
+if (simOrigin) {
+  // No device picker for a fake HTTP transport - just connect immediately.
+  void connectSim();
+} else if (!(navigator as any).bluetooth) {
   el("unsupported").style.display = "block";
   el<HTMLButtonElement>("connect-btn").disabled = true;
 }

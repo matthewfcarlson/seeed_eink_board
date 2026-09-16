@@ -160,6 +160,24 @@ image variants) is still a separate, not-yet-started effort — what's
 described here and in "OTA Firmware Updates" below is only about firmware
 delivery, not image content.
 
+### Device Simulator
+
+`firmware/simulator/` (`make BOARD=ee02|ee04`, run from that directory) is a
+native Mac build of the real firmware — `firmware/lib/common/*.cpp` and the
+chosen board's `display.cpp`/`main.cpp` compiled directly and unmodified
+against Arduino/ESP32/NimBLE stub headers, rendered to an SDL2 window. It
+targets a **local** `wrangler dev` by default (`--server` to point elsewhere;
+never point it at production). Real BLE provisioning
+(`ble_provisioning.cpp`) is exercised through the actual `/provision` page —
+its `?sim=<origin>` query param switches that page's transport from Web
+Bluetooth to a small HTTP+SSE bridge the simulator runs
+(`firmware/simulator/gatt_bridge.cpp`), since there's no way to run a real
+BLE peripheral from a Mac process. See `firmware/simulator/README.md` for
+setup and known limitations — notably, simulating `ee04-7in3` surfaces the
+same image-geometry gap described above (an oversized buffer rejected by the
+firmware's own size check) through the real firmware code, not a simulated
+approximation of it.
+
 ### Running the Worker Backend
 
 1. `cd worker && npm install`
