@@ -25,10 +25,13 @@ async function buildCurrentImage(env: Env, deviceKey: string) {
   const snapshot = await getRotationSnapshot(env, deviceKey);
   if (!snapshot.lastReturned) return null;
   const image = snapshot.images.find((img) => img.id === snapshot.lastReturned);
-  if (!image) return { id: null, filename: snapshot.lastReturned, thumbnail_ciphertext_b64: null };
+  if (!image) return { id: null, filename: snapshot.lastReturned, source_bucket_id: null, thumbnail_ciphertext_b64: null };
   return {
     id: image.id,
     filename: image.filename,
+    // Which bucket's key decrypts this thumbnail — a device can subscribe to
+    // several, so its current image isn't necessarily from its own bucket id.
+    source_bucket_id: image.sourceDeviceKey,
     thumbnail_ciphertext_b64: await getThumbnailCiphertextB64(env, image.sourceDeviceKey, image.id),
   };
 }

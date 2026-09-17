@@ -35,6 +35,10 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
     const battery = batteryHeader ? Number.parseFloat(batteryHeader) : NaN;
     const reportedFirmwareVersion = c.req.header("X-Firmware-Version") ?? null;
     const reportedBoard = c.req.header("X-Device-Board") ?? null;
+    // Base64, raw uncompressed P-256 point — generated on-device on first boot
+    // (see device_app.h's ensureSharingKeyPair()) and self-reported the same
+    // way as X-Device-Board, not pushed through a separate provisioning flow.
+    const reportedSharingPublicKey = c.req.header("X-Device-Sharing-Public-Key") ?? null;
     const ip = c.req.header("CF-Connecting-IP") ?? null;
 
     let deviceKey: string = DEFAULT_DEVICE_KEY;
@@ -59,7 +63,15 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
       // No-ops for unregistered MACs (no devices row to update) — matches Python's
       // in-memory tracking being effectively per-known-device only in practice.
       c.executionCtx.waitUntil(
-        recordDeviceSeen(c.env, mac, ip, Number.isNaN(battery) ? null : battery, reportedFirmwareVersion, reportedBoard)
+        recordDeviceSeen(
+          c.env,
+          mac,
+          ip,
+          Number.isNaN(battery) ? null : battery,
+          reportedFirmwareVersion,
+          reportedBoard,
+          reportedSharingPublicKey
+        )
       );
     }
 

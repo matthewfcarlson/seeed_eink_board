@@ -131,6 +131,14 @@ components:
           description: >-
             Self-reported via X-Device-Board (e.g. `ee02-13in3`, `ee04-7in3`).
             Null until the device's first successful request.
+        sharing_public_key:
+          type: string
+          nullable: true
+          description: >-
+            Base64, this device's raw P-256 public key — self-reported via
+            X-Device-Sharing-Public-Key the same way as board. Required before
+            a bucket can be assigned to this device (see
+            PATCH /admin/devices/{mac}/buckets).
         bucket_ids:
           type: array
           items:
@@ -144,6 +152,10 @@ components:
               nullable: true
             filename:
               type: string
+            source_bucket_id:
+              type: string
+              nullable: true
+              description: Which bucket's key decrypts thumbnail_ciphertext_b64 — a device can subscribe to several.
             thumbnail_ciphertext_b64:
               type: string
               nullable: true
@@ -212,6 +224,19 @@ components:
         Only absent for firmware older than this header's introduction; when
         absent, /device_config omits firmware_version/firmware_sha256 rather
         than guessing which board's release to resolve.
+    XDeviceSharingPublicKey:
+      name: X-Device-Sharing-Public-Key
+      in: header
+      required: false
+      schema:
+        type: string
+      description: >-
+        Base64 of this device's raw uncompressed P-256 public key, generated
+        on-device on first boot (see device_app.h's ensureSharingKeyPair()) and
+        self-reported the same way as X-Device-Board — never pushed through a
+        separate provisioning flow. Recorded onto devices.sharing_public_key so
+        an owner's browser can wrap a bucket key for this device (see root
+        CLAUDE.md's encrypted-buckets plan).
     MacPath:
       name: mac
       in: path
@@ -781,15 +806,16 @@ paths:
     post:
       summary: Complete passkey login
       description: >-
-        Mints a fresh API key on every successful login. The request's three
-        sharing-key fields (see /auth/register/verify) are optional and only
-        sent to backfill this credential's wrapped sharing key the first time
-        its authenticator produces a usable PRF result (create()-time PRF
-        wasn't available, or this is this credential's very first login) — a
-        no-op if the credential already has one on file. The response always
-        echoes back whatever's now on file (freshly backfilled or pre-existing,
-        possibly still null) so the client can unwrap using this exact
-        ceremony's PRF output.
+        Mints a fresh API key on every successful login. The response echoes
+        back whatever sharing-key wrap is currently on file for this
+        credential (possibly all null, if none has ever been established) so
+        the client can unwrap its sharing private key using this exact
+        ceremony's PRF output. If the client discovers it needs to backfill a
+        wrap (no PRF-wrapped key existed yet, but this ceremony returned PRF
+        output), it does so via a separate call to
+        PATCH /admin/me/sharing-key using the api_key from this response —
+        this ceremony's challenge is single-use and already consumed by the
+        time that decision can be made.
       security: []
       requestBody:
         required: true
@@ -800,9 +826,6 @@ paths:
               properties:
                 attemptId: { type: string }
                 response: { type: object }
-                sharing_public_key: { type: string }
-                wrapped_sharing_key: { type: string }
-                wrap_nonce: { type: string }
               required: [attemptId, response]
       responses:
         '200':
@@ -816,6 +839,31 @@ paths:
                   sharing_public_key: { type: string, nullable: true }
                   wrapped_sharing_key: { type: string, nullable: true }
                   wrap_nonce: { type: string, nullable: true }
+
+  /admin/me/sharing-key:
+    patch:
+      summary: Backfill this credential's PRF-wrapped sharing key
+      description: >-
+        See /auth/login/verify's description for why this is a separate,
+        normally-authenticated endpoint rather than a field on that ceremony.
+        A no-op (still 200) if this credential already has a wrap on file —
+        guarded server-side, not by the client skipping the call.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                credential_id: { type: string, description: The WebAuthn credential this PRF output came from. }
+                sharing_public_key: { type: string }
+                wrapped_sharing_key: { type: string }
+                wrap_nonce: { type: string }
+              required: [credential_id, sharing_public_key, wrapped_sharing_key, wrap_nonce]
+      responses:
+        '200': { description: OK (written, or already had a wrap on file) }
+        '400': { description: Missing a required field }
+        '404': { description: Unknown credential, or not this account's }
 
   /device_config:
     get:
@@ -842,6 +890,7 @@ paths:
           in: header
           schema: { type: string }
         - $ref: '#/components/parameters/XDeviceBoard'
+        - $ref: '#/components/parameters/XDeviceSharingPublicKey'
       responses:
         '200': { description: OK }
         '401': { description: Invalid or missing device signature }
@@ -913,10 +962,13 @@ paths:
     get:
       summary: "[Device-facing] Fetch and advance to the next packed image"
       description: >-
-        Returns 960,000 bytes of packed 4bpp image data and advances the
-        rotation cursor. Requires X-Device-MAC — a request without it is
-        rejected outright rather than falling back to any bucket's content
-        (see migrations/0009_bucket_ownership.sql for why).
+        Returns the AES-256-GCM ciphertext (12-byte nonce prepended, 16-byte
+        tag appended — see root CLAUDE.md's encrypted-buckets plan) of the
+        packed 4bpp image data, and advances the rotation cursor. The
+        plaintext is exactly 960,000 bytes; Content-Length here is 28 bytes
+        larger. Requires X-Device-MAC — a request without it is rejected
+        outright rather than falling back to any bucket's content (see
+        migrations/0009_bucket_ownership.sql for why).
       security: []
       parameters:
         - $ref: '#/components/parameters/XDeviceMac'
@@ -935,6 +987,13 @@ paths:
           description: OK
           content:
             application/octet-stream: { schema: { type: string, format: binary } }
+          headers:
+            X-Bucket-Id:
+              schema: { type: string }
+              description: >-
+                Which of this device's subscribed buckets the ciphertext is
+                encrypted under — selects which of /device_config's
+                bucket_keys entries to unwrap and decrypt with.
         '400': { description: X-Device-MAC header required }
         '401': { description: Invalid or missing device signature }
         '404': { description: No images available }

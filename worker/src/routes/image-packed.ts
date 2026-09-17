@@ -92,6 +92,11 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
         "X-Image-Hash": pending.image.packedHash,
         "X-Image-Name": pending.image.filename,
         "X-Device-ID": deviceKey,
+        // Which of this device's (possibly several) subscribed buckets the
+        // ciphertext body is encrypted under — device_app.h looks this up in
+        // the bucket_keys it already unwrapped from /device_config to pick
+        // the right AES-256-GCM key before decrypting.
+        "X-Bucket-Id": pending.image.sourceDeviceKey,
       },
     });
   });

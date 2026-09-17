@@ -76,7 +76,11 @@ itself isn't overridable per-environment in PlatformIO); `lib/common/` (unlike
 - `firmware/lib/common/ota_health.h/.cpp` - bootloader-rollback + crash-report safety net (see "OTA Firmware Updates" below)
 - `firmware/lib/common/version.h` - one shared `FIRMWARE_VERSION` for every board
 - `firmware/lib/common/device_app.h` - the shared app logic (WiFi, HMAC signing, `/device_config` sync,
-  image fetch, OTA download/flash, schedule math, deep sleep), templated on each board's `Display` type
+  image fetch/decrypt, bucket-key unwrap, OTA download/flash, schedule math, deep sleep), templated on each board's `Display` type
+- `firmware/simulator/stubs/mbedtls/{ecp,ecdh,gcm}.h` - macOS stand-ins for the
+  P-256 ECDH (via Security.framework) and AES-GCM (hand-rolled — see
+  "Encrypted Image Buckets") mbedtls calls `device_app.h` needs, alongside the
+  existing `sha256.h`/`md.h` (CommonCrypto-backed)
 - `firmware/src/ee02/config.h` - Pin definitions, `BOARD_ID`, non-secret defaults (no WiFi credentials — see below)
 - `firmware/src/ee02/display.h/.cpp` - Spectra 6 display driver (ported from esphome-bigink)
 - `firmware/src/ee02/main.cpp` - Board-specific wiring (instantiate `Display`/`ConfigManager`/etc., config-mode screen) + `setup()`/`loop()`
@@ -196,10 +200,11 @@ approximation of it.
 All device-facing endpoints require an `X-Device-MAC` header plus an HMAC
 `X-Device-Nonce`/`X-Device-Signature` pair (see `worker/src/lib/device-signature.ts`) —
 not the admin Bearer API key. The firmware also sends `X-Battery-Voltage` (e.g.,
-"3.85") and `X-Device-Board` (e.g. "ee02-13in3") headers, self-reporting battery
-level and which board this is — the latter is how `/device_config` resolves the
-right per-board firmware release (see "OTA Firmware Updates"). Full schema:
-`worker/openapi.yaml`.
+"3.85"), `X-Device-Board` (e.g. "ee02-13in3"), and `X-Device-Sharing-Public-Key`
+(base64 P-256 public key, see "Encrypted Image Buckets") headers, self-reporting
+battery level, which board this is, and its encryption identity — the board is
+how `/device_config` resolves the right per-board firmware release (see "OTA
+Firmware Updates"). Full schema: `worker/openapi.yaml`.
 
 ### Multi-Device Support
 
@@ -222,13 +227,138 @@ device's images without transferring ownership.
 **Finding your device's MAC:** shown on the device's own display (as part of the
 registration QR screen) and in `/admin`'s device list once registered.
 
+### Encrypted Image Buckets
+
+Every image (raw original, packed 4bpp buffer, dashboard thumbnail) is
+AES-256-GCM encrypted client-side before it ever reaches the Worker — the
+Worker stores and serves ciphertext only and cannot decrypt it, even with
+full read access to its own D1/KV. This isn't just "encryption at rest": the
+whole ingest pipeline (decode → EXIF-correct → crop/resize → dither → pack →
+hash) moved from the Worker into the browser (`worker/src/client/decode.ts`,
+`thumbnail.ts`, reusing `worker/src/lib/dither.ts`/`palette.ts` as-is — those
+two stayed in `lib/` rather than moving wholesale because
+`lib/qr-registration.ts`'s synthetic "scan to register" screen still needs
+them server-side). `worker/src/lib/decode.ts` itself now holds only
+`rotate90CW`, for the same reason.
+
+**Threat model, stated precisely:** this defends against passive/
+infrastructure access — a KV/D1 dump, a backup leak, anyone with read access
+to the Worker's storage, including the operator. It does **not** defend
+against a malicious operator (or a compromised deploy pipeline) shipping
+modified client JS to a targeted victim's browser, since that JS is what
+does the actual encrypting/decrypting. No code-integrity mechanism (SRI,
+reproducible builds) exists to close that gap.
+
+**Crypto primitives** (`worker/src/client/crypto.ts`):
+- Each bucket has its own random AES-256-GCM content key, generated
+  client-side at bucket creation and never uploaded raw. Every stored blob
+  is `nonce(12) || ciphertext || tag(16)`.
+- Every principal — user or device — has a P-256 keypair. Wrapping a bucket
+  key for a principal is hand-rolled ECIES (WebCrypto/mbedtls have no
+  built-in "encrypt to a public key" call): ephemeral P-256 keypair → ECDH →
+  HKDF-SHA256 → AES-256-GCM. HKDF `info` strings are domain-separated
+  per purpose (`eink-bucket-wrap-v1` vs `eink-sharing-key-wrap-v1`) so the
+  same derived secret can never be reinterpreted for the other purpose.
+- `bucket_keys` (D1) holds one ECIES-wrapped copy of a bucket's key per
+  `(bucket_id, principal_type, principal_id)` — deliberately separate from
+  `bucket_shares`/`device_buckets`, which stay pure authorization tables.
+
+**A user's own sharing keypair** is protected by their passkey's WebAuthn PRF
+extension, not a separate password: `users.sharing_public_key` and
+`credentials.wrapped_sharing_key`/`wrap_nonce` (per-credential, since PRF
+output is scoped to the credential, not the account — see
+`worker/src/lib/webauthn.ts`'s `PRF_EXTENSION_INPUT`). If an authenticator
+never returns a usable PRF result, the client falls back to keeping the
+keypair in this one browser's IndexedDB only (`worker/src/client/keystore.ts`)
+— bucket access from that account then works only from that browser.
+Backfilling a wrap (first successful PRF result for a credential that didn't
+have one yet) goes through `PATCH /admin/me/sharing-key`, a *separate*,
+normally-authenticated call — not a field on `/auth/login/verify` itself,
+because that ceremony's challenge is single-use and already consumed by the
+time the client can decide a backfill is needed.
+
+**Sharing a bucket:** the invite link (`POST /admin/buckets/{id}/invite`,
+unchanged) gains a `#key=<base64url>` URL fragment carrying the raw bucket
+key, appended client-side — a fragment is never sent to the server in any
+request, Referer header, or server log. The invitee's browser reads it off
+`location.hash`, immediately re-wraps a durable copy for their own key via
+`POST /admin/buckets/join`, and drops the fragment from the URL. Assigning a
+bucket to a device needs no link: the owner's browser already holds the raw
+key and just wraps a copy for the device's `sharing_public_key`
+(`PATCH /admin/devices/{mac}/buckets`).
+
+**Firmware side** (`firmware/lib/common/device_app.h`): each device
+generates its own P-256 keypair on first boot
+(`ensureSharingKeyPair()`, persisted via `ConfigManager` — note the private
+key's stored byte length is *not* a fixed 32 bytes across build targets, see
+below) and self-reports the public half via
+`X-Device-Sharing-Public-Key` on every request, the same pattern
+`X-Device-Board` already used (`worker/src/lib/auth-device.ts`'s
+`recordDeviceSeen`). `GET /device_config` includes this device's wrapped
+bucket key(s) (`bucket_keys` in the response); `syncRemoteConfigAndTime()`
+unwraps each fresh every wake via ECDH + HKDF (`unwrapBucketKey()`) and
+caches them in `RunState` for that wake only. `/image_packed`'s response is
+AES-256-GCM ciphertext, selected by its `X-Bucket-Id` header against the
+device's unwrapped keys; `fetchAndDisplayImage()` still streams straight into
+the display's own buffer (no second allocation — `Content-Length` is now
+`display.getBufferSize() + 28`) and decrypts it in place, but never calls
+`display.refresh()` until `mbedtls_gcm_auth_decrypt()`'s tag check passes —
+a corrupt or tampered download is left undisplayed, same as an incomplete one.
+
+**Two real mbedtls surprises found only by actually building this**, not
+assumed from documentation:
+- The stock ESP32 Arduino core's mbedtls declares `mbedtls_hkdf()` in its
+  headers but doesn't link it (`undefined reference` at real `pio run` link
+  time) — `device_app.h`'s `hkdfSha256()` hand-rolls RFC 5869 from
+  `mbedtls_md`'s HMAC primitive instead (already linked in for
+  `computeDeviceSignature()`), which does work on both targets.
+- `firmware/simulator/`'s stubs for this (`stubs/mbedtls/ecp.h`, `ecdh.h`,
+  bridging P-256 ECDH through macOS Security.framework, since CommonCrypto
+  has no EC API) must be `#include`d *before* `<ArduinoJson.h>` in
+  `device_app.h` — Security.framework's `MacTypes.h` declares a global `Ptr`
+  typedef that becomes ambiguous against vendored ArduinoJson's own
+  `ArduinoJson::Ptr` once `ArduinoJson.h`'s trailing `using namespace
+  ArduinoJson;` is in effect. `stubs/mbedtls/gcm.h` hand-rolls AES-GCM
+  entirely (CommonCrypto has no public GCM API on this SDK either) —
+  verified byte-for-byte against real WebCrypto output before being
+  committed, since a self-consistent-but-wrong implementation would round-trip
+  fine locally while failing to interoperate with anything real.
+
+**Known gaps, not oversights:**
+- No crypto-level revocation. Deleting a `bucket_shares`/`device_buckets` row
+  only blocks *new* access — anyone who already unwrapped a bucket's key
+  keeps it. A "rotate this bucket's key" admin action (new key, re-encrypt
+  every blob, re-wrap for remaining principals) is the real fix and doesn't
+  exist yet.
+- No way to register a second passkey on an existing account. Losing your
+  one passkey now means permanently losing access to every bucket you own or
+  were shared — not just losing login, since the operator can't recover a
+  plaintext account for you anymore either.
+- No ESP32 flash encryption. A lost/stolen device's on-device private key
+  (and therefore every bucket key ever wrapped for it) isn't protected at
+  rest.
+- Packed blobs aren't compressed (encrypted ciphertext doesn't gzip
+  meaningfully, and compressing *before* encrypting would mean teaching the
+  firmware to inflate — a pure storage optimization, deliberately deferred,
+  decoupled from the encryption work itself).
+- No devices have shipped yet, so this landed as a breaking change with no
+  migration path for older plaintext-format images — re-upload is the only
+  option. If real devices exist by the time this changes again, firmware
+  must be OTA'd and confirmed running *before* the Worker side deploys, since
+  a bare Worker deploy would instantly break any device still on old
+  firmware.
+
 ### Image Rotation
 
-- **Accepted upload formats:** JPEG, PNG, WebP, GIF, BMP — HEIC/HEIF is rejected
-  by `/admin/images/upload` (convert to JPEG client-side first)
-- **Processing:** done once, server-side, at upload time — EXIF correction,
-  crop/resize, dithering (Floyd-Steinberg/Atkinson/ordered/none) to the 6-color
-  palette, and packing to 4bpp (`worker/src/lib/decode.ts`, `dither.ts`)
+- **Accepted upload formats:** JPEG, PNG, WebP, GIF, BMP — HEIC/HEIF support
+  depends on the browser's own `createImageBitmap` (Safari can decode it
+  natively; Chrome/Firefox generally can't — see `client/decode.ts`)
+- **Processing:** done once, client-side, at upload time — EXIF correction,
+  crop/resize, dithering (Floyd-Steinberg/Atkinson/ordered) to the 6-color
+  palette, packing to 4bpp, and AES-256-GCM encryption (see "Encrypted Image
+  Buckets" above; `worker/src/client/decode.ts`, `dither.ts`, `crypto.ts`) —
+  the Worker's `/admin/images/upload` just validates and stores the resulting
+  ciphertext blobs
 - **Rotation order:** upload order, tracked per-device in D1 (`worker/src/lib/rotation.ts`)
 - **Dynamic updates:** uploading/deleting an image in `/admin` takes effect on
   the device's next `/image_packed` request

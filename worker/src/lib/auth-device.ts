@@ -47,14 +47,17 @@ export async function recordDeviceSeen(
   ip: string | null,
   batteryVoltage: number | null,
   firmwareVersion: string | null,
-  board: string | null
+  board: string | null,
+  sharingPublicKey: string | null
 ): Promise<void> {
   if (mac === DEFAULT_DEVICE_KEY) return; // matches Python: record_device_request no-ops for 'default'
   const now = Math.floor(Date.now() / 1000);
   // COALESCE keeps the previous value when this particular request didn't carry
   // one (older firmware without X-Firmware-Version/X-Device-Board, or a failed
-  // battery read). `board` never changes for a real device once set, but stays
-  // self-reported (not admin-set) for consistency with the other fields here.
+  // battery read). `board`/`sharing_public_key` never change for a real device
+  // once compiled in / generated, but stay self-reported (not admin-set) for
+  // consistency with the other fields here — see migrations/0015's column doc
+  // and device_app.h's ensureSharingKeyPair().
   await env.DB.prepare(
     `UPDATE devices SET
        last_seen_at = ?,
@@ -62,9 +65,10 @@ export async function recordDeviceSeen(
        last_battery_voltage = COALESCE(?, last_battery_voltage),
        last_battery_at = COALESCE(?, last_battery_at),
        running_firmware_version = COALESCE(?, running_firmware_version),
-       board = COALESCE(?, board)
+       board = COALESCE(?, board),
+       sharing_public_key = COALESCE(?, sharing_public_key)
      WHERE mac = ?`
   )
-    .bind(now, ip, batteryVoltage, batteryVoltage !== null ? now : null, firmwareVersion, board, mac)
+    .bind(now, ip, batteryVoltage, batteryVoltage !== null ? now : null, firmwareVersion, board, sharingPublicKey, mac)
     .run();
 }

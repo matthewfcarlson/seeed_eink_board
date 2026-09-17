@@ -46,6 +46,19 @@ export function fromBase64(b64: string): Uint8Array {
   return bytes;
 }
 
+/** URL-safe, unpadded variant — used only for the invite link's `#key=`
+ *  fragment (admin.ts), where `+`/`/`/`=` would be an unnecessary copy-paste
+ *  footgun even though they're technically legal in a URL fragment. */
+export function toBase64Url(bytes: Uint8Array): string {
+  return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function fromBase64Url(b64url: string): Uint8Array {
+  const padded = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const withPadding = padded + "=".repeat((4 - (padded.length % 4)) % 4);
+  return fromBase64(withPadding);
+}
+
 /** One P-256 keypair for a principal (user or device). Both halves are
  *  extractable — the private key must be exportable so it can be wrapped
  *  (AES-GCM-encrypted) for storage, since WebCrypto has no "encrypt this key
@@ -151,6 +164,27 @@ export async function unwrapKeyWith(recipientPrivateKey: CryptoKey, wrapped: Wra
     { name: "AES-GCM", iv: new Uint8Array(nonce) },
     kek,
     new Uint8Array(ciphertext)
+  );
+  return new Uint8Array(plaintext);
+}
+
+/** Plain AES-GCM encrypt/decrypt with nonce and ciphertext returned/taken as
+ *  separate base64 strings, for the two D1 columns that store them separately
+ *  (credentials.wrapped_sharing_key/wrap_nonce) — unlike aesGcmEncryptBlob's
+ *  combined-blob format used for KV image storage. */
+export async function aesGcmEncryptToStrings(key: CryptoKey, plaintext: Uint8Array): Promise<{ nonce: string; ciphertext: string }> {
+  const nonce = crypto.getRandomValues(new Uint8Array(GCM_NONCE_BYTES));
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, new Uint8Array(plaintext))
+  );
+  return { nonce: toBase64(nonce), ciphertext: toBase64(ciphertext) };
+}
+
+export async function aesGcmDecryptFromStrings(key: CryptoKey, nonce: string, ciphertext: string): Promise<Uint8Array> {
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: new Uint8Array(fromBase64(nonce)) },
+    key,
+    new Uint8Array(fromBase64(ciphertext))
   );
   return new Uint8Array(plaintext);
 }

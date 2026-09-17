@@ -26,15 +26,38 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <ArduinoJson.h>
 #include <Update.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/md.h>
+// Before <ArduinoJson.h> deliberately: on the macOS simulator, this
+// transitively pulls in Security.framework (see
+// firmware/simulator/stubs/mbedtls/ecp.h), whose MacTypes.h declares a
+// global `Ptr` typedef. ArduinoJson.h ends with `using namespace
+// ArduinoJson;`, which injects vendor/ArduinoJson's own `ArduinoJson::Ptr`
+// class template into unqualified lookup — if that happens first,
+// MacTypes.h's later (header-guarded, so only matters on first processing)
+// `typedef Ptr* Handle` becomes ambiguous between the two. Real hardware
+// builds are unaffected either way (no Security.framework there), but this
+// order must not be swapped back without re-checking the simulator build.
+#include <mbedtls/ecp.h>
+#include <mbedtls/ecdh.h>
+#include <mbedtls/gcm.h>
+#include <ArduinoJson.h>
 #include <sys/time.h>
 #include <time.h>
 #include "config_manager.h"
 #include "ota_health.h"
 #include "version.h"
+
+// Encrypted image buckets (see root CLAUDE.md's plan): the device's own P-256
+// keypair is generated once (ensureSharingKeyPair()) and used to unwrap each
+// assigned bucket's AES-256-GCM content key (unwrapBucketKeys(), called from
+// syncRemoteConfigAndTime() below) before fetchAndDisplayImage() can decrypt
+// anything. A device can subscribe to more than one bucket at once — see
+// worker/src/db/schema.sql's device_buckets — so this is a small fixed array,
+// not a single key.
+#define MAX_BUCKET_KEYS 8
+#define BUCKET_KEY_BYTES 32
 
 #ifndef IMAGE_INITIAL_RESPONSE_TIMEOUT_MS
 #define IMAGE_INITIAL_RESPONSE_TIMEOUT_MS 60000
@@ -66,10 +89,22 @@ struct RtcState {
 };
 
 // Regular (non-RTC) per-boot state - re-derived fresh every wake.
+struct BucketKey {
+    String bucketId;
+    uint8_t key[BUCKET_KEY_BYTES];
+};
+
 struct RunState {
     String firmwareTargetVersion;
     String firmwareTargetSha256;
     float batteryVoltage = -1.0;
+    // Unwrapped fresh every wake by unwrapBucketKeys() (called from
+    // syncRemoteConfigAndTime()) — never persisted, same as everything else
+    // here; re-deriving via ECDH+HKDF each wake is cheap and means a dropped
+    // bucket assignment takes effect immediately rather than needing an RTC
+    // invalidation path.
+    BucketKey bucketKeys[MAX_BUCKET_KEYS];
+    int bucketKeyCount = 0;
 };
 
 enum class ImageFetchResult { UNCHANGED, UPDATED, FAILED };
@@ -155,6 +190,237 @@ inline void hexToBytes(const String& hex, uint8_t* out, size_t outLen) {
     }
 }
 
+// Standard (not URL-safe) base64, matching worker/src/client/crypto.ts's
+// toBase64()/fromBase64() — every WrappedKey field (ephemeral_pub, nonce,
+// ciphertext) and the X-Device-Sharing-Public-Key header use this alphabet,
+// not the base64url one the invite-link fragment uses (that decode only ever
+// happens in the browser, never here).
+inline String bytesToBase64(const uint8_t* data, size_t len) {
+    static const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    String out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t chunk = (uint32_t)data[i] << 16;
+        if (i + 1 < len) chunk |= (uint32_t)data[i + 1] << 8;
+        if (i + 2 < len) chunk |= (uint32_t)data[i + 2];
+        out += alphabet[(chunk >> 18) & 0x3F];
+        out += alphabet[(chunk >> 12) & 0x3F];
+        out += (i + 1 < len) ? alphabet[(chunk >> 6) & 0x3F] : '=';
+        out += (i + 2 < len) ? alphabet[chunk & 0x3F] : '=';
+    }
+    return out;
+}
+
+/** Returns the decoded byte count, or 0 on a malformed input/oversized output
+ *  (never partially fills `out` in that case). */
+inline size_t base64Decode(const String& b64, uint8_t* out, size_t outCapacity) {
+    auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    size_t outLen = 0;
+    uint32_t buffer = 0;
+    int bitsCollected = 0;
+    for (size_t i = 0; i < b64.length(); i++) {
+        char c = b64[i];
+        if (c == '=' || c == '\0') break;
+        int v = value(c);
+        if (v < 0) return 0;
+        buffer = (buffer << 6) | (uint32_t)v;
+        bitsCollected += 6;
+        if (bitsCollected >= 8) {
+            bitsCollected -= 8;
+            if (outLen >= outCapacity) return 0;
+            out[outLen++] = (uint8_t)((buffer >> bitsCollected) & 0xFF);
+        }
+    }
+    return outLen;
+}
+
+inline int esp32RandomForMbedtls(void* /*ctx*/, unsigned char* buf, size_t len) {
+    esp_fill_random(buf, len);
+    return 0;
+}
+
+/**
+ * HKDF-SHA256 (RFC 5869), hand-rolled from mbedtls_md's HMAC primitive
+ * (already linked in for computeDeviceSignature() above) rather than calling
+ * mbedtls_hkdf() directly: this project's ESP32 Arduino core ships mbedtls
+ * with MBEDTLS_HKDF_C compiled out (the header declares mbedtls_hkdf(), but
+ * linking against it fails with "undefined reference" — confirmed via a real
+ * `pio run` build, not assumed), even though the lower-level HMAC/ECP/ECDH/
+ * GCM modules this same feature needs are all present. Matches
+ * worker/src/client/crypto.ts's hkdfDeriveAesKey() exactly (empty salt,
+ * meaning a zeroed HashLen-byte salt per RFC 5869 §2.2) — verified against
+ * real WebCrypto HKDF output before being written here.
+ */
+inline void hkdfSha256(const uint8_t* ikm, size_t ikmLen, const uint8_t* info, size_t infoLen,
+                        uint8_t* okm, size_t okmLen) {
+    const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    uint8_t zeroSalt[32] = {0};
+    uint8_t prk[32];
+
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, mdInfo, 1);
+    mbedtls_md_hmac_starts(&ctx, zeroSalt, sizeof(zeroSalt));
+    mbedtls_md_hmac_update(&ctx, ikm, ikmLen);
+    mbedtls_md_hmac_finish(&ctx, prk);
+    mbedtls_md_free(&ctx);
+
+    uint8_t t[32];
+    size_t tLen = 0;
+    size_t generated = 0;
+    uint8_t counter = 1;
+    while (generated < okmLen) {
+        mbedtls_md_init(&ctx);
+        mbedtls_md_setup(&ctx, mdInfo, 1);
+        mbedtls_md_hmac_starts(&ctx, prk, sizeof(prk));
+        mbedtls_md_hmac_update(&ctx, t, tLen);
+        mbedtls_md_hmac_update(&ctx, info, infoLen);
+        mbedtls_md_hmac_update(&ctx, &counter, 1);
+        mbedtls_md_hmac_finish(&ctx, t);
+        mbedtls_md_free(&ctx);
+        tLen = sizeof(t);
+
+        size_t n = okmLen - generated < sizeof(t) ? okmLen - generated : sizeof(t);
+        memcpy(okm + generated, t, n);
+        generated += n;
+        counter++;
+    }
+}
+
+/**
+ * Generates this device's P-256 keypair on first boot and persists it (see
+ * ConfigManager::setSharingKeyPair()) — a no-op on every later boot. The
+ * public half is later sent to the Worker via addCommonHeaders()'
+ * X-Device-Sharing-Public-Key, the same self-reported-on-every-request
+ * pattern as X-Device-Board; the private half never leaves this device.
+ *
+ * The private key's raw byte length is sized dynamically via
+ * mbedtls_mpi_size() rather than assumed to be 32 — real mbedtls represents
+ * a P-256 scalar in exactly 32 bytes, but the macOS simulator's stub (see
+ * firmware/simulator/stubs/mbedtls/ecp.h) needs more, and this code has to
+ * work unmodified against both.
+ */
+inline void ensureSharingKeyPair(ConfigManager& configManager) {
+    if (configManager.hasSharingKeyPair()) return;
+
+    mbedtls_ecp_group grp;
+    mbedtls_ecp_group_init(&grp);
+    if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1) != 0) {
+        Serial.println("ensureSharingKeyPair: group_load failed");
+        mbedtls_ecp_group_free(&grp);
+        return;
+    }
+
+    mbedtls_mpi d;
+    mbedtls_ecp_point Q;
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&Q);
+
+    int rc = mbedtls_ecp_gen_keypair(&grp, &d, &Q, esp32RandomForMbedtls, nullptr);
+    if (rc == 0) {
+        size_t privLen = mbedtls_mpi_size(&d);
+        uint8_t privBuf[128];  // comfortably covers a real 32-byte scalar or the simulator's 97-byte blob
+        uint8_t pubBuf[65];
+        size_t pubLen = 0;
+        if (privLen > sizeof(privBuf) ||
+            mbedtls_mpi_write_binary(&d, privBuf, privLen) != 0 ||
+            mbedtls_ecp_point_write_binary(&grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &pubLen, pubBuf, sizeof(pubBuf)) != 0) {
+            Serial.println("ensureSharingKeyPair: failed to export generated keypair");
+        } else {
+            String privHex;
+            privHex.reserve(privLen * 2);
+            static const char* hexChars = "0123456789abcdef";
+            for (size_t i = 0; i < privLen; i++) {
+                privHex += hexChars[privBuf[i] >> 4];
+                privHex += hexChars[privBuf[i] & 0x0F];
+            }
+            configManager.setSharingKeyPair(privHex, bytesToBase64(pubBuf, pubLen));
+            Serial.println("ensureSharingKeyPair: generated new P-256 sharing keypair");
+        }
+    } else {
+        Serial.printf("ensureSharingKeyPair: gen_keypair failed (%d)\n", rc);
+    }
+
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_ecp_group_free(&grp);
+}
+
+/**
+ * ECDH(our sharing private key, ephemeralPub) -> HKDF-SHA256(info) ->
+ * AES-256-GCM key -> decrypts `ciphertextB64` (plaintext || 16-byte tag,
+ * matching WebCrypto's AES-GCM output layout) into `outKey`. Mirrors
+ * worker/src/client/crypto.ts's unwrapKeyWith() exactly, including the HKDF
+ * info string, which must match byte-for-byte or the tag check (rightly)
+ * fails closed. Returns false on any parse/crypto failure, leaving `outKey`
+ * untouched — a bucket this device can't unwrap the key for just doesn't get
+ * added to run.bucketKeys, so images from it fail closed too (see
+ * fetchAndDisplayImage()'s bucket-key lookup).
+ */
+inline bool unwrapBucketKey(ConfigManager& configManager, const String& ephemeralPubB64,
+                             const String& nonceB64, const String& ciphertextB64,
+                             uint8_t outKey[BUCKET_KEY_BYTES]) {
+    static const char* HKDF_INFO_BUCKET_WRAP = "eink-bucket-wrap-v1";
+
+    uint8_t ephemeralPub[65];
+    uint8_t nonce[12];
+    uint8_t ciphertext[BUCKET_KEY_BYTES + 16];
+    if (base64Decode(ephemeralPubB64, ephemeralPub, sizeof(ephemeralPub)) != sizeof(ephemeralPub)) return false;
+    if (base64Decode(nonceB64, nonce, sizeof(nonce)) != sizeof(nonce)) return false;
+    if (base64Decode(ciphertextB64, ciphertext, sizeof(ciphertext)) != sizeof(ciphertext)) return false;
+
+    String privHex = configManager.getSharingPrivateKeyHex();
+    if (privHex.length() == 0 || privHex.length() % 2 != 0) return false;
+    size_t privLen = privHex.length() / 2;
+    uint8_t privBuf[128];
+    if (privLen > sizeof(privBuf)) return false;
+    hexToBytes(privHex, privBuf, privLen);
+
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d, z;
+    mbedtls_ecp_point ephemeralQ;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&z);
+    mbedtls_ecp_point_init(&ephemeralQ);
+
+    bool ok = false;
+    if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1) == 0 &&
+        mbedtls_mpi_read_binary(&d, privBuf, privLen) == 0 &&
+        mbedtls_ecp_point_read_binary(&grp, &ephemeralQ, ephemeralPub, sizeof(ephemeralPub)) == 0 &&
+        mbedtls_ecdh_compute_shared(&grp, &z, &ephemeralQ, &d, esp32RandomForMbedtls, nullptr) == 0 &&
+        mbedtls_mpi_size(&z) == BUCKET_KEY_BYTES) {
+        uint8_t sharedSecret[BUCKET_KEY_BYTES];
+        mbedtls_mpi_write_binary(&z, sharedSecret, sizeof(sharedSecret));
+
+        uint8_t kek[32];
+        hkdfSha256(sharedSecret, sizeof(sharedSecret), reinterpret_cast<const uint8_t*>(HKDF_INFO_BUCKET_WRAP),
+                   strlen(HKDF_INFO_BUCKET_WRAP), kek, sizeof(kek));
+
+        mbedtls_gcm_context gcmCtx;
+        mbedtls_gcm_init(&gcmCtx);
+        if (mbedtls_gcm_setkey(&gcmCtx, MBEDTLS_CIPHER_ID_AES, kek, 256) == 0 &&
+            mbedtls_gcm_auth_decrypt(&gcmCtx, BUCKET_KEY_BYTES, nonce, sizeof(nonce), nullptr, 0,
+                                      ciphertext + BUCKET_KEY_BYTES, 16, ciphertext, outKey) == 0) {
+            ok = true;
+        }
+        mbedtls_gcm_free(&gcmCtx);
+    }
+
+    mbedtls_mpi_free(&d);
+    mbedtls_mpi_free(&z);
+    mbedtls_ecp_point_free(&ephemeralQ);
+    mbedtls_ecp_group_free(&grp);
+    return ok;
+}
+
 /**
  * HMAC-SHA256 over `message`, keyed by the device's own secret (see
  * ConfigManager::ensureDeviceSecret()). This — not the mac address, which is
@@ -202,6 +468,14 @@ inline void addCommonHeaders(HTTPClient& http, const String& path, ConfigManager
 
     http.addHeader("X-Firmware-Version", FIRMWARE_VERSION);
     http.addHeader("X-Device-Board", BOARD_ID);
+
+    // Self-reported every request, same pattern as X-Device-Board — see
+    // ensureSharingKeyPair()'s docs. Empty only if key generation itself
+    // failed (logged there); never blocks the request.
+    String sharingPublicKey = configManager.getSharingPublicKeyBase64();
+    if (sharingPublicKey.length() > 0) {
+        http.addHeader("X-Device-Sharing-Public-Key", sharingPublicKey);
+    }
 
     String secret = configManager.getDeviceSecret();
     String nonce = String(configManager.nextNonce());
@@ -574,6 +848,34 @@ inline bool syncRemoteConfigAndTime(ConfigManager& configManager, RunState& run)
         run.firmwareTargetSha256 = doc["firmware_sha256"].as<String>();
     }
 
+    // Unwrap every bucket key this device has been assigned, fresh each wake
+    // (see RunState::bucketKeys' comment). A bucket key this device can't
+    // unwrap (stale wrap from a since-regenerated keypair, corrupt data) is
+    // just skipped, not fatal — fetchAndDisplayImage() fails closed for any
+    // image from that specific bucket, same as if it weren't assigned at all.
+    run.bucketKeyCount = 0;
+    if (doc["bucket_keys"].is<JsonArray>()) {
+        for (JsonObject entry : doc["bucket_keys"].as<JsonArray>()) {
+            if (run.bucketKeyCount >= MAX_BUCKET_KEYS) {
+                Serial.println("Warning: more bucket_keys than MAX_BUCKET_KEYS - ignoring the rest");
+                break;
+            }
+            const char* bucketId = entry["bucket_id"] | "";
+            String ephemeralPub = entry["ephemeral_pub"] | "";
+            String nonce = entry["nonce"] | "";
+            String ciphertext = entry["ciphertext"] | "";
+            if (!bucketId[0] || !ephemeralPub.length() || !nonce.length() || !ciphertext.length()) continue;
+
+            BucketKey& slot = run.bucketKeys[run.bucketKeyCount];
+            if (unwrapBucketKey(configManager, ephemeralPub, nonce, ciphertext, slot.key)) {
+                slot.bucketId = bucketId;
+                run.bucketKeyCount++;
+            } else {
+                Serial.printf("Failed to unwrap bucket key for bucket %s - images from it will fail to decrypt\n", bucketId);
+            }
+        }
+    }
+
     return true;
 }
 
@@ -691,12 +993,46 @@ inline void disconnectWiFi() {
     Serial.println("WiFi disconnected");
 }
 
+/** Reads exactly `len` bytes from `stream` into `buf`, same
+ *  connected/stall-timeout convention the rest of this file uses. Returns
+ *  false (having read a possibly-partial amount) on disconnect/stall. */
+inline bool readExactlyFromStream(WiFiClient* stream, HTTPClient& http, uint8_t* buf, size_t len, uint32_t stallTimeoutMs) {
+    size_t bytesRead = 0;
+    uint32_t lastDataTime = millis();
+    while (bytesRead < len && http.connected()) {
+        size_t available = stream->available();
+        if (available > 0) {
+            size_t toRead = min(available, len - bytesRead);
+            size_t n = stream->readBytes(buf + bytesRead, toRead);
+            bytesRead += n;
+            lastDataTime = millis();
+        }
+        yield();
+        if (millis() - lastDataTime > stallTimeoutMs) break;
+    }
+    return bytesRead == len;
+}
+
 /**
  * Fetches the pending image, folding the old separate hash pre-check into this
  * same request via ?known_hash= (see worker/src/routes/image-packed.ts). A 304
  * means the server confirmed the image is unchanged; the display buffer is only
  * allocated and display.begin() only called once we know we actually have bytes
  * to show.
+ *
+ * The response body is AES-256-GCM ciphertext (12-byte nonce || ciphertext ||
+ * 16-byte tag — see root CLAUDE.md's encrypted-buckets plan), so
+ * Content-Length is display.getBufferSize() + 28, not an exact match. The
+ * ciphertext portion is streamed directly into the display's own buffer
+ * (decrypted in place afterward - AES-GCM's CTR-mode keystream XOR is safe
+ * to apply in place, same as the plaintext version already streamed straight
+ * into this buffer) rather than a separate allocation, preserving the
+ * original zero-extra-allocation design this function has always used (see
+ * the display.begin() comment below) - only the 12-byte nonce and 16-byte
+ * tag need their own (trivial, stack) buffers. The tag is verified via
+ * mbedtls_gcm_auth_decrypt() before display.refresh() is ever called: on a
+ * mismatch, the buffer may hold not-yet-authenticated bytes, so this returns
+ * FAILED without presenting them, same as an incomplete download today.
  */
 template <typename DisplayT>
 ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configManager, RtcState& rtc, RunState& run) {
@@ -731,71 +1067,117 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     String responseImageHash = http.header("X-Image-Hash");
     String responseImageName = http.header("X-Image-Name");
     String responseDeviceId = http.header("X-Device-ID");
+    String responseBucketId = http.header("X-Bucket-Id");
     if (responseImageName.length() > 0 || responseImageHash.length() > 0 || responseDeviceId.length() > 0) {
-        Serial.printf("Response headers: X-Image-Name=%s, X-Image-Hash=%s, X-Device-ID=%s\n",
+        Serial.printf("Response headers: X-Image-Name=%s, X-Image-Hash=%s, X-Device-ID=%s, X-Bucket-Id=%s\n",
                       responseImageName.length() > 0 ? responseImageName.c_str() : "(none)",
                       responseImageHash.length() > 0 ? responseImageHash.c_str() : "(none)",
-                      responseDeviceId.length() > 0 ? responseDeviceId.c_str() : "(none)");
+                      responseDeviceId.length() > 0 ? responseDeviceId.c_str() : "(none)",
+                      responseBucketId.length() > 0 ? responseBucketId.c_str() : "(none)");
     }
 
-    int contentLength = http.getSize();
-    Serial.printf("Content length: %d bytes\n", contentLength);
-
-    if (contentLength <= 0 || contentLength > (int)display.getBufferSize()) {
-        Serial.printf("Invalid content length: %d (expected %d)\n", contentLength, (int)display.getBufferSize());
+    const uint8_t* bucketKey = nullptr;
+    for (int i = 0; i < run.bucketKeyCount; i++) {
+        if (responseBucketId == run.bucketKeys[i].bucketId) {
+            bucketKey = run.bucketKeys[i].key;
+            break;
+        }
+    }
+    if (!bucketKey) {
+        Serial.printf("No unwrapped key for bucket %s - can't decrypt this image (see syncRemoteConfigAndTime's log)\n",
+                      responseBucketId.c_str());
         http.end();
         return ImageFetchResult::FAILED;
     }
 
-    // Stream directly into the display's own buffer rather than a separate
-    // temp allocation + copy - on a PSRAM-less board (EE04) a second
+    int contentLength = http.getSize();
+    int expectedContentLength = (int)display.getBufferSize() + 12 /* nonce */ + 16 /* tag */;
+    Serial.printf("Content length: %d bytes (expected %d)\n", contentLength, expectedContentLength);
+
+    if (contentLength != expectedContentLength) {
+        Serial.printf("Invalid content length: %d (expected %d)\n", contentLength, expectedContentLength);
+        http.end();
+        return ImageFetchResult::FAILED;
+    }
+
+    // Stream ciphertext directly into the display's own buffer rather than a
+    // separate temp allocation + copy - on a PSRAM-less board (EE04) a second
     // full-size buffer alongside the display's own wouldn't reliably fit in
     // ~320KB of internal SRAM once WiFi/TLS/BLE overhead is accounted for,
     // and it's wasted PSRAM churn on EE02 too. display.begin() must run
     // first so the buffer is actually allocated/valid before writing into it.
+    // (Decrypted in place afterward - see this function's doc comment.)
     if (!display.begin()) {
         Serial.println("Display initialization failed!");
         http.end();
         return ImageFetchResult::FAILED;
     }
     uint8_t* imageBuffer = display.getBuffer();
+    size_t bufferSize = display.getBufferSize();
 
     WiFiClient* stream = http.getStreamPtr();
-    size_t bytesRead = 0;
     uint32_t startTime = millis();
-    uint32_t lastDataTime = startTime;
 
-    while (bytesRead < (size_t)contentLength && http.connected()) {
-        size_t available = stream->available();
-        if (available > 0) {
-            size_t toRead = min(available, (size_t)(contentLength - bytesRead));
-            size_t n = stream->readBytes(imageBuffer + bytesRead, toRead);
-            bytesRead += n;
-            lastDataTime = millis();
+    uint8_t nonce[12];
+    bool ok = readExactlyFromStream(stream, http, nonce, sizeof(nonce), IMAGE_STALL_TIMEOUT_MS);
 
-            if ((bytesRead % 102400) == 0) {
-                Serial.printf("Downloaded: %d / %d bytes\n", bytesRead, contentLength);
+    size_t bodyBytesRead = 0;
+    if (ok) {
+        // Same shape as the original single-pass loop, just now sized to the
+        // plaintext buffer rather than the whole (nonce+ciphertext+tag) response.
+        uint32_t lastDataTime = millis();
+        while (bodyBytesRead < bufferSize && http.connected()) {
+            size_t available = stream->available();
+            if (available > 0) {
+                size_t toRead = min(available, bufferSize - bodyBytesRead);
+                size_t n = stream->readBytes(imageBuffer + bodyBytesRead, toRead);
+                bodyBytesRead += n;
+                lastDataTime = millis();
+                if ((bodyBytesRead % 102400) == 0) {
+                    Serial.printf("Downloaded: %d / %d bytes\n", bodyBytesRead, bufferSize);
+                }
+            }
+            yield();
+            if (millis() - lastDataTime > IMAGE_STALL_TIMEOUT_MS) {
+                Serial.printf("Download stalled - no data for %u ms\n", IMAGE_STALL_TIMEOUT_MS);
+                break;
             }
         }
-        yield();
-
-        if (millis() - lastDataTime > IMAGE_STALL_TIMEOUT_MS) {
-            Serial.printf("Download stalled - no data for %u ms\n", IMAGE_STALL_TIMEOUT_MS);
-            break;
-        }
+        ok = bodyBytesRead == bufferSize;
     }
+
+    uint8_t tag[16];
+    if (ok) ok = readExactlyFromStream(stream, http, tag, sizeof(tag), IMAGE_STALL_TIMEOUT_MS);
 
     http.end();
 
-    Serial.printf("Downloaded %d bytes in %lu ms\n", bytesRead, millis() - startTime);
+    Serial.printf("Downloaded %d bytes in %lu ms\n", (int)(sizeof(nonce) + bodyBytesRead + sizeof(tag)), millis() - startTime);
 
-    if (bytesRead != (size_t)contentLength) {
-        Serial.println("Incomplete download! Display buffer now holds a partial/garbled image - "
+    if (!ok) {
+        Serial.println("Incomplete download! Display buffer now holds partial/undecrypted ciphertext - "
                         "will retry next wake since lastImageHash is left unset below.");
         // display.begin() above already powered the panel on - power it back
-        // down without drawing the partial buffer, or it stays powered (and
-        // draining battery) for the whole sleep interval on a board with no
+        // down without drawing anything, or it stays powered (and draining
+        // battery) for the whole sleep interval on a board with no
         // PIN_POWER rail-cut (e.g. EE04).
+        display.sleep();
+        return ImageFetchResult::FAILED;
+    }
+
+    // Decrypts imageBuffer in place (safe: AES-GCM's CTR-mode keystream XOR
+    // doesn't need input/output to differ) only once the tag has verified -
+    // never trust/present ciphertext-shaped bytes as if they were the real
+    // plaintext.
+    mbedtls_gcm_context gcmCtx;
+    mbedtls_gcm_init(&gcmCtx);
+    int gcmRc = mbedtls_gcm_setkey(&gcmCtx, MBEDTLS_CIPHER_ID_AES, bucketKey, 256);
+    if (gcmRc == 0) {
+        gcmRc = mbedtls_gcm_auth_decrypt(&gcmCtx, bufferSize, nonce, sizeof(nonce), nullptr, 0, tag, sizeof(tag),
+                                          imageBuffer, imageBuffer);
+    }
+    mbedtls_gcm_free(&gcmCtx);
+    if (gcmRc != 0) {
+        Serial.printf("Image decryption/authentication failed (%d) - not displaying, will retry next wake\n", gcmRc);
         display.sleep();
         return ImageFetchResult::FAILED;
     }

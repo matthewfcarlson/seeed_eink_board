@@ -109,6 +109,23 @@ public:
     bool getDeviceRegistered();
     void setDeviceRegistered(bool registered);
 
+    // This device's own P-256 keypair for encrypted-bucket key-wrapping (see
+    // root CLAUDE.md's encrypted-buckets plan and device_app.h's
+    // ensureSharingKeyPair()/unwrapBucketKey()). Generated once and never
+    // regenerated automatically, same policy as the device secret above.
+    //
+    // Stored as hex/base64 strings, not raw bytes: the private key's true
+    // byte length isn't a portable constant across build targets (a real
+    // P-256 scalar is 32 bytes on hardware; the macOS simulator's stub needs
+    // more — see firmware/simulator/stubs/mbedtls/ecp.h) so a variable-length
+    // hex string sidesteps needing a separately-stored length field.
+    bool hasSharingKeyPair();
+    String getSharingPrivateKeyHex();
+    // Base64 (not hex) since this is sent as-is in the X-Device-Sharing-Public-Key
+    // header and stored as-is in the Worker's bucket_keys/devices tables.
+    String getSharingPublicKeyBase64();
+    void setSharingKeyPair(const String& privateKeyHex, const String& publicKeyBase64);
+
 private:
     Preferences prefs_;
     String wifiSsid_;
@@ -124,6 +141,8 @@ private:
     String deviceSecret_;
     bool deviceRegistered_;
     uint32_t requestNonce_;
+    String sharingPrivateKeyHex_;
+    String sharingPublicKeyBase64_;
 
     void loadFromNVS();
     void saveToNVS();

@@ -19,6 +19,29 @@ export const PRF_EXTENSION_INPUT = {
   prf: { eval: { first: PRF_SALT } },
 } as AuthenticationExtensionsClientInputs;
 
+/**
+ * Optional on /auth/register/verify and PATCH /admin/me/sharing-key — present
+ * iff the client's WebAuthn ceremony returned a usable PRF result (see
+ * PRF_EXTENSION_INPUT above and client/crypto.ts's deriveKekFromPrf). All
+ * three or none: the client wraps its sharing private key with the
+ * PRF-derived KEK entirely locally and only ever uploads the already-wrapped
+ * ciphertext, never the PRF output or the raw private key.
+ */
+export interface SharingKeyWrap {
+  sharing_public_key: string;
+  wrapped_sharing_key: string;
+  wrap_nonce: string;
+}
+
+export function readSharingKeyWrap(body: Partial<SharingKeyWrap>): SharingKeyWrap | null {
+  if (!body.sharing_public_key || !body.wrapped_sharing_key || !body.wrap_nonce) return null;
+  return {
+    sharing_public_key: body.sharing_public_key,
+    wrapped_sharing_key: body.wrapped_sharing_key,
+    wrap_nonce: body.wrap_nonce,
+  };
+}
+
 // A ceremony (options -> browser prompt -> verify) should take a few seconds, not
 // minutes; short TTL just bounds how long an abandoned attempt lingers in KV.
 export const CHALLENGE_TTL_SECONDS = 300;

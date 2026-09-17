@@ -28,8 +28,13 @@ CXXFLAGS = -std=c++17 -Wall -Wno-unused-function -Wno-unused-variable \
            $(SDL_CFLAGS)
 
 # -lcurl: real HTTP requests against a local `wrangler dev` (stubs/HTTPClient.h).
-# CommonCrypto (stubs/mbedtls/*.h) needs no extra link flag - part of libSystem.
-LDFLAGS = $(SDL_LIBS) -lcurl
+# CommonCrypto (stubs/mbedtls/{sha256,md,gcm}.h) needs no extra link flag -
+# part of libSystem. Security.framework (stubs/mbedtls/{ecp,ecdh}.h, for P-256
+# ECDH - see root CLAUDE.md's encrypted-buckets plan) does need explicit
+# framework linking, unlike CommonCrypto. HKDF has no mbedtls stub at all -
+# device_app.h hand-rolls it from mbedtls_md's HMAC (see hkdfSha256()) since
+# real hardware's mbedtls build doesn't link mbedtls_hkdf() either.
+LDFLAGS = $(SDL_LIBS) -lcurl -framework Security -framework CoreFoundation
 
 BOARD ?= ee02
 

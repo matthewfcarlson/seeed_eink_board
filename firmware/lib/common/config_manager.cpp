@@ -16,6 +16,8 @@ static const char* KEY_TZ_OFFSET = "tz_offset";
 static const char* KEY_DEVICE_SECRET = "dev_secret";
 static const char* KEY_DEVICE_REGISTERED = "dev_reg";
 static const char* KEY_REQUEST_NONCE = "req_nonce";
+static const char* KEY_SHARING_PRIV = "share_priv";
+static const char* KEY_SHARING_PUB = "share_pub";
 
 ConfigManager::ConfigManager()
     : wifiSsid_(""),
@@ -30,7 +32,9 @@ ConfigManager::ConfigManager()
       timezoneOffsetMinutes_(DEFAULT_TIMEZONE_OFFSET_MINUTES),
       deviceSecret_(""),
       deviceRegistered_(false),
-      requestNonce_(0) {
+      requestNonce_(0),
+      sharingPrivateKeyHex_(""),
+      sharingPublicKeyBase64_("") {
 }
 
 void ConfigManager::begin() {
@@ -56,6 +60,8 @@ void ConfigManager::loadFromNVS() {
     deviceSecret_ = prefs_.getString(KEY_DEVICE_SECRET, "");
     deviceRegistered_ = prefs_.getBool(KEY_DEVICE_REGISTERED, false);
     requestNonce_ = prefs_.getUInt(KEY_REQUEST_NONCE, 0);
+    sharingPrivateKeyHex_ = prefs_.getString(KEY_SHARING_PRIV, "");
+    sharingPublicKeyBase64_ = prefs_.getString(KEY_SHARING_PUB, "");
 
     prefs_.end();
 }
@@ -303,6 +309,27 @@ uint32_t ConfigManager::nextNonce() {
     return requestNonce_;
 }
 
+bool ConfigManager::hasSharingKeyPair() {
+    return sharingPrivateKeyHex_.length() > 0;
+}
+
+String ConfigManager::getSharingPrivateKeyHex() {
+    return sharingPrivateKeyHex_;
+}
+
+String ConfigManager::getSharingPublicKeyBase64() {
+    return sharingPublicKeyBase64_;
+}
+
+void ConfigManager::setSharingKeyPair(const String& privateKeyHex, const String& publicKeyBase64) {
+    sharingPrivateKeyHex_ = privateKeyHex;
+    sharingPublicKeyBase64_ = publicKeyBase64;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putString(KEY_SHARING_PRIV, sharingPrivateKeyHex_);
+    prefs_.putString(KEY_SHARING_PUB, sharingPublicKeyBase64_);
+    prefs_.end();
+}
+
 void ConfigManager::printConfig() {
     Serial.println("Current Configuration:");
     Serial.printf("  WiFi: %s\n", wifiSsid_.length() > 0 ? wifiSsid_.c_str() : "(not configured)");
@@ -312,4 +339,5 @@ void ConfigManager::printConfig() {
     Serial.printf("  Refresh interval: %d minutes\n", sleepMinutes_);
     Serial.printf("  Active window: %02d:00-%02d:00\n", activeStartHour_, activeEndHour_);
     Serial.printf("  Timezone offset: %d minutes from UTC\n", timezoneOffsetMinutes_);
+    Serial.printf("  Sharing keypair: %s\n", hasSharingKeyPair() ? "generated" : "(not yet generated)");
 }

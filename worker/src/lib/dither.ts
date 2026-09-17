@@ -1,4 +1,4 @@
-import type { DitherAlgorithm } from "../types";
+import type { DitherAlgorithm } from "./media-constants";
 import { NIBBLE_MAP, PALETTE, nearestPaletteIndex } from "./palette";
 
 function clamp255(v: number): number {

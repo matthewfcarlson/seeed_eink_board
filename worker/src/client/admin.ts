@@ -6,8 +6,39 @@
  */
 export {};
 
+import {
+  HKDF_INFO_BUCKET_WRAP,
+  aesGcmDecryptBlob,
+  aesGcmDecryptFromStrings,
+  aesGcmEncryptBlob,
+  aesGcmEncryptToStrings,
+  deriveKekFromPrf,
+  exportAesKeyRaw,
+  exportPrivateKeyPkcs8,
+  exportPublicKeyRaw,
+  fromBase64,
+  fromBase64Url,
+  generateBucketKey,
+  generateP256KeyPair,
+  importAesKeyRaw,
+  importPrivateKeyPkcs8,
+  toBase64,
+  toBase64Url,
+  unwrapKeyWith,
+  wrapKeyFor,
+  type WrappedKey,
+} from "./crypto";
+import { decodeToLandscapeBuffer } from "./decode";
+import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
+import type { DitherAlgorithm } from "../lib/media-constants";
+import { makeThumbnailJpeg } from "./thumbnail";
+import { localKeystoreGet, localKeystoreSet } from "./keystore";
+
 const KEY_STORAGE = "eink_admin_api_key";
 const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
+const DEFAULT_BRIGHTNESS = 1.0;
+const DEFAULT_CONTRAST = 1.2;
+const DEFAULT_SATURATION = 1.2;
 // Set by renderClaimBanner() from ?secret= when arriving via a device's QR scan;
 // consumed once by the Register click handler. See lib/registration-url.ts.
 let pendingClaimSecret: string | null = null;
@@ -15,6 +46,18 @@ let currentUser: any = null;
 let devicesCache: any[] = [];
 let allBucketsCache: any[] = [];
 let bucketModalMac: string | null = null;
+
+// This browser's unwrapped view of the current user's sharing keypair (see
+// root CLAUDE.md's encrypted-buckets plan) — recovered fresh on every login
+// via WebAuthn PRF, or (no-PRF authenticator) restored from keystore.ts.
+// Null means this session can't decrypt any bucket: either not logged in via
+// a passkey ceremony yet, or this authenticator has no PRF result and no
+// local key was ever established.
+let sharingPrivateKey: CryptoKey | null = null;
+let sharingPublicKeyRaw: Uint8Array | null = null;
+// bucketId -> that bucket's unwrapped AES-256-GCM content key, populated by
+// renderApp() from each bucket's caller-specific WrappedKey.
+const bucketAesKeys = new Map<string, CryptoKey>();
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -85,6 +128,93 @@ function passkeysSupported(): boolean {
   return !!(PKC && PKC.parseCreationOptionsFromJSON && PKC.parseRequestOptionsFromJSON);
 }
 
+/** Reads this ceremony's WebAuthn PRF result, if the authenticator returned
+ *  one — undefined otherwise (older security keys, unsupported platforms). */
+function readPrfOutput(credential: any): ArrayBuffer | undefined {
+  const results = credential.getClientExtensionResults?.();
+  return results?.prf?.results?.first;
+}
+
+/** Called once, right after a successful registration ceremony: generates
+ *  this account's sharing keypair and, if this ceremony's authenticator
+ *  supports PRF, wraps the private key for upload alongside the registration
+ *  verify call. Otherwise the keypair is stashed in this browser's IndexedDB
+ *  only (see keystore.ts) — sharing_public_key stays null server-side until a
+ *  later login backfills it (see completeLoginSharingKey below), so this
+ *  account can't yet be shared *into* buckets by others from this state.
+ *  Populates the module-level sharingPrivateKey/sharingPublicKeyRaw either way. */
+async function completeRegistrationSharingKey(
+  credential: any
+): Promise<Partial<{ sharing_public_key: string; wrapped_sharing_key: string; wrap_nonce: string }>> {
+  const keyPair = await generateP256KeyPair();
+  sharingPrivateKey = keyPair.privateKey;
+  sharingPublicKeyRaw = await exportPublicKeyRaw(keyPair.publicKey);
+  const privateKeyPkcs8 = await exportPrivateKeyPkcs8(keyPair.privateKey);
+
+  const prfOutput = readPrfOutput(credential);
+  if (!prfOutput) {
+    await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
+    return {};
+  }
+  const kek = await deriveKekFromPrf(prfOutput);
+  const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, privateKeyPkcs8);
+  return { sharing_public_key: toBase64(sharingPublicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce };
+}
+
+/** Called once, right after a successful login ceremony, with that ceremony's
+ *  credential (for its PRF output) and the /auth/login/verify response (for
+ *  whatever's already wrapped server-side). Recovers this session's sharing
+ *  keypair from whichever source is available, and returns fields to
+ *  backfill server-side only when that's newly possible this time (see
+ *  routes/auth-passkey.ts's IS NULL guards — sending these when a wrap
+ *  already exists is harmless, just redundant). */
+async function completeLoginSharingKey(
+  credential: any,
+  loginResult: any
+): Promise<Partial<{ sharing_public_key: string; wrapped_sharing_key: string; wrap_nonce: string }>> {
+  const prfOutput = readPrfOutput(credential);
+
+  if (loginResult.wrapped_sharing_key && loginResult.sharing_public_key && prfOutput) {
+    const kek = await deriveKekFromPrf(prfOutput);
+    const privateKeyPkcs8 = await aesGcmDecryptFromStrings(kek, loginResult.wrap_nonce, loginResult.wrapped_sharing_key);
+    sharingPrivateKey = await importPrivateKeyPkcs8(privateKeyPkcs8);
+    sharingPublicKeyRaw = fromBase64(loginResult.sharing_public_key);
+    return {};
+  }
+
+  // No usable PRF-wrapped key from the server this time (either none exists
+  // yet, or this ceremony didn't yield a PRF result) — fall back to whatever
+  // this browser has cached locally.
+  const local = await localKeystoreGet();
+  if (local) {
+    sharingPrivateKey = await importPrivateKeyPkcs8(local.privateKeyPkcs8);
+    sharingPublicKeyRaw = local.publicKeyRaw;
+    if (prfOutput && !loginResult.wrapped_sharing_key) {
+      // First time this credential has produced PRF output — backfill the
+      // server with our existing local key instead of generating a new one.
+      const kek = await deriveKekFromPrf(prfOutput);
+      const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, local.privateKeyPkcs8);
+      return { sharing_public_key: toBase64(local.publicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce };
+    }
+    return {};
+  }
+
+  // No server key and no local key — shouldn't normally happen (registration
+  // always establishes one somewhere) but degrade gracefully rather than
+  // leave sharingPrivateKey null: generate fresh, same as a first registration.
+  const keyPair = await generateP256KeyPair();
+  sharingPrivateKey = keyPair.privateKey;
+  sharingPublicKeyRaw = await exportPublicKeyRaw(keyPair.publicKey);
+  const privateKeyPkcs8 = await exportPrivateKeyPkcs8(keyPair.privateKey);
+  if (prfOutput) {
+    const kek = await deriveKekFromPrf(prfOutput);
+    const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, privateKeyPkcs8);
+    return { sharing_public_key: toBase64(sharingPublicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce };
+  }
+  await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
+  return {};
+}
+
 el("passkey-signup-btn").addEventListener("click", async () => {
   if (!passkeysSupported()) {
     showMessage("login-message", "This browser doesn't support passkeys. Try an up-to-date Chrome, Safari, or Firefox.", "error");
@@ -94,7 +224,12 @@ el("passkey-signup-btn").addEventListener("click", async () => {
     const { attemptId, options } = await publicFetch("/auth/register/options", {});
     const creationOptions = (window as any).PublicKeyCredential.parseCreationOptionsFromJSON(options);
     const credential: any = await navigator.credentials.create({ publicKey: creationOptions });
-    const result = await publicFetch("/auth/register/verify", { attemptId, response: credential.toJSON() });
+    const sharingKeyFields = await completeRegistrationSharingKey(credential);
+    const result = await publicFetch("/auth/register/verify", {
+      attemptId,
+      response: credential.toJSON(),
+      ...sharingKeyFields,
+    });
     setApiKey(result.api_key);
     alert("Account created! Your API key (also saved to this browser, shown once):\n\n" + result.api_key);
     await tryLogin(true);
@@ -112,8 +247,20 @@ el("passkey-login-btn").addEventListener("click", async () => {
     const { attemptId, options } = await publicFetch("/auth/login/options", {});
     const requestOptions = (window as any).PublicKeyCredential.parseRequestOptionsFromJSON(options);
     const credential: any = await navigator.credentials.get({ publicKey: requestOptions });
-    const result = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
-    setApiKey(result.api_key);
+    const loginResult = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
+    setApiKey(loginResult.api_key);
+    const backfillFields = await completeLoginSharingKey(credential, loginResult);
+    if (Object.keys(backfillFields).length > 0) {
+      // Separate authenticated call, not another /auth/login/verify — that
+      // ceremony's challenge is single-use and was already consumed by the
+      // call above. Best-effort: a failure here just means we try again next
+      // login, same as if PRF hadn't been available yet at all.
+      apiFetch("/admin/me/sharing-key", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential_id: credential.id, ...backfillFields }),
+      }).catch(() => {});
+    }
     await tryLogin(true);
   } catch (err: any) {
     showMessage("login-message", "Failed to log in: " + err.message, "error");
@@ -262,11 +409,29 @@ el("bucket-modal-save-btn").addEventListener("click", async () => {
   const checked = Array.from(document.querySelectorAll<HTMLInputElement>("#bucket-modal-list input[type=checkbox]:checked")).map(
     (input) => input.value
   );
+  const device = devicesCache.find((d) => d.mac === bucketModalMac);
+  if (!device?.sharing_public_key) {
+    showMessage("app-message", "This device hasn't reported a sharing key yet — update its firmware and let it check in first.", "error");
+    return;
+  }
+  const devicePublicKeyRaw = fromBase64(device.sharing_public_key);
+
   try {
+    // Wrap every selected bucket's key for this device — the Worker can't do
+    // this itself, so the browser (which already holds each bucket's raw key,
+    // being allowed to assign it) does it before saving.
+    const keys: Record<string, WrappedKey> = {};
+    for (const bucketId of checked) {
+      const bucketKey = bucketAesKeys.get(bucketId);
+      if (!bucketKey) throw new Error(`bucket ${bucketId}'s key isn't unlocked in this session`);
+      const rawKey = await exportAesKeyRaw(bucketKey);
+      keys[bucketId] = await wrapKeyFor(devicePublicKeyRaw, rawKey, HKDF_INFO_BUCKET_WRAP);
+    }
+
     await apiFetch("/admin/devices/" + encodeURIComponent(bucketModalMac as string) + "/buckets", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bucket_ids: checked }),
+      body: JSON.stringify({ bucket_ids: checked, keys }),
     });
     el("bucket-modal-overlay").classList.remove("open");
     await renderApp();
@@ -332,11 +497,12 @@ function renderDevicesTable(devices: any[]) {
     const uptime = d.created_at
       ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatUptime(d.created_at) + "</span>"
       : '<span class="hint">n/a</span>';
+    const currentImageThumbUrl = d.current_image && d.current_image.id ? thumbnailUrlCache[d.current_image.id] : null;
     const currentImage = !d.current_image
       ? '<span class="hint">n/a</span>'
-      : d.current_image.thumbnail_data_url && d.current_image.id
-      ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \'full-device-' + escapeHtml(d.mac) + '\', \'' + d.current_image.id + '\')">' +
-          '<img class="thumb" src="' + d.current_image.thumbnail_data_url + '" alt="" width="34" height="45">' +
+      : currentImageThumbUrl
+      ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \'full-device-' + escapeHtml(d.mac) + '\', \'' + d.current_image.id + '\', \'' + escapeHtml(d.current_image.source_bucket_id) + '\')">' +
+          '<img class="thumb" src="' + currentImageThumbUrl + '" alt="" width="34" height="45">' +
           '<div class="thumb-popup" id="full-device-' + escapeHtml(d.mac) + '"><p class="hint">Loading…</p></div>' +
         "</div>"
       : escapeHtml(d.current_image.filename);
@@ -406,6 +572,43 @@ async function clearSchedule(target: string) {
 }
 (window as any).clearSchedule = clearSchedule;
 
+// Sniffs raw-image magic bytes to give the decrypted Blob a real MIME type —
+// the server can no longer do this (ciphertext, not an image) the way
+// lib/decode.ts's old sniffImageContentType did before encryption landed.
+function sniffImageContentType(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) return "image/webp";
+  return "application/octet-stream";
+}
+
+// Decrypts ciphertext (thumbnail or raw original) with the given bucket's
+// content key into a renderable object URL. Throws if that bucket's key isn't
+// unlocked in this session or the ciphertext is corrupt/stale.
+async function decryptBytesToObjectUrl(bucketId: string, ciphertext: Uint8Array): Promise<string> {
+  const key = bucketAesKeys.get(bucketId);
+  if (!key) throw new Error("bucket key not unlocked in this session");
+  const plaintext = await aesGcmDecryptBlob(key, ciphertext);
+  return URL.createObjectURL(new Blob([new Uint8Array(plaintext)], { type: sniffImageContentType(plaintext) }));
+}
+
+// Same, from a base64 ciphertext (thumbnails arrive this way in JSON). Null
+// on any failure — callers show a placeholder rather than propagate the
+// error into a crashed render.
+async function decryptToObjectUrl(bucketId: string, ciphertextB64: string): Promise<string | null> {
+  try {
+    return await decryptBytesToObjectUrl(bucketId, fromBase64(ciphertextB64));
+  } catch {
+    return null;
+  }
+}
+
+// imageId -> decrypted object URL for thumbnails, populated fresh by
+// renderApp() on every render (old URLs are revoked first — see renderApp).
+const thumbnailUrlCache: Record<string, string> = {};
+
 const fullImageUrlCache: Record<string, string> = {};
 
 // The popup is position:fixed, so top/left are viewport-relative and must be
@@ -436,18 +639,19 @@ function positionThumbPopup(wrapEl: HTMLElement, popupEl: HTMLElement) {
 // popupId is the DOM id of this thumb's popup div; imageId is what's fetched/cached.
 // Kept separate because the same image can appear in two different popups at once
 // (e.g. a device's "Current image" and its source bucket's row both show it) —
-// reusing "full-" + imageId as the DOM id for both would collide.
-function onThumbHover(wrapEl: HTMLElement, popupId: string, imageId: string) {
+// reusing "full-" + imageId as the DOM id for both would collide. bucketId says
+// which content key decrypts this image's ciphertext once fetched.
+function onThumbHover(wrapEl: HTMLElement, popupId: string, imageId: string, bucketId: string) {
   const popup = document.getElementById(popupId);
   if (popup) positionThumbPopup(wrapEl, popup);
-  loadFullImage(popupId, imageId);
+  loadFullImage(popupId, imageId, bucketId);
 }
 (window as any).onThumbHover = onThumbHover;
 
 // Lazy-loaded on first hover (the raw endpoint re-checks ownership per request,
 // so there's no point prefetching every thumbnail's full image up front). Cached
 // by object URL per image id so repeat hovers in the same session are instant.
-async function loadFullImage(popupId: string, imageId: string) {
+async function loadFullImage(popupId: string, imageId: string, bucketId: string) {
   const popup = document.getElementById(popupId) as HTMLElement | null;
   if (!popup || popup.dataset.loaded) return;
   if (fullImageUrlCache[imageId]) {
@@ -460,8 +664,8 @@ async function loadFullImage(popupId: string, imageId: string) {
       headers: { Authorization: "Bearer " + getApiKey() },
     });
     if (!res.ok) throw new Error(res.status + " " + res.statusText);
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    const ciphertext = new Uint8Array(await res.arrayBuffer());
+    const url = await decryptBytesToObjectUrl(bucketId, ciphertext);
     fullImageUrlCache[imageId] = url;
     popup.innerHTML = '<img src="' + url + '" alt="">';
     popup.dataset.loaded = "1";
@@ -482,6 +686,13 @@ async function deleteImage(id: string) {
 }
 (window as any).deleteImage = deleteImage;
 
+/**
+ * Decode -> EXIF-correct -> resize/crop -> rotate -> enhance -> dither -> pack
+ * -> hash -> encrypt now all run here, client-side — the Worker never sees
+ * plaintext (see root CLAUDE.md's encrypted-buckets plan). `packed_hash` is
+ * computed over the encrypted packed blob, not the plaintext, since that's
+ * the only thing the server can compare on later requests.
+ */
 async function uploadImage(deviceKey: string) {
   const fileInput = el<HTMLInputElement>("upload-file-" + deviceKey);
   const filenameInput = el<HTMLInputElement>("upload-filename-" + deviceKey);
@@ -489,14 +700,42 @@ async function uploadImage(deviceKey: string) {
   const file = fileInput.files ? fileInput.files[0] : undefined;
   if (!file) { showMessage("app-message", "Choose a file first.", "error"); return; }
   const filename = (filenameInput.value || file.name).trim();
-  const dither = ditherSelect.value;
+  const dither = ditherSelect.value as DitherAlgorithm;
+
+  const bucketKey = bucketAesKeys.get(deviceKey);
+  if (!bucketKey) {
+    showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
+    return;
+  }
 
   try {
+    showMessage("app-message", "Processing and encrypting image…", "");
+    const rawBytes = new Uint8Array(await file.arrayBuffer());
+    const landscape = await decodeToLandscapeBuffer(file);
+    enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+    const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
+    const packed = packToNibbles(indices);
+    const thumbnail = await makeThumbnailJpeg(landscape.portrait.rgba, landscape.portrait.width, landscape.portrait.height);
+
+    const [rawCiphertext, packedCiphertext, thumbCiphertext] = await Promise.all([
+      aesGcmEncryptBlob(bucketKey, rawBytes),
+      aesGcmEncryptBlob(bucketKey, packed),
+      aesGcmEncryptBlob(bucketKey, thumbnail),
+    ]);
+    const packedHash = await computeHash16(packedCiphertext);
+
+    const formData = new FormData();
+    formData.set("dither_algorithm", dither);
+    formData.set("packed_hash", packedHash);
+    formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
+    formData.set("packed", new Blob([new Uint8Array(packedCiphertext)]), "packed.bin");
+    formData.set("thumb", new Blob([new Uint8Array(thumbCiphertext)]), "thumb.bin");
+
+    // No Content-Type header: FormData needs the browser to set its own
+    // multipart boundary, which apiFetch only does when we don't override it.
     await apiFetch(
-      "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) +
-      "&filename=" + encodeURIComponent(filename) +
-      "&dither=" + encodeURIComponent(dither),
-      { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file }
+      "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) + "&filename=" + encodeURIComponent(filename),
+      { method: "POST", body: formData }
     );
     fileInput.value = "";
     filenameInput.value = "";
@@ -512,9 +751,9 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[]): strin
   const rows = images.length
     ? images.map((img) =>
         "<tr>" +
-        "<td>" + (img.thumbnail_data_url
-          ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \'full-' + img.id + '\', \'' + img.id + '\')">' +
-              '<img class="thumb" src="' + img.thumbnail_data_url + '" alt="" width="45" height="60">' +
+        "<td>" + (thumbnailUrlCache[img.id]
+          ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \'full-' + img.id + '\', \'' + img.id + '\', \'' + escapeHtml(bucket.id) + '\')">' +
+              '<img class="thumb" src="' + thumbnailUrlCache[img.id] + '" alt="" width="45" height="60">' +
               '<div class="thumb-popup" id="full-' + img.id + '"><p class="hint">Loading…</p></div>' +
             "</div>"
           : '<span class="hint">n/a</span>') + "</td>" +
@@ -572,13 +811,23 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[]): strin
 }
 
 async function createBucketInvite(bucketId: string) {
+  const bucketKey = bucketAesKeys.get(bucketId);
+  if (!bucketKey) {
+    showMessage("app-message", "This bucket's key isn't unlocked in this session.", "error");
+    return;
+  }
   try {
     const result = await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId) + "/invite", { method: "POST" });
+    // The raw bucket key travels only as a URL fragment — never sent to the
+    // server (not in this request, not in Referer headers, not in server
+    // logs). The invitee's browser reads it client-side; see joinBucket().
+    const rawKey = await exportAesKeyRaw(bucketKey);
+    const url = result.url + "#key=" + toBase64Url(rawKey);
     try {
-      await navigator.clipboard.writeText(result.url);
-      alert("Invite link copied to clipboard:\n\n" + result.url);
+      await navigator.clipboard.writeText(url);
+      alert("Invite link copied to clipboard (keep it private — anyone with this link can read the bucket):\n\n" + url);
     } catch {
-      alert("Invite link (copy manually):\n\n" + result.url);
+      alert("Invite link (copy manually — keep it private):\n\n" + url);
     }
   } catch (err: any) {
     showMessage("app-message", "Failed to create invite link: " + err.message, "error");
@@ -634,11 +883,20 @@ el("create-bucket-btn").addEventListener("click", async () => {
   const input = el<HTMLInputElement>("new-bucket-label");
   const label = input.value.trim();
   if (!label) return;
+  if (!sharingPublicKeyRaw) {
+    showMessage("app-message", "Can't create an encrypted bucket yet — log out and back in with your passkey first.", "error");
+    return;
+  }
   try {
+    // The bucket's AES-256-GCM content key is generated here, client-side, and
+    // never sent to the Worker raw — only this wrap of it for our own key.
+    const bucketKey = await generateBucketKey();
+    const bucketKeyRaw = await exportAesKeyRaw(bucketKey);
+    const key = await wrapKeyFor(sharingPublicKeyRaw, bucketKeyRaw, HKDF_INFO_BUCKET_WRAP);
     await apiFetch("/admin/buckets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label }),
+      body: JSON.stringify({ label, key }),
     });
     input.value = "";
     await renderApp();
@@ -780,14 +1038,38 @@ function renderJoinBucketBanner() {
     "</div>";
 }
 
-async function joinBucket(token: string) {
+// The raw bucket key travels as a URL fragment (`#key=...`), appended by the
+// inviter's browser (see createBucketInvite) and never sent to the server —
+// read directly off location.hash here, client-side only.
+function readBucketKeyFragment(): Uint8Array | null {
+  const match = /(?:^|[#&])key=([^&]+)/.exec(location.hash);
+  if (!match) return null;
   try {
+    return fromBase64Url(match[1]!);
+  } catch {
+    return null;
+  }
+}
+
+async function joinBucket(token: string) {
+  if (!sharingPublicKeyRaw) {
+    showMessage("app-message", "Log in with your passkey first, then use the invite link again.", "error");
+    return;
+  }
+  try {
+    const body: { token: string; key?: WrappedKey } = { token };
+    const rawKey = readBucketKeyFragment();
+    if (rawKey) {
+      // Immediately re-wrap a durable copy for our own key — ordinary future
+      // access never needs this link/fragment again.
+      body.key = await wrapKeyFor(sharingPublicKeyRaw, rawKey, HKDF_INFO_BUCKET_WRAP);
+    }
     const result = await apiFetch("/admin/buckets/join", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify(body),
     });
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(null, "", location.pathname); // drops ?join_bucket= and #key= alike
     el("join-bucket-banner").innerHTML = "";
     showMessage("app-message", 'Joined bucket "' + result.label + '".', "success");
     await renderApp();
@@ -808,6 +1090,41 @@ async function renderApp() {
   const devices = devicesResult.devices;
   devicesCache = devices;
   allBucketsCache = bucketsResult.buckets;
+
+  // Unwrap every bucket's content key this session can access, before
+  // rendering anything that needs to decrypt a thumbnail. A bucket this
+  // account can see but has no usable key for (sharingPrivateKey not
+  // unlocked, or a stale/corrupt wrap) just renders without thumbnails —
+  // see decryptToObjectUrl's callers below.
+  bucketAesKeys.clear();
+  if (sharingPrivateKey) {
+    await Promise.all(allBucketsCache.map(async (b) => {
+      if (!b.key) return;
+      try {
+        const raw = await unwrapKeyWith(sharingPrivateKey!, b.key as WrappedKey, HKDF_INFO_BUCKET_WRAP);
+        bucketAesKeys.set(b.id, await importAesKeyRaw(raw));
+      } catch {
+        // Leave this one bucket undecryptable rather than fail the whole render.
+      }
+    }));
+  } else {
+    showMessage("app-message", "Log in with your passkey (not just an API key) to unlock encrypted bucket contents.", "error");
+  }
+
+  // Old object URLs point at Blobs from the previous render — revoke before
+  // repopulating so repeated renderApp() calls (every action re-renders)
+  // don't leak them for the life of the tab.
+  for (const url of Object.values(thumbnailUrlCache)) URL.revokeObjectURL(url);
+  for (const key of Object.keys(thumbnailUrlCache)) delete thumbnailUrlCache[key];
+
+  await Promise.all(
+    devices
+      .filter((d: any) => d.current_image && d.current_image.id && d.current_image.thumbnail_ciphertext_b64)
+      .map(async (d: any) => {
+        const url = await decryptToObjectUrl(d.current_image.source_bucket_id, d.current_image.thumbnail_ciphertext_b64);
+        if (url) thumbnailUrlCache[d.current_image.id] = url;
+      })
+  );
   renderDevicesTable(devices);
 
   const bucketsEl = el("buckets");
@@ -821,6 +1138,14 @@ async function renderApp() {
         ? apiFetch("/admin/buckets/" + encodeURIComponent(b.id) + "/collaborators")
         : Promise.resolve({ collaborators: [] }),
     ]);
+    await Promise.all(
+      imagesResult.images
+        .filter((img: any) => img.thumbnail_ciphertext_b64)
+        .map(async (img: any) => {
+          const url = await decryptToObjectUrl(b.id, img.thumbnail_ciphertext_b64);
+          if (url) thumbnailUrlCache[img.id] = url;
+        })
+    );
     el("bucket-" + b.id).innerHTML = bucketCardHtml(
       b,
       imagesResult.images,

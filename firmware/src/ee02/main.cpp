@@ -82,6 +82,7 @@ void setup() {
 
     configManager.begin();
     configManager.ensureDeviceSecret();
+    DeviceApp::ensureSharingKeyPair(configManager);
 
     otaHealth.begin();
     otaHealth.checkBootHealth();

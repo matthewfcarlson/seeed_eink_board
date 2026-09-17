@@ -15,9 +15,11 @@ import {
   CHALLENGE_TTL_SECONDS,
   PRF_EXTENSION_INPUT,
   RP_NAME,
+  readSharingKeyWrap,
   rpIdAndOrigin,
   type PendingLogin,
   type PendingRegistration,
+  type SharingKeyWrap,
 } from "../lib/webauthn";
 
 interface CredentialRow {
@@ -28,29 +30,6 @@ interface CredentialRow {
   transports: string | null;
   wrapped_sharing_key: string | null;
   wrap_nonce: string | null;
-}
-
-/**
- * Optional on both /auth/register/verify and /auth/login/verify — present iff
- * this ceremony's browser/authenticator returned a usable PRF result (see
- * lib/webauthn.ts's PRF_EXTENSION_INPUT and client/crypto.ts's
- * deriveKekFromPrf). All three or none: the client wraps its sharing private
- * key with the PRF-derived KEK entirely locally and only ever uploads the
- * already-wrapped ciphertext, never the PRF output or the raw private key.
- */
-interface SharingKeyWrap {
-  sharing_public_key: string;
-  wrapped_sharing_key: string;
-  wrap_nonce: string;
-}
-
-function readSharingKeyWrap(body: Partial<SharingKeyWrap>): SharingKeyWrap | null {
-  if (!body.sharing_public_key || !body.wrapped_sharing_key || !body.wrap_nonce) return null;
-  return {
-    sharing_public_key: body.sharing_public_key,
-    wrapped_sharing_key: body.wrapped_sharing_key,
-    wrap_nonce: body.wrap_nonce,
-  };
 }
 
 /**
@@ -170,13 +149,9 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.post("/auth/login/verify", async (c) => {
     const body = await c.req
-      .json<{ attemptId?: string; response?: AuthenticationResponseJSON } & Partial<SharingKeyWrap>>()
+      .json<{ attemptId?: string; response?: AuthenticationResponseJSON }>()
       .catch(() => ({}) as never);
     if (!body.attemptId || !body.response) return c.json({ error: "attemptId and response are required" }, 400);
-    // Present only if this ceremony's authenticator returned a PRF result and
-    // this credential didn't already have a wrapped sharing key on file —
-    // see readSharingKeyWrap's docs above.
-    const sharingKey = readSharingKeyWrap(body);
 
     const pendingRaw = await c.env.KV.get(kvKeys.passkeyAttempt(body.attemptId));
     if (!pendingRaw) return c.json({ error: "Login expired or not found — try again" }, 400);
@@ -217,46 +192,29 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
     // action — only the hash is stored so there's no way to hand back an old one.
     const apiKey = generateApiKey();
     const apiKeyHash = await hashApiKey(apiKey);
-    const writes = [
+    await c.env.DB.batch([
       c.env.DB.prepare("UPDATE users SET api_key_hash = ? WHERE id = ?").bind(apiKeyHash, credRow.user_id),
       c.env.DB.prepare("UPDATE credentials SET counter = ? WHERE id = ?").bind(
         verification.authenticationInfo.newCounter,
         credRow.id
       ),
-    ];
-
-    // First time this credential's authenticator has produced a usable PRF
-    // result (create()-time PRF wasn't available, or this browser never
-    // registered — either way /auth/register/verify left these null) — the
-    // `IS NULL` guards mean a client that resends every login can't clobber
-    // an already-established wrap.
-    if (sharingKey && !credRow.wrapped_sharing_key) {
-      writes.push(
-        c.env.DB.prepare("UPDATE users SET sharing_public_key = ? WHERE id = ? AND sharing_public_key IS NULL").bind(
-          sharingKey.sharing_public_key,
-          credRow.user_id
-        ),
-        c.env.DB
-          .prepare(
-            "UPDATE credentials SET wrapped_sharing_key = ?, wrap_nonce = ? WHERE id = ? AND wrapped_sharing_key IS NULL"
-          )
-          .bind(sharingKey.wrapped_sharing_key, sharingKey.wrap_nonce, credRow.id)
-      );
-    }
-    await c.env.DB.batch(writes);
+    ]);
 
     await c.env.KV.delete(kvKeys.passkeyAttempt(body.attemptId));
 
-    // Echoes back whatever's now on file (freshly backfilled or pre-existing)
-    // so the client can unwrap its sharing private key using this exact
-    // ceremony's PRF output — null on both sides means this credential has no
-    // PRF-protected sharing key yet (unsupported authenticator; the client
-    // falls back to browser-local-only storage, per lib/webauthn.ts's docs).
+    // Whatever's currently on file for this credential — null means it has no
+    // PRF-protected sharing key yet (never backfilled, or this authenticator
+    // doesn't support PRF at all). Backfilling happens via a *separate*
+    // authenticated call (PATCH /admin/me/sharing-key, using the api_key just
+    // minted above), not here: this ceremony's challenge is single-use and
+    // already consumed by the KV delete above, so there's no way to make a
+    // second /auth/login/verify call with it if the client discovers only
+    // after seeing this response that it needs to upload a wrap.
     return c.json({
       api_key: apiKey,
-      sharing_public_key: sharingKey?.sharing_public_key ?? credRow.user_sharing_public_key,
-      wrapped_sharing_key: sharingKey?.wrapped_sharing_key ?? credRow.wrapped_sharing_key,
-      wrap_nonce: sharingKey?.wrap_nonce ?? credRow.wrap_nonce,
+      sharing_public_key: credRow.user_sharing_public_key,
+      wrapped_sharing_key: credRow.wrapped_sharing_key,
+      wrap_nonce: credRow.wrap_nonce,
     });
   });
 }
