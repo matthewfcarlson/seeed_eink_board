@@ -111,7 +111,11 @@ describe("e2e: public buckets", () => {
     // bucket_keys row, then wraps it for the device exactly the same way.
     const deviceKeyPair = await generateP256KeyPair();
     const mac = randomMac();
-    await adminB.registerDeviceWithSharingKey(mac, toBase64(await exportPublicKeyRaw(deviceKeyPair.publicKey)));
+    await adminB.registerDeviceWithSharingKey(
+      mac,
+      toBase64(await exportPublicKeyRaw(deviceKeyPair.publicKey)),
+      randomBytes(16).toString("hex")
+    );
     const rawKeyFromPublic = fromBase64(bucketForB!.public_key_raw!);
     expect(rawKeyFromPublic).toEqual(bucketKeyRaw);
     const wrappedForDevice = await wrapKeyFor(await exportPublicKeyRaw(deviceKeyPair.publicKey), rawKeyFromPublic, HKDF_INFO_BUCKET_WRAP);
@@ -215,7 +219,11 @@ describe("e2e: public buckets", () => {
     const bucketForB = (await adminB.getBuckets()).find((b) => b.id === bucketId)!;
     const deviceKeyPair = await generateP256KeyPair();
     const mac = randomMac();
-    await adminB.registerDeviceWithSharingKey(mac, toBase64(await exportPublicKeyRaw(deviceKeyPair.publicKey)));
+    await adminB.registerDeviceWithSharingKey(
+      mac,
+      toBase64(await exportPublicKeyRaw(deviceKeyPair.publicKey)),
+      randomBytes(16).toString("hex")
+    );
     const wrappedForDevice = await wrapKeyFor(
       await exportPublicKeyRaw(deviceKeyPair.publicKey),
       fromBase64(bucketForB.public_key_raw!),

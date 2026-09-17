@@ -5,6 +5,7 @@
   "scripts": {
     "build:ee02": "make BOARD=ee02",
     "build:ee04": "make BOARD=ee04",
+    "test": "make test",
     "start:ee02": "make BOARD=ee02 run",
     "start:ee04": "make BOARD=ee04 run",
     "clean": "make clean"

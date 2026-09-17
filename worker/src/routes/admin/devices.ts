@@ -55,6 +55,21 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     if (existing && existing.user_id !== user.id) {
       return c.json({ error: "Device already registered to another user" }, 409);
     }
+    // Every board on this product shares the same vendor OUI, so a MAC address by
+    // itself is guessable/enumerable, not a secret — without this check, anyone
+    // with an account could mass-claim the whole address space before its real
+    // owner ever provisions it. `secret` is this device's self-generated HMAC key,
+    // only obtainable out-of-band (scanning its screen's QR code, or pairing with
+    // it over Bluetooth — see ble_provisioning.h's INFO characteristic), so
+    // requiring it here on first claim is a proof-of-possession check. Editing a
+    // device already owned by this user (label, bucket assignment, etc.) never
+    // needs it again.
+    if (!existing && !body.secret) {
+      return c.json(
+        { error: "secret is required to register a new device — scan its QR code or pair with it over Bluetooth" },
+        400
+      );
+    }
 
     const now = Math.floor(Date.now() / 1000);
     // COALESCE keeps any existing secret when the caller doesn't send one (e.g. an

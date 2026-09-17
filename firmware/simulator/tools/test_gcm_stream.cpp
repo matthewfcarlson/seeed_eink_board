@@ -26,11 +26,15 @@
 // against the same real ciphertext, confirming the one-shot and streaming
 // paths agree with each other on real external data, not just internally.
 //
-// Build (from firmware/simulator/):
+// Easiest: from firmware/simulator/, run `npm test` (or `make test`) - builds
+// and runs this alongside the other two native pipeline tests, regenerating
+// fixtures fresh each time. See README.md's "Native pipeline tests".
+//
+// To build/run just this one directly (from firmware/simulator/):
+//   node tools/gen_gcm_vectors.mjs
 //   clang++ -std=c++17 -I stubs tools/test_gcm_stream.cpp \
-//     -framework Security -framework CoreFoundation -o /tmp/test_gcm_stream
-// Run:
-//   /tmp/test_gcm_stream tools/gcm_vectors
+//     -framework Security -framework CoreFoundation -o tools/test_gcm_stream
+//   tools/test_gcm_stream tools/gcm_vectors
 
 #include <cstdio>
 #include <cstdlib>

@@ -166,6 +166,13 @@ void BLEProvisioning::refreshInfoCharacteristic(const char* state) {
     JsonDocument doc;
     doc["device_mac"] = getMACClean();
     doc["firmware_version"] = FIRMWARE_VERSION;
+    // Same policy as the HTTP path's X-Device-Secret (see ConfigManager::
+    // getDeviceRegistered()'s comment): only handed out pre-claim, so the
+    // /provision page can register this device to an account as proof this
+    // browser actually paired with it over BLE, not just guessed its MAC.
+    if (!config_.getDeviceRegistered()) {
+        doc["secret"] = config_.getDeviceSecret();
+    }
     doc["wifi_ssid"] = config_.getWifiSsid();
     doc["wifi_configured"] = config_.getWifiSsid().length() > 0;
     doc["host"] = config_.getServerHost();

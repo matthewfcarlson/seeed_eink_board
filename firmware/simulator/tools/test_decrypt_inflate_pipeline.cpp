@@ -18,7 +18,12 @@
 // unmodified - so a bug in decryptChunksInflate() itself (not just in this
 // test's understanding of it) would be caught here.
 //
-// Build (from firmware/simulator/):
+// Easiest: from firmware/simulator/, run `npm test` (or `make test`) - builds
+// and runs this alongside the other two native pipeline tests, regenerating
+// fixtures fresh each time. See README.md's "Native pipeline tests".
+//
+// To build/run just this one directly (from firmware/simulator/):
+//   node tools/gen_combined_vectors.mjs
 //   clang++ -std=c++17 -DARDUINO=10812 -DARDUINOJSON_ENABLE_ARDUINO_STRING=1 \
 //     -DARDUINOJSON_ENABLE_ARDUINO_STREAM=0 -DARDUINOJSON_ENABLE_ARDUINO_PRINT=0 \
 //     -DARDUINOJSON_ENABLE_PROGMEM=0 -I stubs -I vendor/ArduinoJson \
@@ -26,9 +31,8 @@
 //     tools/test_decrypt_inflate_pipeline.cpp \
 //     ../lib/common/tinfl.c ../lib/common/config_manager.cpp \
 //     -framework Security -framework CoreFoundation \
-//     -o /tmp/test_decrypt_inflate_pipeline
-// Run:
-//   /tmp/test_decrypt_inflate_pipeline tools/combined_vectors
+//     -o tools/test_decrypt_inflate_pipeline
+//   tools/test_decrypt_inflate_pipeline tools/combined_vectors
 
 #include "Arduino.h"       // simulator stub
 #include "esp_sleep.h"      // simulator stub - device_app.h's sleep-related helpers need this

@@ -16,11 +16,15 @@
 // AES-block-size (16 byte) input, and a near-worst-case-for-memory 960000
 // byte mostly-flat input (EE02's real buffer size).
 //
-// Build (from firmware/simulator/):
+// Easiest: from firmware/simulator/, run `npm test` (or `make test`) - builds
+// and runs this alongside the other two native pipeline tests, regenerating
+// fixtures fresh each time. See README.md's "Native pipeline tests".
+//
+// To build/run just this one directly (from firmware/simulator/):
+//   node tools/gen_tinfl_vectors.mjs
 //   clang++ -std=c++17 -I ../lib/common tools/test_tinfl_stream.cpp \
-//     ../lib/common/tinfl.c -o /tmp/test_tinfl_stream
-// Run:
-//   /tmp/test_tinfl_stream tools/vectors
+//     ../lib/common/tinfl.c -o tools/test_tinfl_stream
+//   tools/test_tinfl_stream tools/vectors
 
 #include <cstdio>
 #include <cstdlib>

@@ -70,15 +70,22 @@ SRCS = main_native.cpp \
        display_render.cpp \
        $(BOARD_SRC_DIR)/display.cpp
 
-.PHONY: all run clean
+.PHONY: all run test clean
 
 all: sim-$(BOARD)
 
 sim-$(BOARD): $(SRCS) $(wildcard stubs/*.h) $(wildcard stubs/mbedtls/*.h) gatt_bridge.h display_render.h
 	$(CXX) $(CXXFLAGS) $(BOARD_DEFINES) $(SRCS) -o $@ $(LDFLAGS)
 
-run: all
+# Native pipeline tests (tools/test_*.cpp against tools/gen_*_vectors.mjs
+# fixtures) - see tools/run_native_tests.sh. `run` gates on these passing so
+# a broken crypto/inflate pipeline is caught before the simulator ever boots,
+# not discovered mid-session.
+test:
+	./tools/run_native_tests.sh
+
+run: test all
 	./sim-$(BOARD)
 
 clean:
-	rm -f sim-ee02 sim-ee04
+	rm -f sim-ee02 sim-ee04 tools/test_gcm_stream tools/test_tinfl_stream tools/test_decrypt_inflate_pipeline

@@ -406,6 +406,13 @@ paths:
                     items: { $ref: '#/components/schemas/Device' }
     post:
       summary: Register or update a device
+      description: >-
+        `secret` is required the first time a given MAC is claimed (proof of
+        possession — every board shares the same vendor OUI, so a MAC alone is
+        guessable/enumerable, not a secret) — from the registration QR code, or
+        from the BLE provisioning INFO characteristic while the device is
+        unclaimed. Not required for a device this account already owns (label
+        edits, etc.).
       requestBody:
         required: true
         content:
@@ -417,11 +424,16 @@ paths:
                 label: { type: string }
                 secret:
                   type: string
-                  description: Hex device secret from the registration QR code.
+                  description: >-
+                    Hex device secret, required when claiming a MAC this
+                    account doesn't already own. From the registration QR code
+                    or BLE provisioning's INFO characteristic.
               required: [mac]
       responses:
         '201':
           description: Created/updated
+        '400':
+          description: Missing mac, or missing/malformed secret when claiming a new MAC
         '409':
           description: MAC already registered to another user
 

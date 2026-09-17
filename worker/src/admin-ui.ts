@@ -105,7 +105,7 @@ export function renderAdminPage(): string {
         <h3>Claim device</h3>
         <button class="icon-btn" id="register-modal-close-btn" aria-label="Close">&#10005;</button>
       </div>
-      <p class="hint hint-block">For a device that's already on WiFi but unclaimed &mdash; scan the "scan to register" QR code on its screen, or enter its MAC address below. Setting up a brand-new device? Use <a href="/provision">Device Setup</a> instead.</p>
+      <p class="hint hint-block">Scan the "scan to register" QR code on an unclaimed device's screen to claim it &mdash; a MAC address alone isn't enough (every board shares the same vendor prefix, so it's guessable). Already own this device? Enter its MAC below to just update its label. Setting up a brand-new device? Use <a href="/provision">Device Setup</a> instead.</p>
       <div class="row">
         <label>MAC address</label>
         <input type="text" id="new-device-mac" placeholder="aabbccddeeff">

@@ -50,6 +50,11 @@ let commandChar: any = null;
 let scanResultsChar: any = null;
 let simEvents: EventSource | null = null;
 let currentDeviceMac: string | null = null;
+// This device's HMAC secret, present in INFO only while unclaimed (see
+// ble_provisioning.h) — proves this browser actually paired with the physical
+// device over BLE, not just guessed its MAC (every board shares the same
+// vendor OUI). Sent once with the register call below, never displayed.
+let currentDeviceSecret: string | null = null;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -74,6 +79,7 @@ function applyInfo(info: any) {
     "State: <code>" + escapeHtml(info.state) + "</code>";
 
   currentDeviceMac = info.device_mac || null;
+  currentDeviceSecret = info.secret || null;
   el("register-card").style.display = currentDeviceMac ? "block" : "none";
   renderRegisterSection();
 
@@ -189,6 +195,7 @@ function onDisconnected() {
   el("register-card").style.display = "none";
   gattServer = null;
   currentDeviceMac = null;
+  currentDeviceSecret = null;
 }
 
 // ---- Account login status / register-to-account ----
@@ -228,10 +235,14 @@ el("register-btn").addEventListener("click", async () => {
   if (!key || !currentDeviceMac) return;
   const label = el<HTMLInputElement>("register-label").value.trim();
   try {
+    const body: any = { mac: currentDeviceMac, label };
+    // Only present pre-claim (see applyInfo) — omitted entirely once a device
+    // is already registered, same as the manual "Claim device" modal on /admin.
+    if (currentDeviceSecret) body.secret = currentDeviceSecret;
     const res = await fetch("/admin/devices", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
-      body: JSON.stringify({ mac: currentDeviceMac, label }),
+      body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));

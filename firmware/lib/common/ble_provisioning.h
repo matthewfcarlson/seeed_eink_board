@@ -26,7 +26,13 @@
  * GATT schema (service BLE_SERVICE_UUID), all values UTF-8 JSON unless noted:
  *   INFO          (read, notify)  — device_mac, firmware_version, wifi_ssid
  *                                   (password never read back), wifi_configured,
- *                                   server settings, and `state` (idle/scanning/saving).
+ *                                   server settings, `state` (idle/scanning/saving),
+ *                                   and — only while unclaimed — `secret` (this
+ *                                   device's HMAC key, same one the registration
+ *                                   QR carries; lets /provision register the
+ *                                   paired device as proof of possession, not
+ *                                   just a guessed MAC — see
+ *                                   ConfigManager::getDeviceRegistered()).
  *   CONFIG_WRITE  (write)         — partial JSON of any settable field: wifi_ssid,
  *                                   wifi_password, host, port, use_https, endpoint,
  *                                   sleep_minutes, active_start_hour, active_end_hour,
