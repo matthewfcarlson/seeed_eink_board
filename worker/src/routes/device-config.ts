@@ -92,6 +92,11 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
       deviceKey !== DEFAULT_DEVICE_KEY
         ? (await getBucketKeysForDevice(c.env, deviceKey)).map((k) => ({
             bucket_id: k.bucketId,
+            // Which key version this wrap is for (see
+            // migrations/0016_bucket_key_rotation.sql) — a device mid-rotation
+            // can have two entries for the same bucket_id, one per version;
+            // /image_packed's X-Bucket-Key-Version header says which to use.
+            key_version: k.keyVersion,
             ephemeral_pub: k.ephemeralPub,
             nonce: k.nonce,
             ciphertext: k.ciphertext,

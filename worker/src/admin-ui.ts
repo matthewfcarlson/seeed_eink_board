@@ -9,6 +9,11 @@
  * The client-side logic lives in src/client/admin.ts, compiled by
  * scripts/build-client.mjs to public/static/admin.js and served as a static
  * asset (see [assets] in wrangler.toml) — not embedded here as a string.
+ *
+ * Shared visual design lives in public/static/style.css (see that file's
+ * header comment) — every element id below that admin.ts's el(id) reads or
+ * writes must stay exactly as named; only classes/structure around them are
+ * free to change.
  */
 export function renderAdminPage(): string {
   return `<!DOCTYPE html>
@@ -17,117 +22,90 @@ export function renderAdminPage(): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>E-Ink Admin</title>
+<link rel="stylesheet" href="/static/style.css">
 <style>
-  :root { color-scheme: light; }
-  body { font-family: Arial, sans-serif; max-width: 1080px; margin: 32px auto; padding: 0 16px 64px; background: #f6f7f9; color: #222; }
-  h1, h2, h3 { margin-bottom: 0.4rem; }
-  h1 { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 1.5rem; }
-  .card { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
-  .row { margin-bottom: 14px; }
-  label { display: block; font-weight: bold; margin-bottom: 6px; font-size: 0.9em; }
-  input[type="text"], input[type="number"], input[type="password"], select {
-    width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95em;
-  }
-  button { background: #0b67d0; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
-  button:hover { background: #0954ac; }
-  button.danger { background: #c43d31; }
-  button.danger:hover { background: #a13024; }
-  button.ghost { background: transparent; color: #0b67d0; border: 1px solid #0b67d0; }
-  button.ghost:hover { background: #eaf2fc; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .inline-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
-  .inline-form .row { margin-bottom: 0; flex: 1 1 140px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-  th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; vertical-align: top; font-size: 0.9em; }
-  code { background: #eef1f4; border-radius: 4px; padding: 2px 5px; font-size: 0.85em; }
-  img.thumb { display: block; border-radius: 3px; border: 1px solid #ddd; object-fit: cover; }
-  .thumb-wrap { position: relative; display: inline-block; }
-  .thumb-popup {
-    display: none; position: fixed; z-index: 30;
-    background: white; border: 1px solid #ccc; border-radius: 6px; padding: 5px;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
-  }
-  .thumb-wrap:hover .thumb-popup { display: block; }
-  .thumb-popup img { display: block; max-width: 45vw; max-height: 70vh; border-radius: 3px; }
-  .thumb-popup .hint { padding: 10px; margin: 0; }
-  .hint { color: #666; font-size: 0.85em; margin-top: 4px; }
-  .message { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9em; }
-  .success { background: #e7f6ea; border: 1px solid #9bd0a7; }
-  .error { background: #fdecec; border: 1px solid #e2a4a4; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75em; background: #eef1f4; }
-  .bucket-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
-  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 40; align-items: center; justify-content: center; }
-  .modal-overlay.open { display: flex; }
-  .modal { background: white; border-radius: 8px; padding: 20px; max-width: 420px; width: 90%; max-height: 80vh; overflow: auto; }
-  .modal h3 { margin-top: 0; }
-  .bucket-checkbox-list label { display: flex; align-items: center; gap: 8px; font-weight: normal; margin-bottom: 6px; }
-  .collab-list { list-style: none; padding: 0; margin: 8px 0; }
-  .collab-list li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 0.9em; }
-  .top-bar { display: flex; gap: 8px; align-items: center; }
-  .top-bar span { font-size: 0.85em; color: #555; }
   #app { display: none; }
-  #login { max-width: 420px; margin: 60px auto; }
-  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid #ddd; }
-  .tab { padding: 8px 14px; cursor: pointer; font-size: 0.9em; font-weight: bold; color: #666; border-bottom: 2px solid transparent; }
-  .tab.active { color: #0b67d0; border-bottom-color: #0b67d0; }
-  .tab-panel { display: none; }
-  .tab-panel.active { display: block; }
-  details.api-key-fallback { margin-top: 18px; font-size: 0.9em; }
-  details.api-key-fallback summary { cursor: pointer; color: #666; }
-  details.api-key-fallback .row { margin-top: 10px; }
+  #login { max-width: 420px; margin: 64px auto 0; }
+  .login-brand { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .login-brand .brand-dots { grid-template-columns: repeat(3, 9px); grid-template-rows: repeat(2, 9px); gap: 4px; }
+  .login-brand .brand-dots span { width: 9px; height: 9px; }
+  .login-brand h2 { margin: 0; }
+  #form { display: none; }
 </style>
 </head>
 <body>
 
-<div id="login" class="card">
-  <h2>E-Ink Admin</h2>
-  <div id="login-message"></div>
-
-  <div class="tabs">
-    <div class="tab active" id="tab-login" onclick="switchTab('login')">Log in</div>
-    <div class="tab" id="tab-signup" onclick="switchTab('signup')">Create account</div>
-  </div>
-
-  <div class="tab-panel active" id="panel-login">
-    <p class="hint">Log in with the passkey you registered for your account. Your browser/OS will show a picker — there's no username to type.</p>
-    <button id="passkey-login-btn">Log in with passkey</button>
-  </div>
-
-  <div class="tab-panel" id="panel-signup">
-    <p class="hint">No signup form, no email, no password — creating an account just means registering a passkey (Face ID, Touch ID, Windows Hello, or a security key). The passkey is the whole account.</p>
-    <button id="passkey-signup-btn">Create account with passkey</button>
-  </div>
-
-  <details class="api-key-fallback">
-    <summary>Use an API key instead</summary>
-    <div class="row">
-      <label for="api-key-input">API Key</label>
-      <input type="password" id="api-key-input" placeholder="eink_...">
+<div class="page page-narrow" id="login">
+  <div class="card">
+    <div class="login-brand">
+      <div class="brand-dots"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      <h2>E-Ink Admin</h2>
     </div>
-    <button id="login-btn">Log in with API key</button>
-  </details>
+    <div id="login-message"></div>
+
+    <div class="tabs">
+      <div class="tab active" id="tab-login" onclick="switchTab('login')">Log in</div>
+      <div class="tab" id="tab-signup" onclick="switchTab('signup')">Create account</div>
+    </div>
+
+    <div class="tab-panel active" id="panel-login">
+      <p class="hint hint-block">Log in with the passkey you registered for your account. Your browser/OS will show a picker &mdash; there's no username to type.</p>
+      <button id="passkey-login-btn">Log in with passkey</button>
+    </div>
+
+    <div class="tab-panel" id="panel-signup">
+      <p class="hint hint-block">No signup form, no email, no password &mdash; creating an account just means registering a passkey (Face ID, Touch ID, Windows Hello, or a security key). The passkey is the whole account.</p>
+      <button id="passkey-signup-btn">Create account with passkey</button>
+    </div>
+
+    <details class="api-key-fallback">
+      <summary>Use an API key instead</summary>
+      <div class="row">
+        <label for="api-key-input">API Key</label>
+        <input type="password" id="api-key-input" placeholder="eink_...">
+      </div>
+      <button class="subtle" id="login-btn">Log in with API key</button>
+    </details>
+  </div>
 </div>
 
-<div id="app">
-  <h1>
-    E-Ink Admin
-    <span class="top-bar">
+<div class="page" id="app">
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-dots"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      <span class="brand-name">E-Ink Admin</span>
+    </div>
+    <div class="topbar-right">
       <span id="whoami"></span>
-      <button class="ghost" id="logout-btn">Log out</button>
-    </span>
-  </h1>
+      <button class="ghost sm" id="logout-btn">Log out</button>
+    </div>
+  </div>
+
   <div id="app-message"></div>
   <div id="claim-banner"></div>
   <div id="join-bucket-banner"></div>
 
   <div class="card">
-    <h2>Devices</h2>
-    <p class="hint">"Last image sent" is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
-    <table>
-      <thead><tr><th>MAC</th><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
-      <tbody id="devices-table"></tbody>
-    </table>
-    <div class="inline-form" style="margin-top:14px;">
+    <div class="card-head">
+      <h2>Devices</h2>
+      <button class="icon-btn add" id="add-device-btn" aria-label="Set up a new device">+</button>
+    </div>
+    <p class="hint hint-block">New device? The <strong>+</strong> button takes you to Device Setup, which pairs over Bluetooth and registers it to this account in one step. "Last image sent" below is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>MAC</th><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
+        <tbody id="devices-table"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="register-modal-overlay">
+    <div class="modal">
+      <div class="card-head">
+        <h3>Claim device</h3>
+        <button class="icon-btn" id="register-modal-close-btn" aria-label="Close">&#10005;</button>
+      </div>
+      <p class="hint hint-block">For a device that's already on WiFi but unclaimed &mdash; scan the "scan to register" QR code on its screen, or enter its MAC address below. Setting up a brand-new device? Use <a href="/provision">Device Setup</a> instead.</p>
       <div class="row">
         <label>MAC address</label>
         <input type="text" id="new-device-mac" placeholder="aabbccddeeff">
@@ -136,28 +114,39 @@ export function renderAdminPage(): string {
         <label>Label</label>
         <input type="text" id="new-device-label" placeholder="Kitchen frame">
       </div>
-      <button id="register-device-btn">Register Device</button>
+      <button id="register-device-btn">Register device</button>
     </div>
   </div>
 
   <div class="card">
-    <h2>Image Buckets</h2>
-    <p class="hint">Buckets are independent, shareable groups of images. Subscribe a device to any number of them via its "Manage" button above.</p>
+    <h2>Image buckets</h2>
+    <p class="hint hint-block">Buckets are independent, shareable photo albums that rotate on the frame. Subscribe a device to any number of them via its "Manage" button above.</p>
     <div class="inline-form">
       <div class="row">
-        <label>New bucket label</label>
+        <label>New bucket name</label>
         <input type="text" id="new-bucket-label" placeholder="Living room rotation">
       </div>
       <button id="create-bucket-btn">Create bucket</button>
     </div>
+    <div class="row checkbox-row" id="new-bucket-public-row" style="display:none; margin-top:10px;">
+      <input type="checkbox" id="new-bucket-public-checkbox">
+      <label for="new-bucket-public-checkbox" style="margin:0;">Make this public (readable by every account on this server)</label>
+    </div>
   </div>
-  <div class="bucket-grid" id="buckets"></div>
+  <h3 id="buckets-mine-heading" style="display:none;">My buckets</h3>
+  <div id="buckets-mine"></div>
+  <h3 id="buckets-shared-heading" style="display:none; margin-top:26px;">Shared with me</h3>
+  <p class="hint hint-block" id="buckets-shared-hint" style="display:none;">Owned by someone else, shared with your account. You can upload and delete photos and assign it to your own devices — only the owner can rename, delete, or manage sharing.</p>
+  <div id="buckets-shared"></div>
+  <h3 id="buckets-public-heading" style="display:none; margin-top:26px;">Public buckets</h3>
+  <p class="hint hint-block" id="buckets-public-hint" style="display:none;">Owned by someone else, but readable by any account. You can view their photos and assign them to your own devices — only the owner can add, delete, rename, or share them.</p>
+  <div id="buckets-public"></div>
 
   <div class="modal-overlay" id="bucket-modal-overlay">
     <div class="modal">
       <h3>Manage buckets</h3>
       <div id="bucket-modal-list"></div>
-      <div class="inline-form" style="margin-top:14px;">
+      <div class="inline-form" style="margin-top:16px;">
         <button id="bucket-modal-save-btn">Save</button>
         <button class="ghost" id="bucket-modal-cancel-btn">Cancel</button>
       </div>
@@ -168,57 +157,99 @@ export function renderAdminPage(): string {
     <div class="modal">
       <h3>Schedule override</h3>
       <div id="schedule-modal-content"></div>
-      <div class="inline-form" style="margin-top:14px;">
+      <div class="inline-form" style="margin-top:16px;">
         <button class="ghost" id="schedule-modal-close-btn">Close</button>
       </div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Firmware (OTA)</h2>
-    <p class="hint">Devices on the "stable" channel always run whichever release below was synced most recently for their own board &mdash; there's no picking a specific version. "beta" doesn't do anything yet (no beta channel exists).</p>
-    <table>
-      <thead><tr><th>Board</th><th>Version</th><th>Tag</th><th>Size</th><th>SHA-256</th><th>Synced</th></tr></thead>
-      <tbody id="firmware-releases-table"></tbody>
-    </table>
-    <div class="inline-form" style="margin-top:14px;">
-      <button id="firmware-sync-btn">Sync from GitHub</button>
-      <span class="hint">Also runs automatically every 6 hours.</span>
-    </div>
-
-    <h3 style="margin-top:22px;">Channels</h3>
-    <p class="hint">Each device only ever updates when a channel is set for its own MAC &mdash; there's no shared fallback. Clearing a device's channel leaves it on whatever it's already running.</p>
-    <table>
-      <thead><tr><th>Target</th><th>Channel</th><th>Updated</th><th></th></tr></thead>
-      <tbody id="firmware-targets-table"></tbody>
-    </table>
-    <div class="inline-form" style="margin-top:14px;">
-      <div class="row">
-        <label>Target</label>
-        <select id="firmware-target-select"></select>
+  <div class="modal-overlay" id="rotate-modal-overlay">
+    <div class="modal">
+      <h3 id="rotate-modal-title">Rotating bucket key</h3>
+      <div id="rotate-modal-body"></div>
+      <div class="inline-form" style="margin-top:16px;">
+        <button class="ghost" id="rotate-modal-close-btn">Close</button>
       </div>
-      <div class="row">
-        <label>Channel</label>
-        <select id="firmware-channel-select">
-          <option value="stable">stable</option>
-          <option value="beta">beta (no-op for now)</option>
-        </select>
-      </div>
-      <button id="firmware-target-save-btn">Set Channel</button>
     </div>
+  </div>
 
-    <h3 style="margin-top:22px;">Crash &amp; Rollback Reports</h3>
-    <p class="hint">Filled in automatically when a device panics, watchdog-resets, or an OTA gets rolled back after failing to confirm itself healthy. Backtrace entries are raw program-counter addresses from the on-device core dump — symbolize them against a matching .elf build for more than the version/reason.</p>
-    <table>
-      <thead><tr><th>Device</th><th>Version</th><th>Reason</th><th>Rolled back</th><th>Backtrace</th><th>Received</th></tr></thead>
-      <tbody id="crash-reports-table"></tbody>
-    </table>
+  <div class="modal-overlay" id="upload-modal-overlay">
+    <div class="modal modal-wide">
+      <div class="card-head">
+        <h3 id="upload-modal-title">Add a photo</h3>
+        <button class="icon-btn" id="upload-modal-close-btn" aria-label="Close">&#10005;</button>
+      </div>
+      <div id="upload-modal-body"></div>
+    </div>
+  </div>
+
+  <div class="lightbox-overlay" id="lightbox-overlay">
+    <button class="icon-btn lightbox-close" id="lightbox-close-btn" aria-label="Close">&#10005;</button>
+    <div class="lightbox-body">
+      <div id="lightbox-content"></div>
+      <div class="lightbox-caption" id="lightbox-caption"></div>
+    </div>
+  </div>
+
+  <div class="card accordion" id="firmware-accordion">
+    <div class="card-head accordion-toggle" onclick="toggleAccordion('firmware-accordion')">
+      <div>
+        <h2>Firmware (OTA)</h2>
+        <p class="hint" style="margin:2px 0 0;">Releases, update channels, and crash reports</p>
+      </div>
+      <span class="chevron">&#9662;</span>
+    </div>
+    <div class="accordion-body" id="firmware-accordion-body">
+      <p class="hint hint-block">Devices on the "stable" channel always run whichever release below was synced most recently for their own board &mdash; there's no picking a specific version. "beta" doesn't do anything yet (no beta channel exists).</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Board</th><th>Version</th><th>Tag</th><th>Size</th><th>SHA-256</th><th>Synced</th></tr></thead>
+          <tbody id="firmware-releases-table"></tbody>
+        </table>
+      </div>
+      <div class="inline-form" style="margin-top:14px;">
+        <button class="subtle" id="firmware-sync-btn">Sync from GitHub</button>
+        <span class="hint">Also runs automatically every 6 hours.</span>
+      </div>
+
+      <h3 style="margin-top:26px;">Channels</h3>
+      <p class="hint hint-block">Each device only ever updates when a channel is set for its own MAC &mdash; there's no shared fallback. Clearing a device's channel leaves it on whatever it's already running.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Target</th><th>Channel</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="firmware-targets-table"></tbody>
+        </table>
+      </div>
+      <div class="inline-form" style="margin-top:14px;">
+        <div class="row">
+          <label>Target</label>
+          <select id="firmware-target-select"></select>
+        </div>
+        <div class="row">
+          <label>Channel</label>
+          <select id="firmware-channel-select">
+            <option value="stable">stable</option>
+            <option value="beta">beta (no-op for now)</option>
+          </select>
+        </div>
+        <button id="firmware-target-save-btn">Set channel</button>
+      </div>
+
+      <h3 style="margin-top:26px;">Crash &amp; rollback reports</h3>
+      <p class="hint hint-block">Filled in automatically when a device panics, watchdog-resets, or an OTA gets rolled back after failing to confirm itself healthy. Backtrace entries are raw program-counter addresses from the on-device core dump &mdash; symbolize them against a matching .elf build for more than the version/reason.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Device</th><th>Version</th><th>Reason</th><th>Rolled back</th><th>Backtrace</th><th>Received</th></tr></thead>
+          <tbody id="crash-reports-table"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <div class="card">
-    <h3>API Key</h3>
-    <p class="hint">Rotating your key immediately invalidates the old one — anything using it (scripts, the firmware config page) will need the new value.</p>
-    <button class="ghost" id="rotate-key-btn">Rotate API Key</button>
+    <h3>API key</h3>
+    <p class="hint hint-block">Rotating your key immediately invalidates the old one &mdash; anything using it (scripts, the firmware config page) will need the new value.</p>
+    <button class="ghost" id="rotate-key-btn">Rotate API key</button>
   </div>
 
   <div class="card">

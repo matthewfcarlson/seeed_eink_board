@@ -1,3 +1,16 @@
 sim-ee02
 sim-ee04
 .state/
+
+# tools/*.cpp are one-off verification harnesses for the encrypted-buckets
+# crypto (see CLAUDE.md's "Encrypted Image Buckets" section) - real source,
+# tracked. Their compiled binaries and the throwaway test-vector fixtures
+# they read (regenerated fresh each time they're run, several MB of binary
+# blobs with zero standalone value) are not.
+tools/*.bin
+tools/vectors/
+tools/gcm_vectors/
+tools/combined_vectors/
+tools/test_tinfl_stream
+tools/test_gcm_stream
+tools/test_decrypt_inflate_pipeline

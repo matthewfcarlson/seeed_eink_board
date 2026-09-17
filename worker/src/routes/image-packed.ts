@@ -97,6 +97,15 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
         // the bucket_keys it already unwrapped from /device_config to pick
         // the right AES-256-GCM key before decrypting.
         "X-Bucket-Id": pending.image.sourceDeviceKey,
+        // Which of that bucket's key versions this specific image is encrypted
+        // under (see migrations/0016_bucket_key_rotation.sql) — mid-rotation a
+        // device can hold both an old and a new wrapped key for the same
+        // bucket_id, so it needs this to pick the right one.
+        "X-Bucket-Key-Version": String(pending.image.keyVersion),
+        // 'identity' or 'deflate-raw' - see migrations/0017_packed_encoding.sql. Tells
+        // device_app.h's fetchAndDisplayImage() whether to stream ciphertext straight
+        // into the display buffer (identity) or decrypt+inflate it chunk-by-chunk.
+        "X-Packed-Encoding": pending.image.packedEncoding,
       },
     });
   });

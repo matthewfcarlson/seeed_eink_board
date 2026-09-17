@@ -13,7 +13,19 @@
  * INFO/CONFIG_WRITE/COMMAND/SCAN_RESULTS JSON contract either way; only
  * connect/disconnect/write plumbing branches on `simOrigin` below. No
  * behavior change to the real BLE path when the param is absent.
+ *
+ * Web Bluetooth doesn't exist on iOS Safari at all (WebKit's own
+ * limitation) — `@beacio/core/auto` patches `navigator.bluetooth` in on
+ * Safari (via the Beacio companion app/Safari extension, see
+ * https://beacio.com) and, where no real or extension-backed Bluetooth is
+ * available at all, installs a stub whose `requestDevice()` shows Beacio's
+ * own install prompt and rejects — so the existing `connectBle()` catch
+ * block below surfaces that rejection like any other failed connect, no
+ * bespoke UA-sniffing needed here. No apiKey is configured, which keeps
+ * this to the polyfill only — no telemetry calls fire without one.
  */
+import "@beacio/core/auto";
+
 export {};
 
 const SERVICE_UUID = "00dc0948-cda5-4429-b7f3-5ea67f1b1347";
@@ -24,12 +36,20 @@ const CHAR_SCAN_RESULTS_UUID = "97c497fa-7e94-4fe6-bad2-68ffd9d34d5e";
 
 const simOrigin = new URLSearchParams(window.location.search).get("sim");
 
+// Same localStorage key admin.ts's KEY_STORAGE uses — this page and /admin
+// are served from the same origin, so a passkey login there is already
+// visible here, letting this page register a paired device straight to that
+// account without a separate login step.
+const KEY_STORAGE = "eink_admin_api_key";
+function getApiKey(): string | null { return localStorage.getItem(KEY_STORAGE); }
+
 let gattServer: any = null;
 let infoChar: any = null;
 let configWriteChar: any = null;
 let commandChar: any = null;
 let scanResultsChar: any = null;
 let simEvents: EventSource | null = null;
+let currentDeviceMac: string | null = null;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -52,6 +72,10 @@ function applyInfo(info: any) {
     "MAC: <code>" + escapeHtml(info.device_mac) + "</code> &middot; " +
     "Firmware: <code>" + escapeHtml(info.firmware_version) + "</code> &middot; " +
     "State: <code>" + escapeHtml(info.state) + "</code>";
+
+  currentDeviceMac = info.device_mac || null;
+  el("register-card").style.display = currentDeviceMac ? "block" : "none";
+  renderRegisterSection();
 
   el<HTMLInputElement>("wifi-ssid").value = info.wifi_ssid || "";
   el<HTMLInputElement>("host").value = info.host || "";
@@ -162,8 +186,63 @@ function onDisconnected() {
   showMessage("Disconnected. If you just saved, the device is rebooting and connecting to your WiFi.", "info");
   el("connect-card").style.display = "block";
   el("form").style.display = "none";
+  el("register-card").style.display = "none";
   gattServer = null;
+  currentDeviceMac = null;
 }
+
+// ---- Account login status / register-to-account ----
+
+let loggedInUser: { id: string; display_name: string | null } | null = null;
+
+async function refreshLoginStatus() {
+  const key = getApiKey();
+  if (!key) {
+    loggedInUser = null;
+    el("login-status").innerHTML = '<a href="/admin">Log in</a>';
+    renderRegisterSection();
+    return;
+  }
+  try {
+    const res = await fetch("/admin/me", { headers: { Authorization: "Bearer " + key } });
+    if (!res.ok) throw new Error("invalid key");
+    loggedInUser = await res.json();
+    el("login-status").textContent = loggedInUser?.display_name
+      ? "Logged in as " + loggedInUser.display_name
+      : "Logged in";
+  } catch {
+    loggedInUser = null;
+    el("login-status").innerHTML = '<a href="/admin">Log in</a>';
+  }
+  renderRegisterSection();
+}
+
+function renderRegisterSection() {
+  if (!currentDeviceMac) return;
+  el("register-logged-in").style.display = loggedInUser ? "block" : "none";
+  el("register-logged-out").style.display = loggedInUser ? "none" : "block";
+}
+
+el("register-btn").addEventListener("click", async () => {
+  const key = getApiKey();
+  if (!key || !currentDeviceMac) return;
+  const label = el<HTMLInputElement>("register-label").value.trim();
+  try {
+    const res = await fetch("/admin/devices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: JSON.stringify({ mac: currentDeviceMac, label }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));
+    el("register-message").innerHTML = '<div class="message success">Registered to your account.</div>';
+  } catch (err: any) {
+    el("register-message").innerHTML =
+      '<div class="message error">Failed to register: ' + escapeHtml(err.message) + "</div>";
+  }
+});
+
+void refreshLoginStatus();
 
 el("connect-btn").addEventListener("click", connect);
 
@@ -228,6 +307,9 @@ if (simOrigin) {
   // No device picker for a fake HTTP transport - just connect immediately.
   void connectSim();
 } else if (!(navigator as any).bluetooth) {
+  // @beacio/core/auto installs a stub navigator.bluetooth on essentially
+  // every browser (real, extension-backed, or its own install-prompting
+  // dummy) - this only fires in the (now rare) case none of those apply.
   el("unsupported").style.display = "block";
   el<HTMLButtonElement>("connect-btn").disabled = true;
 }

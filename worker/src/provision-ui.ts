@@ -7,8 +7,12 @@
  * secrets pass through this worker (the browser talks to the board directly
  * over BLE).
  *
- * Requires Chrome/Edge (desktop or Android) — Web Bluetooth isn't supported in
- * Safari/iOS, a limitation of the browser API itself, not this page.
+ * Works in Chrome/Edge (desktop or Android) natively. Safari/iOS has no Web
+ * Bluetooth API of its own (a limitation of the browser, not this page) —
+ * src/client/provision.ts pulls in the Beacio polyfill (@beacio/core/auto,
+ * see https://beacio.com) to cover that case instead of just turning those
+ * visitors away; it prompts to install its companion app/extension itself
+ * when needed.
  *
  * The client-side logic lives in src/client/provision.ts, compiled by
  * scripts/build-client.mjs to public/static/provision.js and served as a
@@ -21,41 +25,35 @@ export function renderProvisionPage(): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>E-Ink Device Setup</title>
+<link rel="stylesheet" href="/static/style.css">
 <style>
-  :root { color-scheme: light; }
-  body { font-family: Arial, sans-serif; max-width: 560px; margin: 32px auto; padding: 0 16px 64px; background: #f6f7f9; color: #222; }
-  h1 { font-size: 1.5rem; margin-bottom: 4px; }
-  .hint { color: #666; font-size: 0.85em; margin-top: 4px; }
-  .card { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
-  .row { margin-bottom: 14px; }
-  label { display: block; font-weight: bold; margin-bottom: 6px; font-size: 0.9em; }
-  input[type="text"], input[type="number"], input[type="password"], select {
-    width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95em;
-  }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; }
-  .checkbox-row input { width: auto; }
-  button { background: #0b67d0; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 0.95em; }
-  button:hover { background: #0954ac; }
-  button.ghost { background: transparent; color: #0b67d0; border: 1px solid #0b67d0; }
-  button.ghost:hover { background: #eaf2fc; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .message { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9em; }
-  .success { background: #e7f6ea; border: 1px solid #9bd0a7; }
-  .error { background: #fdecec; border: 1px solid #e2a4a4; }
-  .info { background: #eaf2fc; border: 1px solid #b8d4f5; }
-  code { background: #eef1f4; border-radius: 4px; padding: 2px 5px; font-size: 0.85em; }
-  #device-info { font-size: 0.85em; color: #555; }
+  #device-info { font-size: 0.85em; color: var(--ink-soft); }
   #form { display: none; }
+  #register-card { display: none; }
+  .brand-link { text-decoration: none; color: inherit; }
+  #login-status { font-size: 0.88em; }
+  #login-status a { color: inherit; font-weight: 700; }
 </style>
 </head>
 <body>
 
+<div class="page page-narrow">
+
+<div class="topbar">
+  <a class="brand brand-link" href="/">
+    <div class="brand-dots"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+    <span class="brand-name">E-Ink Setup</span>
+  </a>
+  <div class="topbar-right">
+    <span id="login-status"></span>
+  </div>
+</div>
+
 <h1>E-Ink Device Setup</h1>
-<p class="hint">Pairs directly with the board over Bluetooth &mdash; hold Button 1 during boot (or on first boot with no WiFi configured) to enter setup mode, then connect below.</p>
+<p class="hint hint-block">Pairs directly with the board over Bluetooth &mdash; hold Button 1 during boot (or on first boot with no WiFi configured) to enter setup mode, then connect below.</p>
 
 <div id="unsupported" class="message error" style="display:none;">
-  This browser doesn't support Web Bluetooth. Use an up-to-date Chrome or Edge on desktop or Android &mdash; Safari/iOS doesn't support it.
+  This browser doesn't support Web Bluetooth, even with the <a href="https://beacio.com" target="_blank" rel="noopener">Beacio</a> polyfill. Try an up-to-date Chrome or Edge on desktop or Android instead.
 </div>
 
 <div id="top-message"></div>
@@ -65,10 +63,24 @@ export function renderProvisionPage(): string {
   <p class="hint">Your browser will show a picker listing nearby devices named "EInk-Setup".</p>
 </div>
 
-<div class="card" id="form">
+<div class="card" id="register-card">
+  <h2>Register to your account</h2>
   <div id="device-info"></div>
+  <div id="register-message"></div>
+  <div id="register-logged-out" class="hint hint-block" style="display:none;">
+    <a href="/admin">Log in</a> to register this device to your account.
+  </div>
+  <div id="register-logged-in" style="display:none;">
+    <div class="row">
+      <label>Label</label>
+      <input type="text" id="register-label" placeholder="Kitchen frame">
+    </div>
+    <button id="register-btn">Register device</button>
+  </div>
+</div>
 
-  <div class="row" style="margin-top:14px;">
+<div class="card" id="form">
+  <div class="row">
     <label>WiFi Network</label>
     <div class="inline-form">
       <select id="wifi-ssid-select" style="flex:1;"><option value="">(scan or type below)</option></select>
@@ -120,6 +132,7 @@ export function renderProvisionPage(): string {
   </div>
 </div>
 
+</div>
 <script src="/static/provision.js"></script>
 </body>
 </html>`;

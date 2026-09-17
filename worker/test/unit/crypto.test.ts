@@ -100,7 +100,7 @@ describe("AES-256-GCM blob encrypt/decrypt", () => {
     const key = await generateBucketKey();
     const blob = await aesGcmEncryptBlob(key, new Uint8Array([9, 9, 9]));
     const tampered = new Uint8Array(blob);
-    tampered[tampered.length - 1] ^= 0xff; // flip a bit in the GCM tag
+    tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 0xff; // flip a bit in the GCM tag
     await expect(aesGcmDecryptBlob(key, tampered)).rejects.toThrow();
   });
 

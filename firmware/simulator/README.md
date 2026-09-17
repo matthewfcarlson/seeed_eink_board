@@ -73,7 +73,7 @@ code with.
 ## Flags
 
 ```
-./sim-ee02 [--server <url>] [--reset] [--export <path.jpg>]
+./sim-ee02 [--server <url>] [--reset] [--export <path.jpg>] [--wifi <ssid>]
 
 --server   Base URL of the worker to hit. Default: http://localhost:8787
            (a local wrangler dev instance). Applied every run, overriding
@@ -90,11 +90,39 @@ code with.
            window. Only captures what a *completed* setup() cycle leaves on
            the buffer, so it won't produce anything for a device stuck
            waiting in config mode for a save (see "Known limitations").
+--wifi     Test-automation-only shortcut: sets WiFi credentials directly via
+           ConfigManager::setWifiCredentials(), skipping config mode/BLE
+           provisioning entirely. Real hardware only ever gets WiFi
+           credentials over Bluetooth (see "How provisioning works" below);
+           this exists so a scripted e2e test (see "End-to-end tests" below)
+           doesn't have to speak the GATT-over-HTTP contract just to get a
+           device out of config mode. stubs/WiFi.h's begin()/status() ignore
+           the credentials' actual content and always report WL_CONNECTED,
+           so any non-empty SSID works.
 ```
 
 `make BOARD=ee04` builds the other board the same way; each has its own
 persisted state and fixed simulated MAC, so `./sim-ee02` and `./sim-ee04` can
 run at once against the same local wrangler instance.
+
+## End-to-end tests
+
+`worker/test/e2e/registration-and-image-flow.test.ts` drives this simulator
+from Node (via `child_process`, not a browser) against a real, throwaway
+`wrangler dev` instance to exercise the full self-registration + encrypted-
+image-display flow described in root CLAUDE.md: unclaimed boot → QR
+registration screen → claim → create a bucket + upload an image → assign the
+bucket to the device → device fetches/decrypts/displays it. It builds this
+directory's `sim-ee02` binary itself (`worker/test/e2e/lib/simulator.ts`),
+so it needs this directory's own build prerequisites (macOS, SDL2, clang++)
+in addition to Node - run it with `npm run test:e2e` from `worker/`, not as
+part of the default `npm test`. It uses `--wifi` (see "Flags" above) to skip
+BLE provisioning, and a virtual software WebAuthn authenticator
+(`worker/test/e2e/lib/virtual-authenticator.ts`) to create an admin account
+without a browser, since a real passkey ceremony is the only way in
+(`worker/src/routes/auth-passkey.ts`). Every other piece of admin-side
+crypto (bucket key generation, ECIES wrapping for the device) calls the real
+`worker/src/client/crypto.ts` functions, not a re-implementation.
 
 ## How provisioning works
 
@@ -133,6 +161,16 @@ calls `setup()` again — the closest native equivalent to a real reset.
   `/crash_report` is never triggered either — there's nothing to crash.
 - **No real WiFi scan.** `stubs/WiFi.h`'s "scan" returns three fixed fake
   networks after a short delay.
+- **`RTC_DATA_ATTR` doesn't survive across separate `--export` process
+  invocations.** Real deep sleep keeps RAM (and so `RtcState`) powered; so
+  does staying in this simulator's own single long-running process (its
+  outer loop just calls `setup()` again - see "How provisioning works"
+  above). But each `./sim-ee02 ... --export x.jpg` run is a fresh OS
+  process, closer to a real power-cycle than a deep-sleep wake - a script
+  that calls it repeatedly (see "End-to-end tests" above) will see
+  `rtc.lastImageHash` reset every time, so it can exercise the
+  known_hash/304 change-detection path's *server* side but not observe the
+  device skipping a re-download because of it.
 - **macOS only.** `stubs/mbedtls/*.h` wrap CommonCrypto directly, matching
   this project's one dev machine — the same scope assumption epaper_clock's
   Homebrew SDL2 paths already make.

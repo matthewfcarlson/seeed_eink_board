@@ -5,7 +5,7 @@ import { invalidateDeviceCache } from "../../lib/auth-device";
 import { getRotationSnapshot, invalidateRotationCache } from "../../lib/rotation";
 import { getThumbnailCiphertextB64 } from "../../lib/image-store";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { assertBucketAccess } from "../../lib/bucket-access";
+import { assertBucketReadAccess } from "../../lib/bucket-access";
 import { deleteBucketKey, parseWrappedBucketKey, upsertBucketKey } from "../../lib/bucket-keys";
 
 // The device's self-generated HMAC key (hex), scanned off its own display via the
@@ -137,11 +137,16 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
   });
 
   // Replaces this device's full bucket subscription set. Every id must be
-  // accessible to the caller (owned or shared) — see lib/bucket-access.ts.
+  // readable by the caller — owned, shared, or public (migrations/
+  // 0018_public_buckets.sql) — see lib/bucket-access.ts's assertBucketReadAccess.
   // `keys`: the caller's own wrap of each bucket's raw key for this device's
   // sharing_public_key (see client/crypto.ts's wrapKeyFor) — the Worker never
-  // computes these itself, it only stores what the browser (which already
-  // holds the raw key for every bucket_id it's allowed to assign) hands it.
+  // computes these itself, it only stores what the browser hands it. For an
+  // owned/shared bucket the browser already holds the raw key via its own
+  // bucket_keys wrap; for a public bucket it doesn't own, it reads the raw
+  // key straight from that bucket's public_key_raw instead (surfaced by
+  // GET /admin/buckets) — same wrapKeyFor call either way, so this route
+  // can't tell (and doesn't need to) which source a given key came from.
   // Required for every bucket_id in the new set; buckets dropped from the set
   // have their now-stale device key cleaned up (cosmetic, not a real
   // revocation — see root CLAUDE.md's Non-goals).
@@ -162,13 +167,26 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
     const bucketIds = [...new Set(body.bucket_ids)];
     const wrappedKeys = new Map<string, ReturnType<typeof parseWrappedBucketKey>>();
+    const bucketKeyVersions = new Map<string, number>();
     for (const bucketId of bucketIds) {
-      if (!(await assertBucketAccess(c.env, bucketId, c.var.user.id))) {
+      // Read-shaped: a caller may assign a public bucket they don't own to
+      // their own device — this only reads that bucket's key (already public),
+      // never writes anything to the bucket itself. See lib/bucket-access.ts.
+      if (!(await assertBucketReadAccess(c.env, bucketId, c.var.user.id))) {
         return c.json({ error: `Forbidden: no access to bucket ${bucketId}` }, 403);
       }
       const key = parseWrappedBucketKey(body.keys?.[bucketId]);
       if (!key) return c.json({ error: `keys.${bucketId} (wrapped bucket key for this device) is required` }, 400);
       wrappedKeys.set(bucketId, key);
+      // Assigning a bucket always wraps its CURRENT version's key for the
+      // device — mid-rotation that's still the old version until finalize
+      // bumps buckets.key_version, which is correct: a newly-assigned device
+      // needs whatever version the bucket's images are actually encrypted
+      // under right now.
+      const bucket = await c.env.DB.prepare("SELECT key_version FROM buckets WHERE id = ?")
+        .bind(bucketId)
+        .first<{ key_version: number }>();
+      bucketKeyVersions.set(bucketId, bucket?.key_version ?? 1);
     }
 
     const previousBucketIds = await c.env.DB.prepare("SELECT bucket_id FROM device_buckets WHERE device_mac = ?")
@@ -181,7 +199,9 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
         c.env.DB.prepare("INSERT INTO device_buckets (device_mac, bucket_id) VALUES (?, ?)").bind(mac, bucketId)
       ),
     ]);
-    await Promise.all(bucketIds.map((bucketId) => upsertBucketKey(c.env, bucketId, "device", mac, wrappedKeys.get(bucketId)!)));
+    await Promise.all(
+      bucketIds.map((bucketId) => upsertBucketKey(c.env, bucketId, "device", mac, wrappedKeys.get(bucketId)!, bucketKeyVersions.get(bucketId)!))
+    );
     const droppedBucketIds = previousBucketIds.results.map((r) => r.bucket_id).filter((id) => !bucketIds.includes(id));
     await Promise.all(droppedBucketIds.map((bucketId) => deleteBucketKey(c.env, bucketId, "device", mac)));
 

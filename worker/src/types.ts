@@ -1,3 +1,5 @@
+import type { PackedEncoding } from "./lib/media-constants";
+
 export interface Env {
   DB: D1Database;
   KV: KVNamespace;
@@ -14,10 +16,20 @@ export interface ImageMeta {
   filename: string;
   packedHash: string;
   packedBytes: number;
+  // 'identity' or 'deflate-raw' - see lib/media-constants.ts's PackedEncoding
+  // and migrations/0017_packed_encoding.sql. Tells /image_packed (via the
+  // X-Packed-Encoding response header) and firmware which decode path to use.
+  packedEncoding: PackedEncoding;
   // Which of the device's subscribed buckets this image's KV blobs actually live
   // under (a device can subscribe to several — see device_buckets in schema.sql) —
   // see rotation.ts.
   sourceDeviceKey: string;
+  // Which key version this image's KV blobs are actually encrypted under right
+  // now (see migrations/0016_bucket_key_rotation.sql) — carried through to
+  // /image_packed's X-Bucket-Key-Version header so a device mid-rotation (still
+  // holding both an old and new bucket key) knows which one decrypts this
+  // particular image.
+  keyVersion: number;
 }
 
 export interface RotationSnapshot {

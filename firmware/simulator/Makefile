@@ -20,7 +20,7 @@ SDL_LIBS   := $(shell sdl2-config --libs)
 # default but is explicitly turned back off - we don't use either, and
 # stubbing them (a real Stream/Print base class) isn't worth it for no gain.
 CXXFLAGS = -std=c++17 -Wall -Wno-unused-function -Wno-unused-variable \
-           -Wno-deprecated-declarations -Wno-format-security \
+           -Wno-deprecated-declarations -Wno-format-security -Wno-deprecated \
            -DARDUINO=10812 -DARDUINOJSON_ENABLE_ARDUINO_STRING=1 \
            -DARDUINOJSON_ENABLE_ARDUINO_STREAM=0 -DARDUINOJSON_ENABLE_ARDUINO_PRINT=0 \
            -DARDUINOJSON_ENABLE_PROGMEM=0 \
@@ -65,6 +65,7 @@ SRCS = main_native.cpp \
        ../lib/common/ble_provisioning.cpp \
        ../lib/common/ota_health.cpp \
        ../lib/common/config_manager.cpp \
+       ../lib/common/tinfl.c \
        gatt_bridge.cpp \
        display_render.cpp \
        $(BOARD_SRC_DIR)/display.cpp

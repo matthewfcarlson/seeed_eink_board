@@ -1,10 +1,10 @@
 import type { Context, Next } from "hono";
 import type { Env } from "../types";
-import { authenticateAdmin } from "./auth-admin";
+import { authenticateAdmin, type AuthenticatedUser } from "./auth-admin";
 
 declare module "hono" {
   interface ContextVariableMap {
-    user: { id: string };
+    user: AuthenticatedUser;
   }
 }
 

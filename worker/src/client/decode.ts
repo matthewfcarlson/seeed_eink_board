@@ -11,20 +11,43 @@ import { rotate90CW } from "../lib/decode";
  */
 
 /**
- * Decode -> EXIF-correct -> cover-fit to portrait 1200x1600 (centered
- * horizontally, anchored to the top — same framing as the old server-side
- * `ImageOps.fit(centering=(0.5, 0.0))`). Exported on its own so the upload flow
- * can generate the dashboard thumbnail from this exact crop, in natural
- * upright orientation, before the 90° rotation below.
+ * Where within the cover-fit image the 1200x1600 portrait crop is taken from.
+ * `zoom >= 1` multiplies the minimum cover-fit scale (1 = as tight a fit as
+ * possible with no dead space); `panX`/`panY` in [0, 1] pick where within the
+ * resulting excess width/height the crop window sits (0 = left/top edge of
+ * the scaled image, 1 = right/bottom edge, 0.5 = centered). The old fixed
+ * behavior — centered horizontally, anchored to the top, no zoom — is exactly
+ * `{ panX: 0.5, panY: 0, zoom: 1 }`, kept as the default so callers that don't
+ * care about crop placement (or can't offer a picker) see no change. Driven
+ * interactively by admin.ts's crop tool; see its `CropState`.
  */
-async function decodeToPortraitBuffer(file: Blob): Promise<{ rgba: Uint8ClampedArray; width: number; height: number }> {
+export interface CropParams {
+  panX: number;
+  panY: number;
+  zoom: number;
+}
+export const DEFAULT_CROP: CropParams = { panX: 0.5, panY: 0, zoom: 1 };
+
+/**
+ * Decode -> EXIF-correct -> cover-fit to portrait 1200x1600, cropped per
+ * `crop` (see CropParams). Exported on its own so the upload flow can
+ * generate the dashboard thumbnail from this exact crop, in natural upright
+ * orientation, before the 90° rotation below.
+ */
+async function decodeToPortraitBuffer(
+  file: Blob,
+  crop: CropParams
+): Promise<{ rgba: Uint8ClampedArray; width: number; height: number }> {
   const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
   try {
     const { width, height } = bitmap;
-    const scale = Math.max(PORTRAIT_WIDTH / width, PORTRAIT_HEIGHT / height);
+    const scale = Math.max(PORTRAIT_WIDTH / width, PORTRAIT_HEIGHT / height) * Math.max(1, crop.zoom);
     const scaledW = Math.max(PORTRAIT_WIDTH, Math.round(width * scale));
     const scaledH = Math.max(PORTRAIT_HEIGHT, Math.round(height * scale));
-    const x1 = Math.max(0, Math.floor((scaledW - PORTRAIT_WIDTH) / 2));
+    const excessX = scaledW - PORTRAIT_WIDTH;
+    const excessY = scaledH - PORTRAIT_HEIGHT;
+    const x1 = Math.round(excessX * Math.min(1, Math.max(0, crop.panX)));
+    const y1 = Math.round(excessY * Math.min(1, Math.max(0, crop.panY)));
 
     const canvas = new OffscreenCanvas(PORTRAIT_WIDTH, PORTRAIT_HEIGHT);
     const ctx = canvas.getContext("2d");
@@ -33,8 +56,8 @@ async function decodeToPortraitBuffer(file: Blob): Promise<{ rgba: Uint8ClampedA
     ctx.imageSmoothingQuality = "high";
     // Scale first (draw at scaledW x scaledH), then crop by offsetting the
     // draw so the excess falls outside the PORTRAIT_WIDTH x PORTRAIT_HEIGHT
-    // canvas — centered horizontally, top-anchored (no vertical offset).
-    ctx.drawImage(bitmap, -x1, 0, scaledW, scaledH);
+    // canvas, per panX/panY.
+    ctx.drawImage(bitmap, -x1, -y1, scaledW, scaledH);
 
     const imageData = ctx.getImageData(0, 0, PORTRAIT_WIDTH, PORTRAIT_HEIGHT);
     return { rgba: imageData.data, width: PORTRAIT_WIDTH, height: PORTRAIT_HEIGHT };
@@ -43,7 +66,7 @@ async function decodeToPortraitBuffer(file: Blob): Promise<{ rgba: Uint8ClampedA
   }
 }
 
-export async function decodeToLandscapeBuffer(file: Blob): Promise<{
+export async function decodeToLandscapeBuffer(file: Blob, crop: CropParams = DEFAULT_CROP): Promise<{
   rgba: Uint8ClampedArray;
   width: number;
   height: number;
@@ -51,7 +74,7 @@ export async function decodeToLandscapeBuffer(file: Blob): Promise<{
 }> {
   let portrait;
   try {
-    portrait = await decodeToPortraitBuffer(file);
+    portrait = await decodeToPortraitBuffer(file, crop);
   } catch (err) {
     const hint = /heic|heif/i.test((file as File).name ?? "")
       ? " HEIC/HEIF may not be supported by this browser — try converting to JPEG first (e.g. iOS share sheet 'Most Compatible')."

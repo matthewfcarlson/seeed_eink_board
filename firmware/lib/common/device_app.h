@@ -48,6 +48,10 @@
 #include "config_manager.h"
 #include "ota_health.h"
 #include "version.h"
+// Packed-blob compression (see root CLAUDE.md's "Encrypted Image Buckets" ->
+// packed-blob compression plan): a single-file, inflate-only extract of
+// miniz's tinfl - see that header's own comment for provenance.
+#include "tinfl.h"
 
 // Encrypted image buckets (see root CLAUDE.md's plan): the device's own P-256
 // keypair is generated once (ensureSharingKeyPair()) and used to unwrap each
@@ -91,6 +95,12 @@ struct RtcState {
 // Regular (non-RTC) per-boot state - re-derived fresh every wake.
 struct BucketKey {
     String bucketId;
+    // Which of the bucket's key generations this wrap is for — see
+    // migrations/0016_bucket_key_rotation.sql. A device mid-rotation can hold
+    // both an old and new key for the SAME bucketId at once (two slots, two
+    // key_versions), so lookups must match on both fields together, never
+    // bucketId alone.
+    int keyVersion = 1;
     uint8_t key[BUCKET_KEY_BYTES];
 };
 
@@ -861,6 +871,7 @@ inline bool syncRemoteConfigAndTime(ConfigManager& configManager, RunState& run)
                 break;
             }
             const char* bucketId = entry["bucket_id"] | "";
+            int keyVersion = entry["key_version"] | 1;
             String ephemeralPub = entry["ephemeral_pub"] | "";
             String nonce = entry["nonce"] | "";
             String ciphertext = entry["ciphertext"] | "";
@@ -869,9 +880,11 @@ inline bool syncRemoteConfigAndTime(ConfigManager& configManager, RunState& run)
             BucketKey& slot = run.bucketKeys[run.bucketKeyCount];
             if (unwrapBucketKey(configManager, ephemeralPub, nonce, ciphertext, slot.key)) {
                 slot.bucketId = bucketId;
+                slot.keyVersion = keyVersion;
                 run.bucketKeyCount++;
             } else {
-                Serial.printf("Failed to unwrap bucket key for bucket %s - images from it will fail to decrypt\n", bucketId);
+                Serial.printf("Failed to unwrap bucket key for bucket %s (version %d) - images from it will fail to decrypt\n",
+                              bucketId, keyVersion);
             }
         }
     }
@@ -1013,6 +1026,107 @@ inline bool readExactlyFromStream(WiFiClient* stream, HTTPClient& http, uint8_t*
     return bytesRead == len;
 }
 
+// Ciphertext is pulled off the network and through mbedtls_gcm_update() this
+// many bytes at a time - must be a multiple of 16 (the AES block size), since
+// mbedtls_gcm_update() requires every call except the last before
+// mbedtls_gcm_finish() to be block-aligned. Deliberately small and fixed
+// (not scaled to the image buffer): this is the whole point of the streaming
+// approach over the old decrypt-into-a-second-buffer-then-inflate shape -
+// EE04 (no PSRAM, ~320KB internal SRAM) can afford two of these on the stack
+// but not a second full 384-960KB buffer alongside the display's own.
+#define GCM_INFLATE_CHUNK_SIZE 512
+
+/**
+ * Streams `cipherLen` bytes of AES-256-GCM ciphertext through `readExact`
+ * (must fill the given buffer with exactly the requested byte count, or
+ * return false) GCM_INFLATE_CHUNK_SIZE bytes at a time, decrypting each chunk
+ * via the streaming mbedtls_gcm_update() (never mbedtls_gcm_auth_decrypt(),
+ * which needs the whole ciphertext contiguously in one buffer) into a small
+ * scratch buffer, then either copies it (`inflateIt` false - packed_encoding
+ * "identity") or DEFLATE-raw-inflates it (`inflateIt` true - "deflate-raw",
+ * via tinfl_decompress() with TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF, so
+ * `outBuf` itself serves as the inflate window with no second allocation)
+ * straight into `outBuf`.
+ *
+ * `gcmCtx` must already have had mbedtls_gcm_starts(MBEDTLS_GCM_DECRYPT, ...)
+ * called on it, and the caller must call mbedtls_gcm_finish() and compare its
+ * output against the stream's trailing 16-byte tag BEFORE trusting anything
+ * written to `outBuf` or calling display.refresh() - this function only
+ * moves/transforms bytes, it never itself checks authenticity (the tag isn't
+ * even available until every ciphertext byte has passed through
+ * mbedtls_gcm_update(), i.e. until after this function returns).
+ *
+ * Returns false on any failure (read/stall, GCM error, malformed or
+ * oversized-for-outBuf deflate stream) - having possibly already written
+ * partial/not-yet-authenticated bytes into outBuf, same "leave it
+ * undisplayed, retry next wake" contract every other failure path in
+ * fetchAndDisplayImage() already uses.
+ *
+ * sizeof(tinfl_decompressor) is ~11KB (mostly its three Huffman fast-lookup
+ * tables) - real measurement, not a guess: a first version of this function
+ * declared it as an ordinary local variable, which built fine (PlatformIO's
+ * reported RAM usage only counts .data/.bss, not stack) but would have blown
+ * clean through the Arduino-ESP32 core's entire 8192-byte default loop-task
+ * stack (CONFIG_ARDUINO_LOOP_STACK_SIZE) on its own, before even accounting
+ * for HTTPClient/WiFiClientSecure/TLS's own stack usage in the same call
+ * chain - caught by actually computing sizeof() and checking the default
+ * stack size, not assumed safe from "the build succeeded." `static` moves it
+ * off the stack into .bss instead (a fixed, one-time RAM cost, visible in
+ * PlatformIO's own size report), which is safe here specifically because
+ * this function is never reentrant or called concurrently - one FreeRTOS
+ * task (the Arduino loop task), one call per wake, always run to completion
+ * (return or fall through) before the next call.
+ */
+template <typename ReadExactFn>
+inline bool decryptChunksInflate(mbedtls_gcm_context& gcmCtx, size_t cipherLen, bool inflateIt, ReadExactFn readExact,
+                                  uint8_t* outBuf, size_t outCapacity, size_t& outWritten) {
+    uint8_t cipherChunk[GCM_INFLATE_CHUNK_SIZE];
+    uint8_t plainChunk[GCM_INFLATE_CHUNK_SIZE];
+    static tinfl_decompressor inflator;
+    if (inflateIt) tinfl_init(&inflator);
+    size_t remaining = cipherLen;
+    outWritten = 0;
+
+    while (remaining > 0) {
+        size_t n = remaining < GCM_INFLATE_CHUNK_SIZE ? remaining : GCM_INFLATE_CHUNK_SIZE;
+        if (!readExact(cipherChunk, n)) return false;
+        if (mbedtls_gcm_update(&gcmCtx, n, cipherChunk, plainChunk) != 0) return false;
+        remaining -= n;
+
+        if (!inflateIt) {
+            if (outWritten + n > outCapacity) return false;
+            memcpy(outBuf + outWritten, plainChunk, n);
+            outWritten += n;
+            continue;
+        }
+
+        size_t inOfs = 0;
+        while (inOfs < n) {
+            size_t inSize = n - inOfs;
+            size_t outSize = outCapacity - outWritten;
+            // HAS_MORE_INPUT reflects whether more CIPHERTEXT chunks remain overall
+            // (not just more of this already-decrypted chunk) - tinfl only needs to
+            // know whether asking for another byte could ever succeed.
+            uint32_t flags = (uint32_t)TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF |
+                              (remaining > 0 ? (uint32_t)TINFL_FLAG_HAS_MORE_INPUT : 0);
+            tinfl_status st = tinfl_decompress(&inflator, plainChunk + inOfs, &inSize, outBuf,
+                                                outBuf + outWritten, &outSize, flags);
+            inOfs += inSize;
+            outWritten += outSize;
+
+            if (st == TINFL_STATUS_DONE) return remaining == 0;
+            if (st < 0) return false;  // TINFL_STATUS_FAILED*/BAD_PARAM/ADLER32_MISMATCH
+            if (st == TINFL_STATUS_HAS_MORE_OUTPUT) return false;  // would overflow outBuf - reject
+            if (st == TINFL_STATUS_NEEDS_MORE_INPUT) {
+                if (inOfs < n) return false;  // shouldn't happen: see tinfl's own contract
+                break;                        // go read the next ciphertext chunk
+            }
+            // else: loop again with whatever's left of this already-decrypted chunk
+        }
+    }
+    return true;
+}
+
 /**
  * Fetches the pending image, folding the old separate hash pre-check into this
  * same request via ?known_hash= (see worker/src/routes/image-packed.ts). A 304
@@ -1021,18 +1135,34 @@ inline bool readExactlyFromStream(WiFiClient* stream, HTTPClient& http, uint8_t*
  * to show.
  *
  * The response body is AES-256-GCM ciphertext (12-byte nonce || ciphertext ||
- * 16-byte tag — see root CLAUDE.md's encrypted-buckets plan), so
- * Content-Length is display.getBufferSize() + 28, not an exact match. The
- * ciphertext portion is streamed directly into the display's own buffer
- * (decrypted in place afterward - AES-GCM's CTR-mode keystream XOR is safe
- * to apply in place, same as the plaintext version already streamed straight
- * into this buffer) rather than a separate allocation, preserving the
- * original zero-extra-allocation design this function has always used (see
- * the display.begin() comment below) - only the 12-byte nonce and 16-byte
- * tag need their own (trivial, stack) buffers. The tag is verified via
- * mbedtls_gcm_auth_decrypt() before display.refresh() is ever called: on a
- * mismatch, the buffer may hold not-yet-authenticated bytes, so this returns
- * FAILED without presenting them, same as an incomplete download today.
+ * 16-byte tag — see root CLAUDE.md's encrypted-buckets plan) of either the
+ * plain packed 4bpp buffer ("identity") or that buffer DEFLATE-raw-compressed
+ * ("deflate-raw" - see packed-blob compression in the same plan section),
+ * selected by the X-Packed-Encoding response header.
+ *
+ * For "identity", Content-Length is exactly display.getBufferSize() + 28, and
+ * the ciphertext is streamed directly into the display's own buffer (decrypted
+ * in place afterward via one-shot mbedtls_gcm_auth_decrypt() - AES-GCM's
+ * CTR-mode keystream XOR is safe to apply in place) exactly as before this
+ * feature existed - zero extra allocation, only the 12-byte nonce and 16-byte
+ * tag need their own (trivial, stack) buffers.
+ *
+ * For "deflate-raw", the compressed ciphertext's length isn't known ahead of
+ * time (it varies per image) and can't be validated with an exact match, only
+ * a sane upper bound (it must be smaller than the uncompressed buffer, or
+ * compression wouldn't have been worth shipping - see client/compress.ts).
+ * It's decrypted+inflated in small fixed-size chunks (decryptChunksInflate()
+ * above, via mbedtls's streaming GCM API) straight into the display buffer,
+ * since a second full-size buffer to hold ciphertext contiguously wouldn't
+ * fit on a PSRAM-less board (EE04).
+ *
+ * Either way, the GCM tag is fully verified (mbedtls_gcm_auth_decrypt()'s
+ * return code for "identity"; a manual compare against mbedtls_gcm_finish()'s
+ * output for "deflate-raw", since the streaming API can't produce a tag until
+ * every ciphertext byte has passed through) before display.refresh() is ever
+ * called: on a mismatch, the buffer may hold not-yet-authenticated (and, for
+ * "deflate-raw", not even fully inflated) bytes, so this returns FAILED
+ * without presenting them, same as an incomplete download today.
  */
 template <typename DisplayT>
 ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configManager, RtcState& rtc, RunState& run) {
@@ -1068,45 +1198,87 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     String responseImageName = http.header("X-Image-Name");
     String responseDeviceId = http.header("X-Device-ID");
     String responseBucketId = http.header("X-Bucket-Id");
+    // Absent (older server) means version 1 - the only version that existed
+    // before bucket-key rotation (migrations/0016) did. A device mid-rotation
+    // can hold two wraps for the SAME bucketId (old and new key_version), so
+    // this header is what disambiguates which one decrypts THIS image.
+    int responseKeyVersion = http.header("X-Bucket-Key-Version").length() > 0
+        ? http.header("X-Bucket-Key-Version").toInt()
+        : 1;
+    // Absent (older server, or the unregistered-device QR-registration
+    // response) means "identity" - the only encoding that existed before this
+    // header did.
+    String responsePackedEncoding = http.header("X-Packed-Encoding");
+    bool useDeflate = responsePackedEncoding == "deflate-raw";
+    // The unregistered-device "scan to register" QR screen (qr-registration.ts)
+    // is plaintext, exact-buffer-size bytes - there's no bucket key to encrypt
+    // it under for a device nobody has claimed yet. X-Device-ID: default is
+    // the same sentinel resolveDeviceKey()/DEFAULT_DEVICE_KEY use server-side
+    // for this exact case, so it's what distinguishes "no GCM envelope, skip
+    // the bucket-key requirement entirely" from every other (encrypted)
+    // response below.
+    bool isRegistrationImage = responseDeviceId == "default";
     if (responseImageName.length() > 0 || responseImageHash.length() > 0 || responseDeviceId.length() > 0) {
-        Serial.printf("Response headers: X-Image-Name=%s, X-Image-Hash=%s, X-Device-ID=%s, X-Bucket-Id=%s\n",
+        Serial.printf("Response headers: X-Image-Name=%s, X-Image-Hash=%s, X-Device-ID=%s, X-Bucket-Id=%s, X-Bucket-Key-Version=%d, X-Packed-Encoding=%s\n",
                       responseImageName.length() > 0 ? responseImageName.c_str() : "(none)",
                       responseImageHash.length() > 0 ? responseImageHash.c_str() : "(none)",
                       responseDeviceId.length() > 0 ? responseDeviceId.c_str() : "(none)",
-                      responseBucketId.length() > 0 ? responseBucketId.c_str() : "(none)");
+                      responseBucketId.length() > 0 ? responseBucketId.c_str() : "(none)",
+                      responseKeyVersion,
+                      responsePackedEncoding.length() > 0 ? responsePackedEncoding.c_str() : "(none)");
     }
 
     const uint8_t* bucketKey = nullptr;
-    for (int i = 0; i < run.bucketKeyCount; i++) {
-        if (responseBucketId == run.bucketKeys[i].bucketId) {
-            bucketKey = run.bucketKeys[i].key;
-            break;
+    if (!isRegistrationImage) {
+        for (int i = 0; i < run.bucketKeyCount; i++) {
+            if (responseBucketId == run.bucketKeys[i].bucketId && responseKeyVersion == run.bucketKeys[i].keyVersion) {
+                bucketKey = run.bucketKeys[i].key;
+                break;
+            }
         }
-    }
-    if (!bucketKey) {
-        Serial.printf("No unwrapped key for bucket %s - can't decrypt this image (see syncRemoteConfigAndTime's log)\n",
-                      responseBucketId.c_str());
-        http.end();
-        return ImageFetchResult::FAILED;
+        if (!bucketKey) {
+            Serial.printf("No unwrapped key for bucket %s at version %d - can't decrypt this image (see syncRemoteConfigAndTime's log)\n",
+                          responseBucketId.c_str(), responseKeyVersion);
+            http.end();
+            return ImageFetchResult::FAILED;
+        }
     }
 
     int contentLength = http.getSize();
-    int expectedContentLength = (int)display.getBufferSize() + 12 /* nonce */ + 16 /* tag */;
-    Serial.printf("Content length: %d bytes (expected %d)\n", contentLength, expectedContentLength);
+    int cipherLen = contentLength - 12 /* nonce */ - 16 /* tag */;
+    bool contentLengthOk;
+    if (isRegistrationImage) {
+        // No nonce/tag envelope on this one - the body is the raw packed
+        // buffer, exactly bufferSize bytes.
+        contentLengthOk = contentLength == (int)display.getBufferSize();
+    } else if (useDeflate) {
+        // Compressed length varies per image and isn't known ahead of time -
+        // only a sane upper bound is checkable: it must be positive, and
+        // smaller than the uncompressed buffer (client/compress.ts only ever
+        // ships "deflate-raw" when it measured a meaningful size reduction -
+        // see PACKED_COMPRESSION_MIN_SAVINGS_FRACTION - so a compressed body
+        // that isn't actually smaller indicates a corrupt/malicious response).
+        contentLengthOk = cipherLen > 0 && (size_t)cipherLen <= display.getBufferSize();
+    } else {
+        contentLengthOk = cipherLen == (int)display.getBufferSize();
+    }
+    Serial.printf("Content length: %d bytes (cipher %d, encoding %s)\n", contentLength, cipherLen,
+                  useDeflate ? "deflate-raw" : "identity");
 
-    if (contentLength != expectedContentLength) {
-        Serial.printf("Invalid content length: %d (expected %d)\n", contentLength, expectedContentLength);
+    if (!contentLengthOk) {
+        Serial.printf("Invalid content length: %d (cipher %d) for encoding %s\n", contentLength, cipherLen,
+                      useDeflate ? "deflate-raw" : "identity");
         http.end();
         return ImageFetchResult::FAILED;
     }
 
-    // Stream ciphertext directly into the display's own buffer rather than a
-    // separate temp allocation + copy - on a PSRAM-less board (EE04) a second
+    // Stream ciphertext directly into (or, for "deflate-raw", straight through
+    // decrypt+inflate into) the display's own buffer rather than a separate
+    // temp allocation + copy - on a PSRAM-less board (EE04) a second
     // full-size buffer alongside the display's own wouldn't reliably fit in
     // ~320KB of internal SRAM once WiFi/TLS/BLE overhead is accounted for,
     // and it's wasted PSRAM churn on EE02 too. display.begin() must run
     // first so the buffer is actually allocated/valid before writing into it.
-    // (Decrypted in place afterward - see this function's doc comment.)
     if (!display.begin()) {
         Serial.println("Display initialization failed!");
         http.end();
@@ -1119,12 +1291,24 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     uint32_t startTime = millis();
 
     uint8_t nonce[12];
-    bool ok = readExactlyFromStream(stream, http, nonce, sizeof(nonce), IMAGE_STALL_TIMEOUT_MS);
+    // The registration screen has no nonce/tag envelope at all (see
+    // isRegistrationImage above) - nothing to read or set up a GCM key for.
+    bool ok = isRegistrationImage || readExactlyFromStream(stream, http, nonce, sizeof(nonce), IMAGE_STALL_TIMEOUT_MS);
 
-    size_t bodyBytesRead = 0;
-    if (ok) {
-        // Same shape as the original single-pass loop, just now sized to the
-        // plaintext buffer rather than the whole (nonce+ciphertext+tag) response.
+    mbedtls_gcm_context gcmCtx;
+    mbedtls_gcm_init(&gcmCtx);
+    int gcmRc = 0;
+    if (!isRegistrationImage) {
+        gcmRc = ok ? mbedtls_gcm_setkey(&gcmCtx, MBEDTLS_CIPHER_ID_AES, bucketKey, 256) : -1;
+        ok = ok && gcmRc == 0;
+    }
+
+    size_t bodyBytesRead = 0;   // "identity"/registration: raw bytes read into imageBuffer
+    size_t plaintextWritten = 0;  // "deflate-raw": plaintext bytes decryptChunksInflate() produced
+    if (ok && (isRegistrationImage || !useDeflate)) {
+        // Unchanged from before this feature existed: read exactly bufferSize
+        // bytes straight into imageBuffer - ciphertext to be decrypted in
+        // place below, or (isRegistrationImage) already-plaintext bytes.
         uint32_t lastDataTime = millis();
         while (bodyBytesRead < bufferSize && http.connected()) {
             size_t available = stream->available();
@@ -1144,18 +1328,36 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
             }
         }
         ok = bodyBytesRead == bufferSize;
+    } else if (ok) {
+        ok = mbedtls_gcm_starts(&gcmCtx, MBEDTLS_GCM_DECRYPT, nonce, sizeof(nonce), nullptr, 0) == 0;
+        if (ok) {
+            auto readExact = [&](uint8_t* buf, size_t len) {
+                return readExactlyFromStream(stream, http, buf, len, IMAGE_STALL_TIMEOUT_MS);
+            };
+            ok = decryptChunksInflate(gcmCtx, (size_t)cipherLen, /*inflateIt=*/true, readExact, imageBuffer,
+                                       bufferSize, plaintextWritten);
+            if (ok && plaintextWritten != bufferSize) {
+                Serial.printf("Inflated %u bytes, expected exactly %u - rejecting\n", (unsigned)plaintextWritten,
+                              (unsigned)bufferSize);
+                ok = false;
+            }
+        }
     }
 
     uint8_t tag[16];
-    if (ok) ok = readExactlyFromStream(stream, http, tag, sizeof(tag), IMAGE_STALL_TIMEOUT_MS);
+    if (ok && !isRegistrationImage) ok = readExactlyFromStream(stream, http, tag, sizeof(tag), IMAGE_STALL_TIMEOUT_MS);
 
     http.end();
 
-    Serial.printf("Downloaded %d bytes in %lu ms\n", (int)(sizeof(nonce) + bodyBytesRead + sizeof(tag)), millis() - startTime);
+    Serial.printf("Downloaded %d bytes in %lu ms\n",
+                  isRegistrationImage ? (int)bodyBytesRead
+                                      : (int)(sizeof(nonce) + (useDeflate ? (size_t)cipherLen : bodyBytesRead) + sizeof(tag)),
+                  millis() - startTime);
 
     if (!ok) {
-        Serial.println("Incomplete download! Display buffer now holds partial/undecrypted ciphertext - "
-                        "will retry next wake since lastImageHash is left unset below.");
+        Serial.println("Incomplete/failed download! Display buffer may hold partial/undecrypted or "
+                        "not-yet-authenticated bytes - will retry next wake since lastImageHash is left unset below.");
+        mbedtls_gcm_free(&gcmCtx);
         // display.begin() above already powered the panel on - power it back
         // down without drawing anything, or it stays powered (and draining
         // battery) for the whole sleep interval on a board with no
@@ -1164,16 +1366,28 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
         return ImageFetchResult::FAILED;
     }
 
-    // Decrypts imageBuffer in place (safe: AES-GCM's CTR-mode keystream XOR
-    // doesn't need input/output to differ) only once the tag has verified -
-    // never trust/present ciphertext-shaped bytes as if they were the real
-    // plaintext.
-    mbedtls_gcm_context gcmCtx;
-    mbedtls_gcm_init(&gcmCtx);
-    int gcmRc = mbedtls_gcm_setkey(&gcmCtx, MBEDTLS_CIPHER_ID_AES, bucketKey, 256);
-    if (gcmRc == 0) {
+    if (isRegistrationImage) {
+        // Already plaintext - imageBuffer holds the real bytes as downloaded,
+        // nothing to authenticate or decrypt.
+    } else if (!useDeflate) {
+        // Decrypts imageBuffer in place (safe: AES-GCM's CTR-mode keystream XOR
+        // doesn't need input/output to differ) only once the tag has verified -
+        // never trust/present ciphertext-shaped bytes as if they were the real
+        // plaintext.
         gcmRc = mbedtls_gcm_auth_decrypt(&gcmCtx, bufferSize, nonce, sizeof(nonce), nullptr, 0, tag, sizeof(tag),
                                           imageBuffer, imageBuffer);
+    } else {
+        // The streaming API can't produce a tag until every ciphertext byte has
+        // passed through mbedtls_gcm_update() (already done above, inside
+        // decryptChunksInflate()) - compare it ourselves rather than trusting
+        // whatever tinfl already wrote into imageBuffer.
+        uint8_t computedTag[16];
+        gcmRc = mbedtls_gcm_finish(&gcmCtx, computedTag, sizeof(computedTag));
+        if (gcmRc == 0) {
+            uint8_t diff = 0;
+            for (int i = 0; i < 16; i++) diff |= (uint8_t)(computedTag[i] ^ tag[i]);
+            if (diff != 0) gcmRc = MBEDTLS_ERR_GCM_AUTH_FAILED;
+        }
     }
     mbedtls_gcm_free(&gcmCtx);
     if (gcmRc != 0) {

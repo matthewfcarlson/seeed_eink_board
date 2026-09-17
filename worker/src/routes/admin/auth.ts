@@ -10,7 +10,10 @@ export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
     const row = await c.env.DB.prepare("SELECT display_name FROM users WHERE id = ?")
       .bind(c.var.user.id)
       .first<{ display_name: string | null }>();
-    return c.json({ id: c.var.user.id, display_name: row?.display_name ?? null });
+    // is_superuser: from the token already resolved by requireAdmin, not a
+    // second query — lets the client conditionally show the "Public bucket"
+    // checkbox (see root CLAUDE.md's public-buckets plan / migrations/0018).
+    return c.json({ id: c.var.user.id, display_name: row?.display_name ?? null, is_superuser: c.var.user.is_superuser });
   });
 
   app.patch("/admin/me", requireAdmin, async (c) => {
@@ -20,7 +23,10 @@ export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
       return c.json({ error: "display_name is required and must be 1-40 characters" }, 400);
     }
     await c.env.DB.prepare("UPDATE users SET display_name = ? WHERE id = ?").bind(displayName, c.var.user.id).run();
-    return c.json({ id: c.var.user.id, display_name: displayName });
+    // Echo is_superuser back too (from the token, unaffected by this update) so
+    // admin.ts's `currentUser = await apiFetch(...)` doesn't lose the flag it
+    // needs for the public-bucket checkbox after an Edit name round-trip.
+    return c.json({ id: c.var.user.id, display_name: displayName, is_superuser: c.var.user.is_superuser });
   });
 
   // Backfills a credential's PRF-wrapped sharing key outside the passkey

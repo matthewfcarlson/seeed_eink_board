@@ -3,9 +3,10 @@
 -- 0004_device_secret.sql, 0005_device_nonce.sql, 0006_running_firmware.sql,
 -- 0007_buckets.sql, 0008_user_display_name.sql, 0009_bucket_ownership.sql,
 -- 0010_remove_shared_targets.sql, 0011_crash_reports.sql, 0012_device_board.sql,
--- 0013_firmware_releases_board.sql, 0014_firmware_channel.sql, and
--- 0015_bucket_encryption.sql (wrangler d1 migrations tracks applied state
--- per-database).
+-- 0013_firmware_releases_board.sql, 0014_firmware_channel.sql,
+-- 0015_bucket_encryption.sql, 0016_bucket_key_rotation.sql,
+-- 0017_packed_encoding.sql, and 0018_public_buckets.sql (wrangler d1
+-- migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
@@ -19,7 +20,11 @@ CREATE TABLE users (
   -- P-256 public key, generated client-side at first passkey registration (see
   -- migrations/0015). The matching private key is never stored in the clear —
   -- see credentials.wrapped_sharing_key below.
-  sharing_public_key TEXT
+  sharing_public_key TEXT,
+  -- Manually flipped in D1 by the project owner (no API sets this - see
+  -- migrations/0018_public_buckets.sql for the exact command). Gates only
+  -- whether this account may mark a bucket it owns `is_public` - nothing else.
+  is_superuser  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE devices (
@@ -65,7 +70,23 @@ CREATE TABLE buckets (
   id         TEXT PRIMARY KEY,
   owner_id   TEXT REFERENCES users(id),
   label      TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- The bucket's current AES-256-GCM content-key version — see
+  -- migrations/0016_bucket_key_rotation.sql. Bumped only by
+  -- POST /admin/buckets/:id/rotate/:rotationId/finalize.
+  key_version INTEGER NOT NULL DEFAULT 1,
+  -- Public buckets (migrations/0018_public_buckets.sql): is_public makes this
+  -- bucket readable (never writable) by every account, settable only by a
+  -- superuser. public_key_raw is the bucket's raw, UNWRAPPED AES-256-GCM key
+  -- (base64) - only ever non-null when is_public = 1. This is the deliberate
+  -- escape hatch from the normal per-principal-ECIES-wrapped-key model above:
+  -- there's no recipient public key for "anyone with an account" to wrap
+  -- against, so a public bucket's key just isn't kept secret, while every
+  -- image byte is still exactly as AES-256-GCM-encrypted under it as any
+  -- other bucket's - the whole rest of the pipeline (client encrypt-before-
+  -- upload, GCM tamper-detection, firmware decrypt) needs zero changes.
+  is_public      INTEGER NOT NULL DEFAULT 0,
+  public_key_raw TEXT
 );
 
 CREATE TABLE device_buckets (
@@ -91,21 +112,43 @@ CREATE TABLE bucket_invites (
 
 -- Pure key distribution (see migrations/0015) — deliberately separate from
 -- bucket_shares/device_buckets above, which stay pure authorization tables.
--- One row per (bucket, principal) holding that principal's ECIES-wrapped copy
--- of the bucket's AES-256-GCM content-encryption key. ephemeral_pub/nonce/
--- ciphertext are base64. Looked up by principal to answer "does this
--- user/device already have a usable key for this bucket" — see
--- lib/bucket-keys.ts.
+-- One row per (bucket, principal, key_version) holding that principal's
+-- ECIES-wrapped copy of the bucket's AES-256-GCM content-encryption key at
+-- that version. ephemeral_pub/nonce/ciphertext are base64. key_version joined
+-- the primary key in migrations/0016_bucket_key_rotation.sql so an old and a
+-- new wrapped key can coexist for the same principal for the duration of a
+-- rotation — see lib/bucket-keys.ts and routes/admin/buckets.ts's rotate/*
+-- handlers. Looked up by principal (+ version) to answer "does this
+-- user/device already have a usable key for this bucket at this version".
 CREATE TABLE bucket_keys (
   bucket_id      TEXT NOT NULL REFERENCES buckets(id),
   principal_type TEXT NOT NULL CHECK (principal_type IN ('user', 'device')),
   principal_id   TEXT NOT NULL, -- users.id or devices.mac, depending on principal_type
+  key_version    INTEGER NOT NULL DEFAULT 1,
   ephemeral_pub  TEXT NOT NULL,
   nonce          TEXT NOT NULL,
   ciphertext     TEXT NOT NULL,
   created_at     INTEGER NOT NULL,
-  PRIMARY KEY (bucket_id, principal_type, principal_id)
+  PRIMARY KEY (bucket_id, principal_type, principal_id, key_version)
 );
+
+-- One row tracks one bucket-key-rotation job (in progress or completed) — see
+-- migrations/0016_bucket_key_rotation.sql and routes/admin/buckets.ts's
+-- rotate/* handlers. Lets a client that closed its tab mid-rotation resume
+-- via GET /admin/buckets/:id/rotate/status instead of starting a fresh
+-- rotation (which would orphan whatever the abandoned job already
+-- re-encrypted). At most one 'in_progress' row per bucket_id (enforced by a
+-- partial unique index, not expressible as a plain column constraint here).
+CREATE TABLE bucket_rotations (
+  id               TEXT PRIMARY KEY,
+  bucket_id        TEXT NOT NULL REFERENCES buckets(id),
+  new_key_version  INTEGER NOT NULL,
+  status           TEXT NOT NULL CHECK (status IN ('in_progress', 'completed')) DEFAULT 'in_progress',
+  created_at       INTEGER NOT NULL,
+  completed_at     INTEGER
+);
+CREATE INDEX idx_bucket_rotations_bucket_id ON bucket_rotations(bucket_id, created_at DESC);
+CREATE UNIQUE INDEX idx_bucket_rotations_one_active ON bucket_rotations(bucket_id) WHERE status = 'in_progress';
 
 -- Durable mirror of the live rotation cursor. KV is the hot path; this table is
 -- written async (ctx.waitUntil) and used for recovery + the /current status view.
@@ -125,10 +168,21 @@ CREATE TABLE images (
   device_key        TEXT NOT NULL,
   filename          TEXT NOT NULL,
   dither_algorithm  TEXT NOT NULL DEFAULT 'floyd_steinberg',
+  -- 'identity' (stored bytes are the plain packed 4bpp buffer, pre-encryption)
+  -- or 'deflate-raw' (client-side DEFLATE-compressed before encryption - see
+  -- migrations/0017_packed_encoding.sql and client/compress.ts). Ciphertext
+  -- itself doesn't compress, so this only ever describes the plaintext that
+  -- was encrypted, never something the Worker can verify independently.
+  packed_encoding   TEXT NOT NULL DEFAULT 'identity',
   packed_hash       TEXT NOT NULL,
   packed_bytes      INTEGER NOT NULL,
   raw_bytes         INTEGER NOT NULL,
   created_at        INTEGER NOT NULL,
+  -- Which of the owning bucket's key versions this image's three KV blobs are
+  -- actually encrypted under right now (see migrations/0016_bucket_key_rotation.sql).
+  -- Lags buckets.key_version between a rotation's start and this image's
+  -- reencrypt-image call; equal to it once migrated.
+  key_version       INTEGER NOT NULL DEFAULT 1,
   UNIQUE(device_key, filename)
 );
 CREATE INDEX idx_images_device_key_filename ON images(device_key, filename);

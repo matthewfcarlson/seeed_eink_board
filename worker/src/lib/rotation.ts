@@ -1,9 +1,10 @@
 import type { Env, ImageMeta, RotationSnapshot } from "../types";
+import type { PackedEncoding } from "./media-constants";
 import { kvKeys } from "./kv-keys";
 
 async function loadImagesForKey(env: Env, deviceKey: string): Promise<ImageMeta[]> {
   const imagesResult = await env.DB.prepare(
-    `SELECT id, filename, packed_hash, packed_bytes
+    `SELECT id, filename, packed_hash, packed_bytes, key_version, packed_encoding
      FROM images WHERE device_key = ? ORDER BY filename ASC`
   )
     .bind(deviceKey)
@@ -12,6 +13,8 @@ async function loadImagesForKey(env: Env, deviceKey: string): Promise<ImageMeta[
       filename: string;
       packed_hash: string;
       packed_bytes: number;
+      key_version: number;
+      packed_encoding: PackedEncoding;
     }>();
 
   return imagesResult.results.map((row) => ({
@@ -20,6 +23,8 @@ async function loadImagesForKey(env: Env, deviceKey: string): Promise<ImageMeta[
     packedHash: row.packed_hash,
     packedBytes: row.packed_bytes,
     sourceDeviceKey: deviceKey,
+    keyVersion: row.key_version,
+    packedEncoding: row.packed_encoding,
   }));
 }
 

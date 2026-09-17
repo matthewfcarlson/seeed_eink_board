@@ -67,6 +67,7 @@ int main(int argc, char **argv) {
     std::string serverUrl = "http://localhost:8787";
     bool doReset = false;
     std::string exportPath;
+    std::string wifiSsid;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
@@ -75,8 +76,10 @@ int main(int argc, char **argv) {
             doReset = true;
         } else if (strcmp(argv[i], "--export") == 0 && i + 1 < argc) {
             exportPath = argv[++i];
+        } else if (strcmp(argv[i], "--wifi") == 0 && i + 1 < argc) {
+            wifiSsid = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--server <url>] [--reset] [--export <path.jpg>]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--server <url>] [--reset] [--export <path.jpg>] [--wifi <ssid>]\n", argv[0]);
             return 1;
         }
     }
@@ -98,6 +101,16 @@ int main(int argc, char **argv) {
 
     configManager.begin();
     applyServerFlag(serverUrl);
+    if (!wifiSsid.empty()) {
+        // Test-automation-only shortcut: real hardware only ever gets WiFi
+        // credentials via BLE provisioning (see ble_provisioning.cpp /
+        // gatt_bridge.h) - stubs/WiFi.h's begin()/status() ignore whatever
+        // credentials are stored and always report WL_CONNECTED, so any
+        // non-empty SSID here is enough to satisfy setup()'s
+        // getWifiSsid().length() == 0 config-mode gate without scripting the
+        // real GATT-over-HTTP contract in a test harness.
+        configManager.setWifiCredentials(wifiSsid.c_str(), "sim-password");
+    }
 
     printf("\nE-Ink device simulator (native) running.\n");
     printf("  Board:      %s\n", BOARD_ID);

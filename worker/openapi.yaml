@@ -71,10 +71,43 @@ components:
           type: integer
         is_owner:
           type: boolean
+        is_public:
+          type: boolean
+          description: >-
+            Whether this bucket is readable (never writable) by every
+            account, not just its owner/collaborators — see
+            migrations/0018_public_buckets.sql. Settable only by a superuser,
+            via POST /admin/buckets or PATCH /admin/buckets/{id}.
+        key_version:
+          type: integer
+          description: >-
+            The bucket's current AES-256-GCM key version — see
+            migrations/0016_bucket_key_rotation.sql. Starts at 1; bumped only
+            by POST /admin/buckets/{id}/rotate/{rotationId}/finalize.
         key:
           allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
           nullable: true
-          description: The caller's own wrapped copy of this bucket's key.
+          description: >-
+            The caller's own wrapped copy of this bucket's key, AT key_version
+            above. Null if this principal was dropped mid-rotation and never
+            re-wrapped (see rotate/finalize), OR if this bucket is only
+            visible to the caller because it's public and they hold no
+            personal wrap for it — see public_key_raw below for that case.
+        public_key_raw:
+          type: string
+          nullable: true
+          description: >-
+            The bucket's raw, UNWRAPPED AES-256-GCM key, base64 — the
+            deliberate escape hatch from the normal per-principal-wrapped-key
+            model for a public bucket (migrations/0018_public_buckets.sql):
+            there's no recipient public key to ECIES-wrap against for
+            "anyone with an account", so a public bucket's key just isn't
+            kept secret. Every image byte is still exactly as
+            AES-256-GCM-encrypted under it as any other bucket's — only the
+            key distribution differs. Only ever non-null when is_public is
+            true, and even then ONLY surfaced to a caller who has no personal
+            `key` for this bucket (an owner or collaborator always uses their
+            own `key` instead, even on a bucket that's also public).
     Image:
       type: object
       properties:
@@ -93,6 +126,14 @@ components:
           type: integer
         created_at:
           type: integer
+        key_version:
+          type: integer
+          description: >-
+            Which of the bucket's key versions this image's three KV blobs are
+            actually encrypted under right now — see
+            migrations/0016_bucket_key_rotation.sql. Lags the bucket's own
+            key_version between a rotation's start and this image's
+            reencrypt-image call.
         thumbnail_ciphertext_b64:
           type: string
           nullable: true
@@ -311,6 +352,15 @@ paths:
                 properties:
                   id: { type: string }
                   display_name: { type: string, nullable: true }
+                  is_superuser:
+                    type: boolean
+                    description: >-
+                      Manually flipped in D1 by the project owner — see
+                      migrations/0018_public_buckets.sql for the exact
+                      command. There is no API to set this. Gates only
+                      whether this account may mark a bucket it owns
+                      is_public; the client uses it to decide whether to show
+                      the "Make this public" checkbox at all.
     patch:
       summary: Set your display name
       requestBody:
@@ -424,18 +474,33 @@ paths:
                   description: >-
                     Map of bucket_id -> WrappedKey, the caller's own wrap of
                     each bucket's key for this device's public key. Required
-                    for every id in bucket_ids.
+                    for every id in bucket_ids. For a bucket the caller only
+                    has read access to via is_public (see
+                    migrations/0018_public_buckets.sql), the raw key wrapped
+                    here comes from that bucket's public_key_raw instead of a
+                    personal bucket_keys row — same wrapKeyFor call either
+                    way, so this endpoint can't tell (and doesn't need to)
+                    which source a given entry came from.
                   additionalProperties: { $ref: '#/components/schemas/WrappedKey' }
               required: [bucket_ids, keys]
       responses:
         '200': { description: OK }
         '400': { description: Missing a required wrapped key for one of the bucket ids }
-        '403': { description: Forbidden (device not yours, or no access to one of the bucket ids) }
+        '403':
+          description: >-
+            Forbidden — device not yours, or no READ access (owned, shared,
+            or public) to one of the bucket ids.
         '404': { description: Device not found }
 
   /admin/buckets:
     get:
-      summary: List buckets you own or collaborate on
+      summary: List buckets you own, collaborate on, or that are public
+      description: >-
+        Every public bucket (migrations/0018_public_buckets.sql) is included
+        alongside your owned/shared buckets, deduplicated. For a bucket
+        you're only seeing because it's public, `key` is null and
+        `public_key_raw` carries the bucket's raw AES key instead — see the
+        Bucket schema.
       responses:
         '200':
           description: OK
@@ -460,13 +525,34 @@ paths:
                 key:
                   allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
                   description: The caller's wrap of the newly-generated bucket key for their own sharing_public_key.
+                is_public:
+                  type: boolean
+                  description: >-
+                    Create the bucket already public. Requires the caller to
+                    be a superuser (see GET /admin/me's is_superuser) — 403
+                    otherwise. Requires public_key_raw to also be set.
+                public_key_raw:
+                  type: string
+                  description: >-
+                    The newly-generated bucket key, raw and base64 (not
+                    wrapped). Required when is_public is true; see the Bucket
+                    schema's public_key_raw for why a public bucket's key
+                    isn't kept secret at all.
               required: [label, key]
       responses:
         '201': { description: Created }
+        '403': { description: is_public was true but the caller isn't a superuser }
 
   /admin/buckets/{id}:
     patch:
-      summary: Rename a bucket (owner only)
+      summary: Rename a bucket and/or toggle its public flag (owner only)
+      description: >-
+        At least one of label/is_public must be present. Setting is_public
+        requires the caller to be a superuser, same as creating a public
+        bucket — this is how an owner makes an EXISTING bucket public (their
+        browser already holds the raw key via its own wrapped copy, so it
+        just uploads that as public_key_raw too) or takes one back private
+        (which nulls out public_key_raw server-side).
       parameters:
         - $ref: '#/components/parameters/BucketIdPath'
       requestBody:
@@ -477,10 +563,14 @@ paths:
               type: object
               properties:
                 label: { type: string }
-              required: [label]
+                is_public: { type: boolean }
+                public_key_raw:
+                  type: string
+                  description: The bucket's raw key, base64. Required when setting is_public to true.
       responses:
         '200': { description: OK }
-        '403': { description: Not the owner }
+        '400': { description: Neither label nor is_public was given, or public_key_raw was missing while setting is_public true }
+        '403': { description: Not the owner, or is_public was set but the caller isn't a superuser }
         '404': { description: Not found }
     delete:
       summary: Delete a bucket (owner only)
@@ -557,6 +647,13 @@ paths:
                       properties:
                         id: { type: string }
                         display_name: { type: string, nullable: true }
+                        sharing_public_key:
+                          type: string
+                          nullable: true
+                          description: >-
+                            Base64 P-256 public key — needed client-side to
+                            wrap a fresh bucket key for this collaborator
+                            during POST rotate/{rotationId}/finalize.
 
   /admin/buckets/{id}/collaborators/{userId}:
     delete:
@@ -570,9 +667,211 @@ paths:
       responses:
         '200': { description: Removed }
 
+  /admin/buckets/{id}/rotate/start:
+    post:
+      summary: Start a bucket key rotation (owner only)
+      description: >-
+        See root CLAUDE.md's encrypted-buckets plan, "Known gaps: no
+        crypto-level revocation." Mints key_version + 1: the caller supplies
+        its own wrap of a freshly-generated key at that version (never sent
+        raw), which the server stores immediately so a page reload can
+        recover it via GET rotate/status and resume rather than losing the
+        job. Returns the bucket's PRE-rotation key_version and every image id
+        that still needs POST rotate/{rotationId}/reencrypt-image.
+        At most one in-progress rotation per bucket — call GET rotate/status
+        first if unsure.
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key:
+                  allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
+                  description: The caller's own wrap of a freshly-generated key, for key_version + 1.
+              required: [key]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rotation_id: { type: string }
+                  bucket_id: { type: string }
+                  key_version: { type: integer, description: The bucket's key_version before this rotation. }
+                  new_key_version: { type: integer }
+                  image_ids:
+                    type: array
+                    items: { type: string }
+        '400': { description: Missing or malformed key }
+        '403': { description: Not the owner }
+        '404': { description: Not found }
+        '409': { description: A rotation is already in progress for this bucket }
+
+  /admin/buckets/{id}/rotate/status:
+    get:
+      summary: Check a bucket's in-progress rotation, if any (owner only)
+      description: >-
+        Lets a client that closed its tab mid-rotation resume rather than
+        starting a fresh one. `your_new_key` is the caller's own wrap of the
+        new-version key (set at rotate/start, or backfilled for a principal
+        added mid-rotation only at finalize) — unwrap it to recover the exact
+        key needed to keep re-encrypting the remaining images.
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rotation:
+                    type: object
+                    nullable: true
+                    description: Null when no rotation is in progress for this bucket.
+                    properties:
+                      id: { type: string }
+                      key_version: { type: integer }
+                      new_key_version: { type: integer }
+                      created_at: { type: integer }
+                      pending_image_ids: { type: array, items: { type: string } }
+                      done_image_ids: { type: array, items: { type: string } }
+                      your_new_key:
+                        allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
+                        nullable: true
+                  key_version:
+                    type: integer
+                    description: Present (instead of `rotation`) only when no rotation is in progress.
+        '403': { description: Not the owner }
+        '404': { description: Not found }
+
+  /admin/buckets/{id}/rotate/{rotationId}/reencrypt-image/{imageId}:
+    post:
+      summary: Upload one image's re-encrypted ciphertext for an in-progress rotation (owner only)
+      description: >-
+        Same three-blob shape as /admin/images/upload (raw/packed/thumb
+        ciphertext + a client-computed packed_hash), minus filename/
+        device_key/dither_algorithm, which don't change. Overwrites the
+        image's three KV blobs and bumps its key_version to the rotation's
+        new_key_version. Idempotent — calling it again for an image already
+        on the new version is a safe no-op (`already_migrated: true`, nothing
+        rewritten).
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+        - name: rotationId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: imageId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [raw, packed, thumb, packed_hash]
+              properties:
+                raw: { type: string, format: binary }
+                packed: { type: string, format: binary }
+                thumb: { type: string, format: binary }
+                packed_hash: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  key_version: { type: integer }
+                  already_migrated: { type: boolean }
+        '400': { description: Missing or malformed field }
+        '403': { description: Not the owner }
+        '404': { description: Bucket, rotation, or image not found (or rotation already finalized) }
+
+  /admin/buckets/{id}/rotate/{rotationId}/finalize:
+    post:
+      summary: Finalize a bucket key rotation (owner only)
+      description: >-
+        Refuses (409) unless every image in the bucket is confirmed on the
+        rotation's new_key_version. The caller supplies a fresh wrap of the
+        new key for every principal CURRENTLY authorized (owner + live
+        bucket_shares + live device_buckets, recomputed here — not reused
+        from rotate/start, so a share/device added mid-rotation is still
+        included and one removed is not) — every key is required, or this
+        fails closed with 400. On success: upserts those new-version
+        bucket_keys rows, deletes every old-version bucket_keys row for this
+        bucket (the actual revocation), and bumps buckets.key_version — all in
+        one D1 batch.
+      parameters:
+        - $ref: '#/components/parameters/BucketIdPath'
+        - name: rotationId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_keys:
+                  type: object
+                  additionalProperties: { $ref: '#/components/schemas/WrappedKey' }
+                  description: Keyed by user id. Must include every current owner/collaborator.
+                device_keys:
+                  type: object
+                  additionalProperties: { $ref: '#/components/schemas/WrappedKey' }
+                  description: Keyed by device MAC. Must include every currently-assigned device.
+                public_key_raw:
+                  type: string
+                  description: >-
+                    Required if (and only if) the bucket is public — the new
+                    raw key, base64. Applied to buckets.public_key_raw in the
+                    same batch that bumps key_version, so a public bucket's
+                    non-owner readers (who hold no bucket_keys row at all —
+                    see migrations/0018_public_buckets.sql) see the new key
+                    immediately via GET /admin/buckets instead of being stuck
+                    decrypting with the now-revoked old one.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  finalized: { type: boolean }
+                  bucket_id: { type: string }
+                  key_version: { type: integer }
+        '400':
+          description: >-
+            Missing a required principal's wrapped key, or the bucket is
+            public and public_key_raw was omitted.
+        '403': { description: Not the owner }
+        '404': { description: Not found, or rotation already finalized }
+        '409': { description: Not every image has been re-encrypted yet }
+
   /admin/images:
     get:
       summary: List a bucket's images
+      description: >-
+        Read-shaped access: allowed for the owner, an accepted collaborator,
+        OR anyone at all when the bucket is public
+        (migrations/0018_public_buckets.sql) — see
+        lib/bucket-access.ts's assertBucketReadAccess.
       parameters:
         - name: device_key
           in: query
@@ -590,7 +889,7 @@ paths:
                   images:
                     type: array
                     items: { $ref: '#/components/schemas/Image' }
-        '403': { description: No access to this bucket }
+        '403': { description: No read access to this bucket }
 
   /admin/images/upload:
     post:
@@ -634,7 +933,12 @@ paths:
       responses:
         '201': { description: Uploaded }
         '400': { description: Missing or malformed field }
-        '403': { description: No access to this bucket }
+        '403':
+          description: >-
+            No WRITE access to this bucket — unlike GET /admin/images, being
+            public is never enough on its own (see
+            migrations/0018_public_buckets.sql: public buckets are
+            read-only for everyone but the owner/collaborators).
 
   /admin/images/{id}:
     delete:
@@ -643,12 +947,16 @@ paths:
         - $ref: '#/components/parameters/ImageIdPath'
       responses:
         '200': { description: Deleted }
-        '403': { description: No access to this bucket }
+        '403': { description: No WRITE access to this bucket (see /admin/images/upload) }
         '404': { description: Not found }
 
   /admin/images/{id}/raw:
     get:
-      summary: Fetch an image's original as-uploaded bytes
+      summary: Fetch an image's original as-uploaded ciphertext
+      description: >-
+        Read-shaped access — same rule as GET /admin/images: allowed for the
+        owner, an accepted collaborator, or anyone at all when the bucket is
+        public (migrations/0018_public_buckets.sql).
       parameters:
         - $ref: '#/components/parameters/ImageIdPath'
       responses:
@@ -656,7 +964,7 @@ paths:
           description: OK
           content:
             image/*: { schema: { type: string, format: binary } }
-        '403': { description: No access to this bucket }
+        '403': { description: No read access to this bucket }
         '404': { description: Not found }
 
   /admin/schedule/{target}:
@@ -871,7 +1179,12 @@ paths:
       description: >-
         Called by firmware, not admins. Unsigned if X-Device-MAC is omitted
         (returns global defaults); a present MAC for a registered device
-        requires a valid X-Device-Nonce/X-Device-Signature.
+        requires a valid X-Device-Nonce/X-Device-Signature. Each entry in the
+        response's `bucket_keys` array now also carries `key_version` (see
+        migrations/0016_bucket_key_rotation.sql) — mid-rotation a device can
+        have two entries for the same `bucket_id`, one per version, and
+        /image_packed's X-Bucket-Key-Version header says which to decrypt
+        with for a given image.
       security: []
       parameters:
         - name: X-Device-MAC
@@ -994,6 +1307,15 @@ paths:
                 Which of this device's subscribed buckets the ciphertext is
                 encrypted under — selects which of /device_config's
                 bucket_keys entries to unwrap and decrypt with.
+            X-Bucket-Key-Version:
+              schema: { type: integer }
+              description: >-
+                Which of that bucket's key versions this specific image is
+                encrypted under (see migrations/0016_bucket_key_rotation.sql).
+                Mid-rotation a device can hold both an old and a new wrapped
+                key for the same X-Bucket-Id, distinguished by this value —
+                see /device_config's bucket_keys entries, each of which now
+                also carries key_version.
         '400': { description: X-Device-MAC header required }
         '401': { description: Invalid or missing device signature }
         '404': { description: No images available }

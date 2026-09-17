@@ -18,6 +18,10 @@ export function generateApiKey(): string {
 
 export interface AuthenticatedUser {
   id: string;
+  // Manually flipped in D1 only — see migrations/0018_public_buckets.sql.
+  // Fetched here (not a separate query per route) since every superuser-gated
+  // route already needs c.var.user populated anyway.
+  is_superuser: boolean;
 }
 
 /** Verifies `Authorization: Bearer <key>` against users.api_key_hash. Returns null if absent/invalid. */
@@ -29,9 +33,9 @@ export async function authenticateAdmin(env: Env, request: Request): Promise<Aut
   if (!key) return null;
 
   const keyHash = await hashApiKey(key);
-  const row = await env.DB.prepare("SELECT id FROM users WHERE api_key_hash = ?")
+  const row = await env.DB.prepare("SELECT id, is_superuser FROM users WHERE api_key_hash = ?")
     .bind(keyHash)
-    .first<{ id: string }>();
+    .first<{ id: string; is_superuser: number }>();
 
-  return row ?? null;
+  return row ? { id: row.id, is_superuser: row.is_superuser === 1 } : null;
 }

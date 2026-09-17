@@ -28,9 +28,10 @@ import {
   wrapKeyFor,
   type WrappedKey,
 } from "./crypto";
-import { decodeToLandscapeBuffer } from "./decode";
+import { DEFAULT_CROP, decodeToLandscapeBuffer, type CropParams } from "./decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
 import type { DitherAlgorithm } from "../lib/media-constants";
+import { compressPackedForUpload } from "./compress";
 import { makeThumbnailJpeg } from "./thumbnail";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
 
@@ -58,6 +59,19 @@ let sharingPublicKeyRaw: Uint8Array | null = null;
 // bucketId -> that bucket's unwrapped AES-256-GCM content key, populated by
 // renderApp() from each bucket's caller-specific WrappedKey.
 const bucketAesKeys = new Map<string, CryptoKey>();
+
+// ---- Upload / crop modal state ----
+// CSS size of the crop viewport (see .crop-viewport in style.css) — must stay
+// in the same 3:4 ratio as PORTRAIT_WIDTH x PORTRAIT_HEIGHT so the on-screen
+// crop preview matches what decodeToLandscapeBuffer actually produces.
+const CROP_BOX_W = 210;
+const CROP_BOX_H = 280;
+let uploadModalDeviceKey: string | null = null;
+let uploadModalFile: File | null = null;
+let uploadObjectUrl: string | null = null;
+let cropNatural = { w: 0, h: 0 };
+let cropState: CropParams = { ...DEFAULT_CROP };
+let cropDrag: { startX: number; startY: number; startLeft: number; startTop: number } | null = null;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -123,16 +137,48 @@ function switchTab(name: string) {
 }
 (window as any).switchTab = switchTab;
 
+function toggleAccordion(id: string) {
+  el(id).classList.toggle("open");
+}
+(window as any).toggleAccordion = toggleAccordion;
+
 function passkeysSupported(): boolean {
   const PKC = (window as any).PublicKeyCredential;
   return !!(PKC && PKC.parseCreationOptionsFromJSON && PKC.parseRequestOptionsFromJSON);
+}
+
+// Must match lib/webauthn.ts's PRF_SALT exactly (same literal string, so the
+// same raw bytes) — the salt isn't secret, it only needs to be fixed so the
+// same credential always yields the same PRF output.
+const PRF_SALT_BYTES = new TextEncoder().encode("eink-pictureframe-prf-salt-v1");
+
+/**
+ * PublicKeyCredential.parseCreationOptionsFromJSON()/parseRequestOptionsFromJSON()
+ * are relied on to convert the server's base64url `extensions.prf.eval.first`
+ * into a real ArrayBuffer before navigator.credentials.create()/get() sees it
+ * — but PRF's specific JSON-serialization conversion is a newer, less
+ * uniformly-implemented corner of that spec than the extension itself. If a
+ * browser's parser doesn't know about `prf`'s nested fields, it silently
+ * leaves `first` as a plain string, the browser's WebAuthn engine can't
+ * evaluate PRF with a malformed input, and PRF quietly never fires — for
+ * every account, on every ceremony, regardless of how PRF-capable the actual
+ * authenticator is (this was happening in practice, not hypothetically: see
+ * git history around 2026-09-17). Since the salt is a fixed constant known to
+ * both sides already, sidestep the conversion entirely for this one field
+ * rather than trust it — construct the real ArrayBuffer ourselves.
+ */
+function ensurePrfExtensionInput(options: any): void {
+  options.extensions = options.extensions || {};
+  options.extensions.prf = { eval: { first: PRF_SALT_BYTES } };
 }
 
 /** Reads this ceremony's WebAuthn PRF result, if the authenticator returned
  *  one — undefined otherwise (older security keys, unsupported platforms). */
 function readPrfOutput(credential: any): ArrayBuffer | undefined {
   const results = credential.getClientExtensionResults?.();
-  return results?.prf?.results?.first;
+  const output = results?.prf?.results?.first;
+  console.log("WebAuthn PRF extension results:", results?.prf, output ? `got ${output.byteLength}-byte output` : "no output");
+  return output;
 }
 
 /** Called once, right after a successful registration ceremony: generates
@@ -223,6 +269,7 @@ el("passkey-signup-btn").addEventListener("click", async () => {
   try {
     const { attemptId, options } = await publicFetch("/auth/register/options", {});
     const creationOptions = (window as any).PublicKeyCredential.parseCreationOptionsFromJSON(options);
+    ensurePrfExtensionInput(creationOptions);
     const credential: any = await navigator.credentials.create({ publicKey: creationOptions });
     const sharingKeyFields = await completeRegistrationSharingKey(credential);
     const result = await publicFetch("/auth/register/verify", {
@@ -246,6 +293,7 @@ el("passkey-login-btn").addEventListener("click", async () => {
   try {
     const { attemptId, options } = await publicFetch("/auth/login/options", {});
     const requestOptions = (window as any).PublicKeyCredential.parseRequestOptionsFromJSON(options);
+    ensurePrfExtensionInput(requestOptions);
     const credential: any = await navigator.credentials.get({ publicKey: requestOptions });
     const loginResult = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
     setApiKey(loginResult.api_key);
@@ -279,6 +327,7 @@ async function tryLogin(showError: boolean): Promise<boolean> {
   try {
     currentUser = await apiFetch("/admin/me");
     renderWhoami();
+    renderPublicBucketCheckboxVisibility();
     el("login").style.display = "none";
     el("app").style.display = "block";
     await renderApp();
@@ -331,6 +380,23 @@ el("rotate-key-btn").addEventListener("click", async () => {
   }
 });
 
+function openRegisterModal() {
+  el("register-modal-overlay").classList.add("open");
+  el<HTMLInputElement>("new-device-mac").focus();
+}
+(window as any).openRegisterModal = openRegisterModal;
+
+function closeRegisterModal() {
+  el("register-modal-overlay").classList.remove("open");
+}
+// The "+" button now sends people through Device Setup (Bluetooth pairing +
+// registration in one step) instead of this modal's manual MAC-entry form.
+// The modal itself stays around only for the "scan to register" QR-claim
+// flow (renderClaimBanner below), where the MAC is already known from the
+// scan rather than hand-typed.
+el("add-device-btn").addEventListener("click", () => { location.href = "/provision"; });
+el("register-modal-close-btn").addEventListener("click", closeRegisterModal);
+
 el("register-device-btn").addEventListener("click", async () => {
   const mac = el<HTMLInputElement>("new-device-mac").value.trim();
   const label = el<HTMLInputElement>("new-device-label").value.trim();
@@ -354,6 +420,7 @@ el("register-device-btn").addEventListener("click", async () => {
       pendingClaimSecret = null;
       history.replaceState(null, "", location.pathname);
     }
+    closeRegisterModal();
     await renderApp();
   } catch (err: any) {
     showMessage("app-message", "Failed to register device: " + err.message, "error");
@@ -475,16 +542,22 @@ function formatUptime(createdAtSeconds: number): string {
   return Math.floor(seconds / 60) + "m";
 }
 
+// Green/yellow/red pill matching the physical battery level, using the same
+// spectra palette as everything else (see style.css's brand-dots comment).
+function batteryPillHtml(voltage: number): string {
+  const pct = batteryPercent(voltage);
+  const tone = pct >= 50 ? "green" : pct >= 20 ? "yellow" : "red";
+  return '<span class="pill ' + tone + '">' + voltage.toFixed(2) + "V &middot; " + pct + "%</span>";
+}
+
 function renderDevicesTable(devices: any[]) {
   const tbody = el("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="hint">No devices registered yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No devices registered yet &mdash; add one below.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
-    const battery = d.last_battery_voltage != null
-      ? d.last_battery_voltage.toFixed(2) + "V (" + batteryPercent(d.last_battery_voltage) + "%)"
-      : '<span class="hint">n/a</span>';
+    const battery = d.last_battery_voltage != null ? batteryPillHtml(d.last_battery_voltage) : '<span class="hint">n/a</span>';
     const lastSeen = d.last_seen_at
       ? new Date(d.last_seen_at * 1000).toLocaleString() + (d.last_seen_ip ? " (" + escapeHtml(d.last_seen_ip) + ")" : "")
       : '<span class="hint">never</span>';
@@ -492,7 +565,7 @@ function renderDevicesTable(devices: any[]) {
       ? escapeHtml(d.running_firmware_version)
       : '<span class="hint">unknown</span>';
     const board = d.board
-      ? "<code>" + escapeHtml(d.board) + "</code>"
+      ? '<span class="pill">' + escapeHtml(d.board) + "</span>"
       : '<span class="hint">unknown</span>';
     const uptime = d.created_at
       ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatUptime(d.created_at) + "</span>"
@@ -501,10 +574,7 @@ function renderDevicesTable(devices: any[]) {
     const currentImage = !d.current_image
       ? '<span class="hint">n/a</span>'
       : currentImageThumbUrl
-      ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \'full-device-' + escapeHtml(d.mac) + '\', \'' + d.current_image.id + '\', \'' + escapeHtml(d.current_image.source_bucket_id) + '\')">' +
-          '<img class="thumb" src="' + currentImageThumbUrl + '" alt="" width="34" height="45">' +
-          '<div class="thumb-popup" id="full-device-' + escapeHtml(d.mac) + '"><p class="hint">Loading…</p></div>' +
-        "</div>"
+      ? '<img class="device-thumb" src="' + currentImageThumbUrl + '" alt="" onclick="openLightbox(\'' + d.current_image.id + '\', \'' + escapeHtml(d.current_image.source_bucket_id) + '\', \'' + escapeHtml(d.current_image.filename).replace(/'/g, "\\'") + '\')">'
       : escapeHtml(d.current_image.filename);
     return "<tr>" +
       "<td><code>" + escapeHtml(d.mac) + "</code></td>" +
@@ -515,9 +585,9 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + uptime + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
-      "<td>" + bucketLabelsFor(d.bucket_ids) + '<br><button class="ghost" onclick="openBucketModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
-      '<td><button class="ghost" onclick="openScheduleModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
-      '<td><button class="danger" onclick="deleteDevice(\'' + escapeHtml(d.mac) + '\')">Remove</button></td>' +
+      "<td>" + bucketLabelsFor(d.bucket_ids) + '<br><button class="ghost sm" onclick="openBucketModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
+      '<td><button class="ghost sm" onclick="openScheduleModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
+      '<td><button class="danger sm" onclick="deleteDevice(\'' + escapeHtml(d.mac) + '\')">Remove</button></td>' +
       "</tr>";
   }).join("");
 }
@@ -611,52 +681,24 @@ const thumbnailUrlCache: Record<string, string> = {};
 
 const fullImageUrlCache: Record<string, string> = {};
 
-// The popup is position:fixed, so top/left are viewport-relative and must be
-// computed on every hover (scroll position and which grid column the thumbnail
-// sits in both affect where it'd otherwise run off-screen). Sized against the
-// worst case (the img's own max-width/max-height are 45vw/70vh) rather than the
-// popup's actual rendered size, which isn't known until the image finishes
-// loading — this only ever leaves extra margin, never causes an overflow.
-function positionThumbPopup(wrapEl: HTMLElement, popupEl: HTMLElement) {
-  const margin = 10;
-  const maxW = window.innerWidth * 0.45 + 14;
-  const maxH = window.innerHeight * 0.70 + 14;
-  const rect = wrapEl.getBoundingClientRect();
-
-  let left = rect.right + 8;
-  if (left + maxW > window.innerWidth - margin) {
-    left = rect.left - maxW - 8;
-  }
-  left = Math.max(margin, Math.min(left, window.innerWidth - maxW - margin));
-
-  let top = Math.min(rect.top, window.innerHeight - maxH - margin);
-  top = Math.max(margin, top);
-
-  popupEl.style.left = left + "px";
-  popupEl.style.top = top + "px";
+// Click-to-open lightbox — replaces the old hover-popup (hover doesn't exist
+// on touch devices, and a popup that can run off-screen is a worse "look at
+// this photo" experience than a centered overlay). Lazy-fetches/decrypts the
+// full-resolution image on first open per imageId, then serves from
+// fullImageUrlCache on repeat opens in the same session.
+function openLightbox(imageId: string, bucketId: string, filename: string) {
+  const overlay = el("lightbox-overlay");
+  const content = el("lightbox-content");
+  el("lightbox-caption").textContent = filename;
+  content.innerHTML = '<p class="hint" style="color:white;">Loading…</p>';
+  overlay.classList.add("open");
+  loadLightboxImage(content, imageId, bucketId);
 }
+(window as any).openLightbox = openLightbox;
 
-// popupId is the DOM id of this thumb's popup div; imageId is what's fetched/cached.
-// Kept separate because the same image can appear in two different popups at once
-// (e.g. a device's "Current image" and its source bucket's row both show it) —
-// reusing "full-" + imageId as the DOM id for both would collide. bucketId says
-// which content key decrypts this image's ciphertext once fetched.
-function onThumbHover(wrapEl: HTMLElement, popupId: string, imageId: string, bucketId: string) {
-  const popup = document.getElementById(popupId);
-  if (popup) positionThumbPopup(wrapEl, popup);
-  loadFullImage(popupId, imageId, bucketId);
-}
-(window as any).onThumbHover = onThumbHover;
-
-// Lazy-loaded on first hover (the raw endpoint re-checks ownership per request,
-// so there's no point prefetching every thumbnail's full image up front). Cached
-// by object URL per image id so repeat hovers in the same session are instant.
-async function loadFullImage(popupId: string, imageId: string, bucketId: string) {
-  const popup = document.getElementById(popupId) as HTMLElement | null;
-  if (!popup || popup.dataset.loaded) return;
+async function loadLightboxImage(content: HTMLElement, imageId: string, bucketId: string) {
   if (fullImageUrlCache[imageId]) {
-    popup.innerHTML = '<img src="' + fullImageUrlCache[imageId] + '" alt="">';
-    popup.dataset.loaded = "1";
+    content.innerHTML = '<img src="' + fullImageUrlCache[imageId] + '" alt="">';
     return;
   }
   try {
@@ -667,13 +709,26 @@ async function loadFullImage(popupId: string, imageId: string, bucketId: string)
     const ciphertext = new Uint8Array(await res.arrayBuffer());
     const url = await decryptBytesToObjectUrl(bucketId, ciphertext);
     fullImageUrlCache[imageId] = url;
-    popup.innerHTML = '<img src="' + url + '" alt="">';
-    popup.dataset.loaded = "1";
+    content.innerHTML = '<img src="' + url + '" alt="">';
   } catch (err: any) {
-    popup.innerHTML = '<p class="hint">Failed to load: ' + escapeHtml(err.message) + "</p>";
+    content.innerHTML = '<p class="hint" style="color:white;">Failed to load: ' + escapeHtml(err.message) + "</p>";
   }
 }
-(window as any).loadFullImage = loadFullImage;
+
+function closeLightbox() {
+  el("lightbox-overlay").classList.remove("open");
+}
+el("lightbox-close-btn").addEventListener("click", closeLightbox);
+el("lightbox-overlay").addEventListener("click", (e) => {
+  if (e.target === el("lightbox-overlay")) closeLightbox();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeLightbox();
+    closeUploadModal();
+    closeRegisterModal();
+  }
+});
 
 async function deleteImage(id: string) {
   if (!confirm("Delete this image? This cannot be undone.")) return;
@@ -686,21 +741,329 @@ async function deleteImage(id: string) {
 }
 (window as any).deleteImage = deleteImage;
 
+// Whether this account holds a personal wrapped copy of the bucket's key —
+// true for the owner and for any accepted collaborator (see the join()
+// route), false for someone who can only see this bucket because it's public
+// (migrations/0018_public_buckets.sql — GET /admin/buckets surfaces
+// `public_key_raw` instead of `key` for exactly that case). This is the same
+// yes/no assertBucketAccess would give server-side for a write attempt, so
+// it's what gates upload/delete-image in the UI — distinct from `is_owner`,
+// which gates the owner-only sections (rename, sharing, delete, rotation,
+// public toggle) further down.
+function bucketHasWriteAccess(bucket: any): boolean {
+  return !!bucket.key;
+}
+
+function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotation: any | null): string {
+  const canWrite = bucketHasWriteAccess(bucket);
+  const tiles = images
+    .map((img) => {
+      const thumb = thumbnailUrlCache[img.id]
+        ? '<img src="' + thumbnailUrlCache[img.id] + '" alt="">'
+        : '<div class="photo-tile-empty hint">no preview</div>';
+      const deleteBtn = canWrite
+        ? '<button class="icon-btn photo-tile-delete" aria-label="Delete photo" onclick="event.stopPropagation(); deleteImage(\'' + img.id + '\')">&#10005;</button>'
+        : "";
+      return (
+        '<div class="photo-tile" onclick="openLightbox(\'' + img.id + '\', \'' + escapeHtml(bucket.id) + '\', \'' + escapeHtml(img.filename).replace(/'/g, "\\'") + '\')">' +
+          thumb +
+          '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
+          deleteBtn +
+          '<div class="photo-tile-caption">' + escapeHtml(img.filename) + "</div>" +
+        "</div>"
+      );
+    })
+    .join("");
+
+  const addTile = canWrite
+    ? '<button type="button" class="photo-tile photo-tile-add" onclick="openUploadModal(\'' + escapeHtml(bucket.id) + '\')">' +
+        '<span class="plus">+</span> Add photo' +
+      "</button>"
+    : "";
+
+  const isOwnedShareable = bucket.is_owner;
+  const collabList = collaborators.length
+    ? '<ul class="collab-list">' +
+      collaborators
+        .map(
+          (u) =>
+            "<li>" + escapeHtml(u.display_name || "Account " + u.id.slice(0, 8)) +
+            ' <button class="ghost sm" onclick="removeBucketCollaborator(\'' + escapeHtml(bucket.id) + '\', \'' + escapeHtml(u.id) + '\')">Remove</button></li>'
+        )
+        .join("") +
+      "</ul>"
+    : '<p class="hint">No collaborators yet.</p>';
+
+  const totalRotationImages = rotation ? rotation.done_image_ids.length + rotation.pending_image_ids.length : 0;
+  const rotationSection = !isOwnedShareable
+    ? ""
+    : rotation
+    ? '<div class="hint-block" style="margin-top:10px;">' +
+        "<p><strong>Key rotation in progress:</strong> " + rotation.done_image_ids.length + " of " + totalRotationImages + " images re-encrypted.</p>" +
+        '<button class="ghost sm" onclick="runBucketRotation(\'' + escapeHtml(bucket.id) + '\')">Resume rotation</button>' +
+      "</div>"
+    : '<button class="ghost sm" onclick="runBucketRotation(\'' + escapeHtml(bucket.id) + '\')">Rotate key&hellip;</button>';
+
+  // Public toggle: superuser-only (checked client-side for display; the
+  // Worker re-checks is_superuser server-side regardless — see
+  // routes/admin/buckets.ts's PATCH handler), and only ever shown to the
+  // owner — a collaborator can't make someone else's bucket public.
+  const publicToggle =
+    isOwnedShareable && currentUser && currentUser.is_superuser
+      ? '<button class="ghost sm" onclick="toggleBucketPublic(\'' + escapeHtml(bucket.id) + "', " + (bucket.is_public ? "false" : "true") + ')">' +
+          (bucket.is_public ? "Make private" : "Make public&hellip;") +
+        "</button>"
+      : "";
+
+  // Shared-with-me cue: not the owner, but holds a personal wrapped key (a
+  // collaborator via bucket_shares/join()). No display name is available for
+  // another account's owner (GET /admin/buckets only returns `owner_id`, a
+  // raw uuid — same fallback style as collabList's own "no display_name" case
+  // above) rather than inventing a new API field for this.
+  const isSharedWithMe = !isOwnedShareable && canWrite;
+
+  const ownerSection = isOwnedShareable
+    ? '<h4 style="margin-top:18px;">Sharing</h4>' +
+      collabList +
+      '<div class="inline-form" style="margin-top:8px;">' +
+        '<button class="ghost sm" onclick="createBucketInvite(\'' + escapeHtml(bucket.id) + '\')">Get invite link</button>' +
+        publicToggle +
+        '<button class="danger sm" onclick="deleteBucket(\'' + escapeHtml(bucket.id) + '\')">Delete bucket</button>' +
+      "</div>" +
+      '<h4 style="margin-top:18px;">Key rotation</h4>' +
+      '<p class="hint hint-block">Generates a new encryption key, re-encrypts every image in this bucket under it, then revokes the old key for everyone. Use this after removing a collaborator or device you want to make sure can no longer read this bucket.</p>' +
+      rotationSection
+    : isSharedWithMe
+    ? '<p class="hint hint-block" style="margin-top:14px;">Shared by ' + escapeHtml("Account " + String(bucket.owner_id || "").slice(0, 8)) +
+      '. You can upload and delete photos and assign this bucket to your own devices, but only the owner can rename, delete, or manage sharing.</p>'
+    : !canWrite
+    ? '<p class="hint hint-block" style="margin-top:14px;">Public bucket — read-only. You can view its photos and assign it to your own devices, but only its owner can add, delete, rename, or share it.</p>'
+    : "";
+
+  const publicPill = bucket.is_public ? '<span class="pill green">Public</span>' : "";
+  const sharedPill = isSharedWithMe ? '<span class="pill">Shared</span>' : "";
+
+  const titleRow =
+    '<div class="card-head">' +
+      "<h3>" + escapeHtml(bucket.label) + "</h3>" +
+      '<div style="display:flex; gap:6px; align-items:center;">' +
+        publicPill +
+        sharedPill +
+        '<span class="pill blue">' + images.length + (images.length === 1 ? " photo" : " photos") + "</span>" +
+      "</div>" +
+    "</div>" +
+    (isOwnedShareable ? '<button class="ghost sm" onclick="renameBucket(\'' + escapeHtml(bucket.id) + '\')">Rename</button>' : "");
+
+  return (
+    '<div class="card">' +
+      titleRow +
+      '<div class="photo-grid">' + tiles + addTile + "</div>" +
+      ownerSection +
+    "</div>"
+  );
+}
+
+// Toggles is_public on a bucket the caller owns — only ever rendered for a
+// superuser owner (see bucketCardHtml's publicToggle) but re-checked
+// server-side regardless. Turning ON uploads this bucket's already-unlocked
+// raw key as `public_key_raw` (the owner's browser already holds it via its
+// own wrapped copy in bucketAesKeys — see root CLAUDE.md's public-buckets
+// plan); turning OFF just clears the flag (the Worker nulls public_key_raw).
+async function toggleBucketPublic(bucketId: string, makePublic: boolean) {
+  if (
+    makePublic &&
+    !confirm(
+      "Make this bucket public? Every account on this server will be able to view its photos (read-only) and assign it to their own devices. This can be undone, but anyone who already has the key keeps read access to images already in the bucket until you rotate the key."
+    )
+  ) {
+    return;
+  }
+  try {
+    const body: { is_public: boolean; public_key_raw?: string } = { is_public: makePublic };
+    if (makePublic) {
+      const bucketKey = bucketAesKeys.get(bucketId);
+      if (!bucketKey) throw new Error("this bucket's key isn't unlocked in this session");
+      body.public_key_raw = toBase64(await exportAesKeyRaw(bucketKey));
+    }
+    await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await renderApp();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to update bucket visibility: " + err.message, "error");
+  }
+}
+(window as any).toggleBucketPublic = toggleBucketPublic;
+
+// ---- Upload / crop modal ----
+
+function openUploadModal(deviceKey: string) {
+  if (!bucketAesKeys.get(deviceKey)) {
+    showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
+    return;
+  }
+  uploadModalDeviceKey = deviceKey;
+  uploadModalFile = null;
+  if (uploadObjectUrl) { URL.revokeObjectURL(uploadObjectUrl); uploadObjectUrl = null; }
+  cropState = { ...DEFAULT_CROP };
+  el("upload-modal-title").textContent = "Add a photo";
+  renderUploadDropzone();
+  el("upload-modal-overlay").classList.add("open");
+}
+(window as any).openUploadModal = openUploadModal;
+
+function closeUploadModal() {
+  el("upload-modal-overlay").classList.remove("open");
+  if (uploadObjectUrl) { URL.revokeObjectURL(uploadObjectUrl); uploadObjectUrl = null; }
+  uploadModalFile = null;
+}
+el("upload-modal-close-btn").addEventListener("click", closeUploadModal);
+
+function renderUploadDropzone() {
+  el("upload-modal-body").innerHTML =
+    '<label class="dropzone" id="upload-dropzone" for="upload-file-input">' +
+      '<span class="plus">+</span>' +
+      "Drop a photo here, or click to choose one" +
+    "</label>" +
+    '<input type="file" id="upload-file-input" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" style="display:none;">';
+
+  const dropzone = el("upload-dropzone");
+  const fileInput = el<HTMLInputElement>("upload-file-input");
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) selectUploadFile(file);
+  });
+  dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("drag-over"); });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag-over"));
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("drag-over");
+    const file = e.dataTransfer?.files?.[0];
+    if (file) selectUploadFile(file);
+  });
+}
+
+function selectUploadFile(file: File) {
+  uploadModalFile = file;
+  cropState = { ...DEFAULT_CROP };
+  if (uploadObjectUrl) URL.revokeObjectURL(uploadObjectUrl);
+  uploadObjectUrl = URL.createObjectURL(file);
+  el("upload-modal-title").textContent = "Position &amp; upload";
+  renderUploadCropStage(file.name);
+}
+
+function renderUploadCropStage(defaultFilename: string) {
+  const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
+  el("upload-modal-body").innerHTML =
+    '<div class="crop-stage">' +
+      '<div class="crop-viewport" id="upload-crop-viewport">' +
+        '<img id="upload-crop-img" src="' + uploadObjectUrl + '" alt="">' +
+      "</div>" +
+      '<div class="crop-controls">' +
+        '<p class="crop-hint hint-block">Drag the photo to reposition it, and zoom in if you want to fill the frame differently. The box shows exactly what the display will show.</p>' +
+        '<div class="crop-zoom-row">' +
+          "<span>Zoom</span>" +
+          '<input type="range" id="upload-zoom-slider" min="100" max="300" step="1" value="100">' +
+          '<button class="ghost sm" id="upload-crop-reset-btn" type="button">Reset</button>' +
+        "</div>" +
+        '<div class="row"><label>Filename</label><input type="text" id="upload-filename-input" value="' + escapeHtml(defaultFilename) + '"></div>' +
+        '<div class="row"><label>Dither</label><select id="upload-dither-select">' + ditherOptions + "</select></div>" +
+        '<button id="upload-confirm-btn">Upload photo</button>' +
+      "</div>" +
+    "</div>";
+
+  const img = el<HTMLImageElement>("upload-crop-img");
+  img.addEventListener("load", () => {
+    cropNatural = { w: img.naturalWidth, h: img.naturalHeight };
+    layoutCropImage();
+  });
+
+  const viewport = el("upload-crop-viewport");
+  viewport.addEventListener("pointerdown", onCropPointerDown);
+  viewport.addEventListener("pointermove", onCropPointerMove);
+  viewport.addEventListener("pointerup", onCropPointerUp);
+  viewport.addEventListener("pointercancel", onCropPointerUp);
+
+  el<HTMLInputElement>("upload-zoom-slider").addEventListener("input", (e) => {
+    cropState.zoom = Number((e.target as HTMLInputElement).value) / 100;
+    layoutCropImage();
+  });
+  el("upload-crop-reset-btn").addEventListener("click", () => {
+    cropState = { ...DEFAULT_CROP };
+    el<HTMLInputElement>("upload-zoom-slider").value = "100";
+    layoutCropImage();
+  });
+  el("upload-confirm-btn").addEventListener("click", confirmUpload);
+}
+
+// Positions/sizes the crop preview image from cropNatural + cropState, at the
+// crop viewport's fixed CSS size — see CropParams in decode.ts for how panX/
+// panY/zoom map onto the final 1200x1600 crop (the same fractions, just
+// applied at preview resolution instead of full resolution).
+function layoutCropImage() {
+  if (!cropNatural.w || !cropNatural.h) return;
+  const img = el<HTMLImageElement>("upload-crop-img");
+  const coverScale = Math.max(CROP_BOX_W / cropNatural.w, CROP_BOX_H / cropNatural.h);
+  const scale = coverScale * cropState.zoom;
+  const w = cropNatural.w * scale;
+  const h = cropNatural.h * scale;
+  img.style.width = w + "px";
+  img.style.height = h + "px";
+  const minLeft = CROP_BOX_W - w;
+  const minTop = CROP_BOX_H - h;
+  img.style.left = minLeft * cropState.panX + "px";
+  img.style.top = minTop * cropState.panY + "px";
+}
+
+function onCropPointerDown(e: PointerEvent) {
+  const viewport = el("upload-crop-viewport");
+  viewport.setPointerCapture(e.pointerId);
+  viewport.classList.add("dragging");
+  const img = el<HTMLImageElement>("upload-crop-img");
+  cropDrag = {
+    startX: e.clientX,
+    startY: e.clientY,
+    startLeft: parseFloat(img.style.left) || 0,
+    startTop: parseFloat(img.style.top) || 0,
+  };
+}
+function onCropPointerMove(e: PointerEvent) {
+  if (!cropDrag) return;
+  const img = el<HTMLImageElement>("upload-crop-img");
+  const w = img.offsetWidth;
+  const h = img.offsetHeight;
+  const minLeft = Math.min(0, CROP_BOX_W - w);
+  const minTop = Math.min(0, CROP_BOX_H - h);
+  const left = Math.min(0, Math.max(minLeft, cropDrag.startLeft + (e.clientX - cropDrag.startX)));
+  const top = Math.min(0, Math.max(minTop, cropDrag.startTop + (e.clientY - cropDrag.startY)));
+  img.style.left = left + "px";
+  img.style.top = top + "px";
+  cropState.panX = minLeft === 0 ? 0.5 : left / minLeft;
+  cropState.panY = minTop === 0 ? 0.5 : top / minTop;
+}
+function onCropPointerUp(e: PointerEvent) {
+  if (!cropDrag) return;
+  cropDrag = null;
+  el("upload-crop-viewport").classList.remove("dragging");
+  try { el("upload-crop-viewport").releasePointerCapture(e.pointerId); } catch {}
+}
+
 /**
- * Decode -> EXIF-correct -> resize/crop -> rotate -> enhance -> dither -> pack
- * -> hash -> encrypt now all run here, client-side — the Worker never sees
- * plaintext (see root CLAUDE.md's encrypted-buckets plan). `packed_hash` is
- * computed over the encrypted packed blob, not the plaintext, since that's
- * the only thing the server can compare on later requests.
+ * Decode -> EXIF-correct -> crop (per cropState, from the interactive picker
+ * above) -> rotate -> enhance -> dither -> pack -> hash -> encrypt now all run
+ * here, client-side — the Worker never sees plaintext (see root CLAUDE.md's
+ * encrypted-buckets plan). `packed_hash` is computed over the encrypted
+ * packed blob, not the plaintext, since that's the only thing the server can
+ * compare on later requests.
  */
-async function uploadImage(deviceKey: string) {
-  const fileInput = el<HTMLInputElement>("upload-file-" + deviceKey);
-  const filenameInput = el<HTMLInputElement>("upload-filename-" + deviceKey);
-  const ditherSelect = el<HTMLSelectElement>("upload-dither-" + deviceKey);
-  const file = fileInput.files ? fileInput.files[0] : undefined;
-  if (!file) { showMessage("app-message", "Choose a file first.", "error"); return; }
-  const filename = (filenameInput.value || file.name).trim();
-  const dither = ditherSelect.value as DitherAlgorithm;
+async function confirmUpload() {
+  const deviceKey = uploadModalDeviceKey;
+  const file = uploadModalFile;
+  if (!deviceKey || !file) return;
+  const filename = (el<HTMLInputElement>("upload-filename-input").value || file.name).trim();
+  const dither = el<HTMLSelectElement>("upload-dither-select").value as DitherAlgorithm;
 
   const bucketKey = bucketAesKeys.get(deviceKey);
   if (!bucketKey) {
@@ -708,24 +1071,33 @@ async function uploadImage(deviceKey: string) {
     return;
   }
 
+  const confirmBtn = el<HTMLButtonElement>("upload-confirm-btn");
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = "Processing…";
+
   try {
-    showMessage("app-message", "Processing and encrypting image…", "");
     const rawBytes = new Uint8Array(await file.arrayBuffer());
-    const landscape = await decodeToLandscapeBuffer(file);
+    const landscape = await decodeToLandscapeBuffer(file, cropState);
     enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
     const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
     const packed = packToNibbles(indices);
     const thumbnail = await makeThumbnailJpeg(landscape.portrait.rgba, landscape.portrait.width, landscape.portrait.height);
 
+    // Compress the plaintext packed buffer BEFORE encrypting it - ciphertext
+    // doesn't compress meaningfully (see compress.ts's doc comment). Only
+    // actually ships the compressed form if it's meaningfully smaller.
+    const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
     const [rawCiphertext, packedCiphertext, thumbCiphertext] = await Promise.all([
       aesGcmEncryptBlob(bucketKey, rawBytes),
-      aesGcmEncryptBlob(bucketKey, packed),
+      aesGcmEncryptBlob(bucketKey, packedForUpload),
       aesGcmEncryptBlob(bucketKey, thumbnail),
     ]);
     const packedHash = await computeHash16(packedCiphertext);
 
     const formData = new FormData();
     formData.set("dither_algorithm", dither);
+    formData.set("packed_encoding", packedEncoding);
     formData.set("packed_hash", packedHash);
     formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
     formData.set("packed", new Blob([new Uint8Array(packedCiphertext)]), "packed.bin");
@@ -737,77 +1109,13 @@ async function uploadImage(deviceKey: string) {
       "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) + "&filename=" + encodeURIComponent(filename),
       { method: "POST", body: formData }
     );
-    fileInput.value = "";
-    filenameInput.value = "";
+    closeUploadModal();
     await renderApp();
   } catch (err: any) {
     showMessage("app-message", "Failed to upload image: " + err.message, "error");
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = "Upload photo";
   }
-}
-(window as any).uploadImage = uploadImage;
-
-function bucketCardHtml(bucket: any, images: any[], collaborators: any[]): string {
-  const deviceKey = bucket.id;
-  const rows = images.length
-    ? images.map((img) =>
-        "<tr>" +
-        "<td>" + (thumbnailUrlCache[img.id]
-          ? '<div class="thumb-wrap" onmouseenter="onThumbHover(this, \'full-' + img.id + '\', \'' + img.id + '\', \'' + escapeHtml(bucket.id) + '\')">' +
-              '<img class="thumb" src="' + thumbnailUrlCache[img.id] + '" alt="" width="45" height="60">' +
-              '<div class="thumb-popup" id="full-' + img.id + '"><p class="hint">Loading…</p></div>' +
-            "</div>"
-          : '<span class="hint">n/a</span>') + "</td>" +
-        "<td><code>" + escapeHtml(img.filename) + "</code></td>" +
-        '<td><span class="pill">' + escapeHtml(img.dither_algorithm) + "</span></td>" +
-        "<td>" + new Date(img.created_at * 1000).toLocaleDateString() + "</td>" +
-        '<td><button class="danger" onclick="deleteImage(\'' + img.id + '\')">Delete</button></td>' +
-        "</tr>"
-      ).join("")
-    : '<tr><td colspan="5" class="hint">No images yet.</td></tr>';
-
-  const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
-
-  const isOwnedShareable = bucket.is_owner;
-  const collabList = collaborators.length
-    ? '<ul class="collab-list">' +
-      collaborators
-        .map(
-          (u) =>
-            "<li>" + escapeHtml(u.display_name || "Account " + u.id.slice(0, 8)) +
-            ' <button class="ghost" onclick="removeBucketCollaborator(\'' + escapeHtml(bucket.id) + '\', \'' + escapeHtml(u.id) + '\')">Remove</button></li>'
-        )
-        .join("") +
-      "</ul>"
-    : '<p class="hint">No collaborators yet.</p>';
-
-  const ownerSection = isOwnedShareable
-    ? '<h4 style="margin-top:18px;">Sharing</h4>' +
-      collabList +
-      '<div class="inline-form" style="margin-top:8px;">' +
-        '<button class="ghost" onclick="createBucketInvite(\'' + escapeHtml(bucket.id) + '\')">Get invite link</button>' +
-        '<button class="danger" onclick="deleteBucket(\'' + escapeHtml(bucket.id) + '\')">Delete bucket</button>' +
-      "</div>"
-    : "";
-
-  const titleRow =
-    "<h3>" + escapeHtml(bucket.label) + ' <span class="pill">' + images.length + (images.length === 1 ? " image" : " images") + "</span>" +
-    (isOwnedShareable ? ' <button class="ghost" onclick="renameBucket(\'' + escapeHtml(bucket.id) + '\')">Rename</button>' : "") +
-    "</h3>";
-
-  return (
-    '<div class="card">' +
-      titleRow +
-      "<table><thead><tr><th></th><th>Filename</th><th>Dither</th><th>Uploaded</th><th></th></tr></thead>" +
-      "<tbody>" + rows + "</tbody></table>" +
-      '<div class="inline-form" style="margin-top:12px;">' +
-        '<div class="row"><label>Image file</label><input type="file" id="upload-file-' + deviceKey + '" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp"></div>' +
-        '<div class="row"><label>Filename</label><input type="text" id="upload-filename-' + deviceKey + '" placeholder="(from file)"></div>' +
-        '<div class="row"><label>Dither</label><select id="upload-dither-' + deviceKey + '">' + ditherOptions + "</select></div>" +
-        '<button onclick="uploadImage(\'' + deviceKey + '\')">Upload</button>' +
-      "</div>" +
-      ownerSection +
-    "</div>"
-  );
 }
 
 async function createBucketInvite(bucketId: string) {
@@ -879,6 +1187,266 @@ async function removeBucketCollaborator(bucketId: string, userId: string) {
 }
 (window as any).removeBucketCollaborator = removeBucketCollaborator;
 
+// ---- Bucket key rotation ----
+// Closes the "no crypto-level revocation" gap in root CLAUDE.md's
+// encrypted-buckets plan: POST /admin/buckets/:id/rotate/start et al (see
+// routes/admin/buckets.ts) do the bookkeeping, but only this browser can
+// actually perform the work, since it's the one holding both the bucket's
+// OLD content key (already unwrapped into bucketAesKeys by renderApp) and,
+// for the duration of one rotation, the NEW one it either just generated or
+// recovered from GET rotate/status's your_new_key. There is deliberately no
+// server-side "just re-encrypt it for me" — the whole point of client-side
+// encryption is that the Worker never sees plaintext, and rotation is no
+// exception: every image is downloaded, decrypted, and re-encrypted here.
+
+function rotateModalUpdate(done: number, total: number, note?: string) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 100;
+  el("rotate-modal-body").innerHTML =
+    "<p>" + done + " of " + total + " images re-encrypted (" + pct + "%).</p>" +
+    '<div class="progress-track">' +
+      '<div class="progress-fill" style="width:' + pct + '%;"></div>' +
+    "</div>" +
+    (note ? '<p class="hint" style="margin-top:10px;">' + escapeHtml(note) + "</p>" : "");
+}
+function rotateModalOpen(done: number, total: number) {
+  el("rotate-modal-title").textContent = "Rotating bucket key";
+  rotateModalUpdate(done, total);
+  el("rotate-modal-overlay").classList.add("open");
+}
+function rotateModalClose() {
+  el("rotate-modal-overlay").classList.remove("open");
+}
+el("rotate-modal-close-btn").addEventListener("click", rotateModalClose);
+
+/**
+ * Re-encrypts one image under `newKey`: fetches and decrypts its raw original
+ * (the only ciphertext an admin route exposes — there is no route to fetch an
+ * image's already-processed packed/thumb blobs) under `oldKey`, then re-runs
+ * the exact decode -> enhance -> dither -> pack -> thumbnail pipeline
+ * confirmUpload() uses, so the result is the same processing applied again,
+ * not a copy of bytes that happen to already exist. Note this re-crops with
+ * the DEFAULT_CROP framing (centered, no zoom): per-image pan/zoom choices
+ * made at original upload time aren't persisted anywhere server-side (they're
+ * baked directly into the packed pixels, never stored as separate metadata),
+ * so there's no way to reproduce a custom crop here — only the pixels for a
+ * previously-default-cropped image are guaranteed to come out identical.
+ */
+async function reencryptOneImage(
+  bucketId: string,
+  rotationId: string,
+  imageId: string,
+  ditherAlgorithm: DitherAlgorithm,
+  oldKey: CryptoKey,
+  newKey: CryptoKey
+): Promise<void> {
+  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
+    headers: { Authorization: "Bearer " + getApiKey() },
+  });
+  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  const rawCiphertext = new Uint8Array(await res.arrayBuffer());
+  const rawBytes = await aesGcmDecryptBlob(oldKey, rawCiphertext);
+
+  const landscape = await decodeToLandscapeBuffer(new Blob([new Uint8Array(rawBytes)]));
+  enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+  const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
+  const packed = packToNibbles(indices);
+  const thumbnail = await makeThumbnailJpeg(landscape.portrait.rgba, landscape.portrait.width, landscape.portrait.height);
+
+  // Re-decides compression fresh from the freshly-recomputed packed bytes,
+  // same as confirmUpload() - this does NOT try to preserve whatever
+  // packed_encoding the image happened to have before rotation (there's
+  // nothing stored server-side to read a "how was this compressed" answer
+  // from without the bucket key anyway).
+  const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
+  const [newRawCiphertext, newPackedCiphertext, newThumbCiphertext] = await Promise.all([
+    aesGcmEncryptBlob(newKey, rawBytes),
+    aesGcmEncryptBlob(newKey, packedForUpload),
+    aesGcmEncryptBlob(newKey, thumbnail),
+  ]);
+  const packedHash = await computeHash16(newPackedCiphertext);
+
+  const formData = new FormData();
+  formData.set("packed_encoding", packedEncoding);
+  formData.set("packed_hash", packedHash);
+  formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
+  formData.set("packed", new Blob([new Uint8Array(newPackedCiphertext)]), "packed.bin");
+  formData.set("thumb", new Blob([new Uint8Array(newThumbCiphertext)]), "thumb.bin");
+
+  await apiFetch(
+    "/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/" + encodeURIComponent(rotationId) + "/reencrypt-image/" + encodeURIComponent(imageId),
+    { method: "POST", body: formData }
+  );
+}
+
+/**
+ * Starts a new rotation, or resumes one found via GET rotate/status (called
+ * unconditionally first — covers both an explicit "Resume rotation" click and
+ * a stale "Rotate key" click racing another tab that already started one).
+ * Drives the whole job in this one call: re-encrypt every pending image, then
+ * re-wrap the new key for every currently-listed collaborator and device and
+ * finalize. A failure at any point leaves the rotation exactly where it
+ * stopped — clicking the button again (this function) resumes from there via
+ * rotate/status, it does not restart from scratch.
+ */
+async function runBucketRotation(bucketId: string) {
+  if (!sharingPrivateKey || !sharingPublicKeyRaw) {
+    showMessage("app-message", "Log in with your passkey to rotate a bucket's key.", "error");
+    return;
+  }
+  const oldBucketKey = bucketAesKeys.get(bucketId);
+  if (!oldBucketKey) {
+    showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
+    return;
+  }
+
+  let status: any;
+  try {
+    status = await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/status");
+  } catch (err: any) {
+    showMessage("app-message", "Failed to check rotation status: " + err.message, "error");
+    return;
+  }
+
+  let rotationId: string;
+  let newKeyRaw: Uint8Array;
+  let pendingImageIds: string[];
+  let doneCount: number;
+
+  if (status.rotation) {
+    if (!status.rotation.your_new_key) {
+      showMessage(
+        "app-message",
+        "A rotation is already in progress for this bucket, but this browser session can't recover its new key. Resume it from the browser/account that started it.",
+        "error"
+      );
+      return;
+    }
+    try {
+      newKeyRaw = await unwrapKeyWith(sharingPrivateKey, status.rotation.your_new_key as WrappedKey, HKDF_INFO_BUCKET_WRAP);
+    } catch {
+      showMessage("app-message", "Failed to unwrap the in-progress rotation's new key.", "error");
+      return;
+    }
+    rotationId = status.rotation.id;
+    pendingImageIds = status.rotation.pending_image_ids;
+    doneCount = status.rotation.done_image_ids.length;
+  } else {
+    const proceed = confirm(
+      "Rotating this bucket's key re-downloads, re-decrypts, and re-encrypts EVERY image in this bucket (real bandwidth and time for a large bucket), then revokes the old key for anyone/anything not currently a collaborator or assigned device. This cannot be undone once it finishes. Continue?"
+    );
+    if (!proceed) return;
+
+    const newKey = await generateBucketKey();
+    newKeyRaw = await exportAesKeyRaw(newKey);
+    const wrappedForSelf = await wrapKeyFor(sharingPublicKeyRaw, newKeyRaw, HKDF_INFO_BUCKET_WRAP);
+    try {
+      const startResult = await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: wrappedForSelf }),
+      });
+      rotationId = startResult.rotation_id;
+      pendingImageIds = startResult.image_ids;
+      doneCount = 0;
+    } catch (err: any) {
+      showMessage("app-message", "Failed to start rotation: " + err.message, "error");
+      return;
+    }
+  }
+
+  const newKey = await importAesKeyRaw(newKeyRaw);
+  const total = doneCount + pendingImageIds.length;
+
+  let imagesById = new Map<string, any>();
+  try {
+    const imagesResult = await apiFetch("/admin/images?device_key=" + encodeURIComponent(bucketId));
+    for (const img of imagesResult.images) imagesById.set(img.id, img);
+  } catch (err: any) {
+    showMessage("app-message", "Failed to load this bucket's image list: " + err.message, "error");
+    return;
+  }
+
+  rotateModalOpen(doneCount, total);
+
+  let migrated = doneCount;
+  for (const imageId of pendingImageIds) {
+    const meta = imagesById.get(imageId);
+    if (!meta) { migrated++; continue; } // deleted mid-rotation — nothing left to migrate
+    rotateModalUpdate(migrated, total, "Re-encrypting " + meta.filename + "…");
+    try {
+      await reencryptOneImage(bucketId, rotationId, imageId, meta.dither_algorithm, oldBucketKey, newKey);
+    } catch (err: any) {
+      rotateModalUpdate(migrated, total, "Failed on " + meta.filename + ": " + err.message);
+      showMessage(
+        "app-message",
+        "Rotation paused: failed to re-encrypt " + meta.filename + " (" + err.message + "). Click Resume rotation to retry.",
+        "error"
+      );
+      return;
+    }
+    migrated++;
+    rotateModalUpdate(migrated, total);
+  }
+
+  rotateModalUpdate(total, total, "Re-wrapping the new key for every collaborator and device…");
+
+  try {
+    const collaboratorsResult = await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId) + "/collaborators");
+    const devicesForBucket = devicesCache.filter((d) => (d.bucket_ids || []).includes(bucketId));
+
+    const userKeys: Record<string, WrappedKey> = {};
+    userKeys[currentUser.id] = await wrapKeyFor(sharingPublicKeyRaw, newKeyRaw, HKDF_INFO_BUCKET_WRAP);
+    for (const collaborator of collaboratorsResult.collaborators) {
+      if (!collaborator.sharing_public_key) {
+        throw new Error("collaborator " + (collaborator.display_name || collaborator.id) + " has no sharing key on file yet");
+      }
+      userKeys[collaborator.id] = await wrapKeyFor(fromBase64(collaborator.sharing_public_key), newKeyRaw, HKDF_INFO_BUCKET_WRAP);
+    }
+
+    const deviceKeys: Record<string, WrappedKey> = {};
+    for (const device of devicesForBucket) {
+      if (!device.sharing_public_key) {
+        throw new Error("device " + device.mac + " hasn't reported a sharing key yet");
+      }
+      deviceKeys[device.mac] = await wrapKeyFor(fromBase64(device.sharing_public_key), newKeyRaw, HKDF_INFO_BUCKET_WRAP);
+    }
+
+    // A public bucket's key isn't wrapped for anyone — it's just not kept
+    // secret (migrations/0018_public_buckets.sql) — so finalize must also
+    // receive the new raw key to store as the new public_key_raw, or every
+    // non-owner reader would be stuck decrypting with the now-revoked old
+    // key after this rotation completes. newKeyRaw is already in scope here
+    // (this same rotation's freshly-generated or -recovered raw key).
+    const bucketMeta = allBucketsCache.find((b) => b.id === bucketId);
+    const finalizeBody: { user_keys: Record<string, WrappedKey>; device_keys: Record<string, WrappedKey>; public_key_raw?: string } = {
+      user_keys: userKeys,
+      device_keys: deviceKeys,
+    };
+    if (bucketMeta && bucketMeta.is_public) {
+      finalizeBody.public_key_raw = toBase64(newKeyRaw);
+    }
+
+    await apiFetch(
+      "/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/" + encodeURIComponent(rotationId) + "/finalize",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(finalizeBody) }
+    );
+  } catch (err: any) {
+    rotateModalUpdate(total, total, "Failed to finalize: " + err.message);
+    showMessage(
+      "app-message",
+      "Every image was re-encrypted, but finalizing the rotation failed (" + err.message + "). Click Resume rotation to retry finalizing — no images need re-uploading.",
+      "error"
+    );
+    return;
+  }
+
+  rotateModalClose();
+  showMessage("app-message", "Bucket key rotated — the old key no longer works for anyone.", "success");
+  await renderApp();
+}
+(window as any).runBucketRotation = runBucketRotation;
+
 el("create-bucket-btn").addEventListener("click", async () => {
   const input = el<HTMLInputElement>("new-bucket-label");
   const label = input.value.trim();
@@ -889,21 +1457,41 @@ el("create-bucket-btn").addEventListener("click", async () => {
   }
   try {
     // The bucket's AES-256-GCM content key is generated here, client-side, and
-    // never sent to the Worker raw — only this wrap of it for our own key.
+    // never sent to the Worker raw — only this wrap of it for our own key
+    // (and, only if this box is checked, ALSO the raw key itself under
+    // `public_key_raw` — see migrations/0018_public_buckets.sql). The
+    // checkbox itself only exists in the DOM for a superuser (see
+    // renderPublicBucketCheckbox below) but the Worker re-checks
+    // is_superuser regardless of what the client sends.
     const bucketKey = await generateBucketKey();
     const bucketKeyRaw = await exportAesKeyRaw(bucketKey);
     const key = await wrapKeyFor(sharingPublicKeyRaw, bucketKeyRaw, HKDF_INFO_BUCKET_WRAP);
+    const makePublicCheckbox = el<HTMLInputElement>("new-bucket-public-checkbox");
+    const body: { label: string; key: WrappedKey; is_public?: boolean; public_key_raw?: string } = { label, key };
+    if (makePublicCheckbox.checked) {
+      body.is_public = true;
+      body.public_key_raw = toBase64(bucketKeyRaw);
+    }
     await apiFetch("/admin/buckets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label, key }),
+      body: JSON.stringify(body),
     });
     input.value = "";
+    makePublicCheckbox.checked = false;
     await renderApp();
   } catch (err: any) {
     showMessage("app-message", "Failed to create bucket: " + err.message, "error");
   }
 });
+
+// Shows the "Make this public" checkbox only for a superuser (see
+// GET /admin/me's is_superuser field) — everyone else never sees it, since
+// they have no ability to use it anyway (the Worker rejects is_public: true
+// from a non-superuser with 403).
+function renderPublicBucketCheckboxVisibility() {
+  el("new-bucket-public-row").style.display = currentUser && currentUser.is_superuser ? "" : "none";
+}
 
 el("firmware-sync-btn").addEventListener("click", async () => {
   try {
@@ -1001,6 +1589,12 @@ function renderCrashReportsTable(reports: any[]) {
     : '<tr><td colspan="6" class="hint">No crash or rollback reports.</td></tr>';
 }
 
+// Only pop the register modal open automatically once per page load — renderApp()
+// (and so renderClaimBanner()) re-runs after basically every action, and forcing
+// the modal back open on each of those while ?claim= is still in the URL would be
+// intrusive rather than helpful.
+let claimModalAutoOpened = false;
+
 function renderClaimBanner() {
   const params = new URLSearchParams(location.search);
   const claimMac = params.get("claim");
@@ -1017,10 +1611,14 @@ function renderClaimBanner() {
   banner.innerHTML =
     '<div class="message success">' +
     "Scanned from a new device: <code>" + escapeHtml(claimMac) + "</code>. " +
-    "Enter a label below and click Register to add it to your account." +
+    '<button class="sm" onclick="openRegisterModal()">Register it&hellip;</button>' +
     "</div>";
   el<HTMLInputElement>("new-device-mac").value = claimMac;
-  el("new-device-label").focus();
+  if (!claimModalAutoOpened) {
+    claimModalAutoOpened = true;
+    openRegisterModal();
+    el("new-device-label").focus();
+  }
 }
 
 function renderJoinBucketBanner() {
@@ -1097,17 +1695,36 @@ async function renderApp() {
   // unlocked, or a stale/corrupt wrap) just renders without thumbnails —
   // see decryptToObjectUrl's callers below.
   bucketAesKeys.clear();
+  // Buckets with neither a personal `key` nor a `public_key_raw` (a public
+  // bucket this account has no personal wrap for is still `public_key_raw`-
+  // only) render without thumbnails/decryption below — same "leave this one
+  // undecryptable" fallback as an unwrap failure.
+  for (const b of allBucketsCache) {
+    if (!b.key && b.public_key_raw) {
+      // Public bucket (migrations/0018_public_buckets.sql): the raw key
+      // simply isn't kept secret, so there's nothing to unwrap — import it
+      // directly instead of going through unwrapKeyWith/sharingPrivateKey.
+      try {
+        bucketAesKeys.set(b.id, await importAesKeyRaw(fromBase64(b.public_key_raw)));
+      } catch (err) {
+        console.error(`Failed to import bucket ${b.id}'s public_key_raw:`, err);
+      }
+    }
+  }
   if (sharingPrivateKey) {
     await Promise.all(allBucketsCache.map(async (b) => {
       if (!b.key) return;
       try {
         const raw = await unwrapKeyWith(sharingPrivateKey!, b.key as WrappedKey, HKDF_INFO_BUCKET_WRAP);
         bucketAesKeys.set(b.id, await importAesKeyRaw(raw));
-      } catch {
-        // Leave this one bucket undecryptable rather than fail the whole render.
+      } catch (err) {
+        // Leave this one bucket undecryptable rather than fail the whole render —
+        // but still surface it, since a silent failure here is exactly what makes
+        // "this bucket's key isn't unlocked" reports impossible to diagnose.
+        console.error(`Failed to unwrap bucket ${b.id}'s key with the current session key:`, err);
       }
     }));
-  } else {
+  } else if (allBucketsCache.some((b) => b.key)) {
     showMessage("app-message", "Log in with your passkey (not just an API key) to unlock encrypted bucket contents.", "error");
   }
 
@@ -1127,16 +1744,44 @@ async function renderApp() {
   );
   renderDevicesTable(devices);
 
-  const bucketsEl = el("buckets");
-  bucketsEl.innerHTML = allBucketsCache.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
+  // Split into three groups:
+  //  - "My buckets" (is_owner true — an owned bucket that's ALSO public stays
+  //    here with a Public pill via bucketCardHtml, rather than moving to the
+  //    read-only section — the owner keeps full controls over it either way).
+  //  - "Shared with me" (not owned, but this account holds a personal wrapped
+  //    key — i.e. an accepted collaborator via bucket_shares/join()).
+  //  - "Public buckets" (visible only because is_public = 1, no personal
+  //    wrap — see bucketHasWriteAccess).
+  const myBuckets = allBucketsCache.filter((b) => b.is_owner);
+  const sharedBuckets = allBucketsCache.filter((b) => !b.is_owner && bucketHasWriteAccess(b));
+  const publicBuckets = allBucketsCache.filter((b) => !bucketHasWriteAccess(b));
+
+  el("buckets-mine-heading").style.display = myBuckets.length ? "" : "none";
+  el("buckets-shared-heading").style.display = sharedBuckets.length ? "" : "none";
+  el("buckets-shared-hint").style.display = sharedBuckets.length ? "" : "none";
+  el("buckets-public-heading").style.display = publicBuckets.length ? "" : "none";
+  el("buckets-public-hint").style.display = publicBuckets.length ? "" : "none";
+
+  const bucketsMineEl = el("buckets-mine");
+  bucketsMineEl.innerHTML = myBuckets.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
+  const bucketsSharedEl = el("buckets-shared");
+  bucketsSharedEl.innerHTML = sharedBuckets.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
+  const bucketsPublicEl = el("buckets-public");
+  bucketsPublicEl.innerHTML = publicBuckets.map((b) => '<div id="bucket-' + b.id + '"></div>').join("");
 
   await Promise.all(allBucketsCache.map(async (b) => {
     const isOwnedShareable = b.is_owner;
-    const [imagesResult, collaboratorsResult] = await Promise.all([
+    const [imagesResult, collaboratorsResult, rotationStatusResult] = await Promise.all([
       apiFetch("/admin/images?device_key=" + encodeURIComponent(b.id)),
       isOwnedShareable
         ? apiFetch("/admin/buckets/" + encodeURIComponent(b.id) + "/collaborators")
         : Promise.resolve({ collaborators: [] }),
+      // Only the owner can call rotate/status (rotation is owner-only) — lets
+      // a browser reloaded mid-rotation discover and resume it on load
+      // rather than only on an explicit click.
+      isOwnedShareable
+        ? apiFetch("/admin/buckets/" + encodeURIComponent(b.id) + "/rotate/status").catch(() => ({ rotation: null }))
+        : Promise.resolve({ rotation: null }),
     ]);
     await Promise.all(
       imagesResult.images
@@ -1149,7 +1794,8 @@ async function renderApp() {
     el("bucket-" + b.id).innerHTML = bucketCardHtml(
       b,
       imagesResult.images,
-      collaboratorsResult.collaborators
+      collaboratorsResult.collaborators,
+      rotationStatusResult.rotation
     );
   }));
 

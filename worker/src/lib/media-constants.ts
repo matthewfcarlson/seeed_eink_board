@@ -15,3 +15,17 @@ export const PORTRAIT_HEIGHT = 1600;
 
 export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";
 export const DITHER_ALGORITHMS: DitherAlgorithm[] = ["floyd_steinberg", "atkinson", "ordered"];
+
+// Packed-blob compression (see root CLAUDE.md's "Encrypted Image Buckets" ->
+// packed-blob compression plan). "identity" is the plain packed 4bpp buffer;
+// "deflate-raw" is that buffer run through CompressionStream('deflate-raw')
+// client-side, before AES-256-GCM encryption - see client/compress.ts.
+export type PackedEncoding = "identity" | "deflate-raw";
+export const PACKED_ENCODINGS: PackedEncoding[] = ["identity", "deflate-raw"];
+
+/** Shared by every route that accepts a client-reported packed_encoding field
+ *  (admin/images.ts's upload, admin/buckets.ts's reencrypt-image) - kept here
+ *  rather than duplicated per-route, same reasoning as DITHER_ALGORITHMS. */
+export function isValidPackedEncoding(value: string): value is PackedEncoding {
+  return (PACKED_ENCODINGS as string[]).includes(value);
+}
