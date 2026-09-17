@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include "config.h"
+#include "eink_text_display.h"
 
 /**
  * Seeed 13.3" Spectra 6 E-Paper Display Driver
@@ -27,7 +28,13 @@
  * - Total buffer size: 960,000 bytes
  */
 
-class Spectra6Display {
+// getBuffer()/getBufferSize()/loadImageData()/begin()/refresh()/sleep() are
+// this board's own (buffer allocation, SPI protocol); fillColor()/clear(),
+// setPixel()/getPixel(), and drawString()/drawChar()/drawStringPortrait()/
+// drawCharPortrait() are inherited from EinkTextDisplay
+// (firmware/lib/common/eink_text_display.h) - identical logic shared with
+// EE04's SixColor73Display, since none of it touches hardware directly.
+class Spectra6Display : public EinkTextDisplay<Spectra6Display, DISPLAY_WIDTH, DISPLAY_HEIGHT> {
 public:
     Spectra6Display();
 
@@ -40,18 +47,6 @@ public:
 
     // Display the current buffer contents
     void refresh();
-
-    // Fill entire display with a single color
-    void fillColor(uint8_t color);
-
-    // Clear the buffer to a single color (alias for fillColor, reads better at call sites)
-    void clear(uint8_t color);
-
-    // Draw text using a built-in 5x7 bitmap font (space, '-', '.', '/', ':', 0-9, A-Z only;
-    // any other character is rendered blank). `scale` multiplies each font pixel into a
-    // scale x scale block. Does not wrap - use '\n' in text to move to the next line.
-    void drawString(uint16_t x, uint16_t y, const String& text, uint8_t color, uint8_t scale = 1);
-    void drawChar(uint16_t x, uint16_t y, char c, uint8_t color, uint8_t scale = 1);
 
     // Put display into deep sleep mode
     void sleep();
@@ -90,10 +85,6 @@ private:
     void slaveCommand(uint8_t cmd);
     void slaveCmdData(uint8_t cmd, const uint8_t* data, size_t len);
     void sendCmdDataWithCS(uint8_t cmd, const uint8_t* data, size_t len);
-
-    // Get/set pixel value in buffer
-    uint8_t getPixel(uint16_t x, uint16_t y);
-    void setPixel(uint16_t x, uint16_t y, uint8_t color);
 };
 
 // Color codes for the Spectra 6 display

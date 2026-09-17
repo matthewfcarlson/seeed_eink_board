@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include "config.h"
+#include "eink_text_display.h"
 
 /**
  * Seeed 7.3" Six-Color E-Paper Display Driver (EE04 board)
@@ -22,7 +23,13 @@
  *   exactly (verified via Seeed_GFX's ED2208 palette-to-wire-code table).
  */
 
-class SixColor73Display {
+// getBuffer()/getBufferSize()/loadImageData()/begin()/refresh()/sleep() are
+// this board's own (buffer allocation, SPI protocol); fillColor()/clear(),
+// setPixel()/getPixel(), and drawString()/drawChar()/drawStringPortrait()/
+// drawCharPortrait() are inherited from EinkTextDisplay
+// (firmware/lib/common/eink_text_display.h) - identical logic shared with
+// EE02's Spectra6Display, since none of it touches hardware directly.
+class SixColor73Display : public EinkTextDisplay<SixColor73Display, DISPLAY_WIDTH, DISPLAY_HEIGHT> {
 public:
     SixColor73Display();
 
@@ -36,18 +43,6 @@ public:
     // Display the current buffer contents
     void refresh();
 
-    // Fill entire display with a single color
-    void fillColor(uint8_t color);
-
-    // Clear the buffer to a single color (alias for fillColor, reads better at call sites)
-    void clear(uint8_t color);
-
-    // Draw text using a built-in 5x7 bitmap font (space, '-', '.', '/', ':', 0-9, A-Z only;
-    // any other character is rendered blank). `scale` multiplies each font pixel into a
-    // scale x scale block. Does not wrap - use '\n' in text to move to the next line.
-    void drawString(uint16_t x, uint16_t y, const String& text, uint8_t color, uint8_t scale = 1);
-    void drawChar(uint16_t x, uint16_t y, char c, uint8_t color, uint8_t scale = 1);
-
     // Put display into a low-power state (power-off; see .cpp for why this isn't
     // the ED2208's separate deep-sleep register — noted as a later follow-up)
     void sleep();
@@ -55,10 +50,6 @@ public:
     // Get pointer to internal buffer (for direct manipulation)
     uint8_t* getBuffer() { return buffer_; }
     size_t getBufferSize() { return BUFFER_SIZE; }
-
-    // Exposed for main.cpp's bring-up test pattern (see README bring-up checklist)
-    uint8_t getPixel(uint16_t x, uint16_t y);
-    void setPixel(uint16_t x, uint16_t y, uint8_t color);
 
 private:
     // Frame buffer — plain allocation, no PSRAM needed at this size (see platformio.ini)

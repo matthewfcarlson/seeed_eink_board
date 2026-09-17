@@ -1328,9 +1328,13 @@ paths:
                 key for the same X-Bucket-Id, distinguished by this value —
                 see /device_config's bucket_keys entries, each of which now
                 also carries key_version.
+          # A registered device with nothing to show (no bucket assigned, or
+          # every assigned bucket is empty) no longer gets a 404 here — it
+          # gets a 200 with an unencrypted "scan to add images" QR screen
+          # (X-Image-Name: no-images-available, no X-Bucket-Id/-Key-Version),
+          # same pattern as the unregistered-device registration QR above.
         '400': { description: X-Device-MAC header required }
         '401': { description: Invalid or missing device signature }
-        '404': { description: No images available }
 
   /firmware_bin:
     get:

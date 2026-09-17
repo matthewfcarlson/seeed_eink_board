@@ -80,7 +80,12 @@ DeviceApp::RunState runState;
  * Renders a plain-text banner on the e-ink panel so a device sitting in config
  * mode is self-explanatory without a serial console attached. Board-specific
  * (not shared via device_app.h) because the layout is tuned to this panel's
- * much smaller 800x480 resolution (vs. EE02's 1600x1200).
+ * much smaller resolution (vs. EE02's). Drawn with drawStringPortrait()
+ * (portrait canvas: 480 wide x 800 tall - DISPLAY_HEIGHT x DISPLAY_WIDTH)
+ * rather than drawString(), so it reads right-side up on a mounted device,
+ * matching normal image content (which the Worker rotates the same way
+ * before sending - see worker/src/lib/decode.ts's rotate90CW) instead of the
+ * raw landscape buffer orientation.
  */
 void showConfigModeScreen() {
     if (!display.begin()) {
@@ -92,13 +97,13 @@ void showConfigModeScreen() {
     mac.toUpperCase();
 
     display.clear(SixColor73::WHITE);
-    display.drawString(20, 20, "E-INK SETUP MODE", SixColor73::BLACK, 3);
-    display.drawString(20, 100, "CONNECT VIA BLUETOOTH TO", SixColor73::BLACK, 2);
-    display.drawString(20, 130, "DEVICE NAME: EINK-SETUP", SixColor73::BLACK, 2);
-    display.drawString(20, 170, "THEN OPEN /PROVISION FROM", SixColor73::BLACK, 2);
-    display.drawString(20, 200, "CHROME OR EDGE (NOT SAFARI)", SixColor73::BLACK, 2);
-    display.drawString(20, 240, "MAC:", SixColor73::BLACK, 2);
-    display.drawString(20, 270, mac, SixColor73::BLACK, 3);
+    display.drawStringPortrait(20, 20, "E-INK SETUP MODE", SixColor73::BLACK, 3);
+    display.drawStringPortrait(20, 100, "CONNECT VIA BLUETOOTH TO", SixColor73::BLACK, 2);
+    display.drawStringPortrait(20, 130, "DEVICE NAME: EINK-SETUP", SixColor73::BLACK, 2);
+    display.drawStringPortrait(20, 170, "THEN OPEN /PROVISION FROM", SixColor73::BLACK, 2);
+    display.drawStringPortrait(20, 200, "CHROME OR EDGE (NOT SAFARI)", SixColor73::BLACK, 2);
+    display.drawStringPortrait(20, 240, "MAC:", SixColor73::BLACK, 2);
+    display.drawStringPortrait(20, 270, mac, SixColor73::BLACK, 3);
     display.refresh();
 }
 

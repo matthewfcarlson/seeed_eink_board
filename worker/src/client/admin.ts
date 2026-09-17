@@ -245,9 +245,29 @@ async function completeLoginSharingKey(
     return {};
   }
 
-  // No server key and no local key — shouldn't normally happen (registration
-  // always establishes one somewhere) but degrade gracefully rather than
-  // leave sharingPrivateKey null: generate fresh, same as a first registration.
+  // The account already has an established sharing identity (the server has
+  // a sharing_public_key for it), but this ceremony can't recover the
+  // matching private key: no PRF output this time (common for cross-device
+  // "hybrid"/QR-code WebAuthn, or a browser/authenticator combo that just
+  // doesn't support PRF), and nothing cached in this browser's IndexedDB.
+  // Minting a fresh keypair here — as this used to do — would silently FORK
+  // the account's cryptographic identity per browser: the new key can't
+  // decrypt anything wrapped for the real one, and (with no PRF output) it
+  // never even reaches the server to be discovered as wrong, so every other
+  // browser keeps using the real key while this one quietly diverges. Fail
+  // loudly instead — the caller surfaces this the same way as any other
+  // login failure.
+  if (loginResult.sharing_public_key) {
+    throw new Error(
+      "This browser or authenticator can't unlock your account's encrypted buckets right now (no usable passkey PRF result). " +
+      "Try again from the browser/device where you first set this up, or a browser with full passkey PRF support."
+    );
+  }
+
+  // No server key and no local key either — a genuinely brand new identity
+  // (e.g. this account's very first login, after a registration whose own
+  // ceremony also had no PRF, so nothing was ever wrapped anywhere yet):
+  // generate fresh, same as a first registration.
   const keyPair = await generateP256KeyPair();
   sharingPrivateKey = keyPair.privateKey;
   sharingPublicKeyRaw = await exportPublicKeyRaw(keyPair.publicKey);
@@ -285,35 +305,66 @@ el("passkey-signup-btn").addEventListener("click", async () => {
   }
 });
 
+// The actual WebAuthn login ceremony, shared by the pre-login "Log in with
+// passkey" button and unlockSharingKey() below — the latter runs it again
+// for an already-logged-in-via-cached-API-key session that never got a
+// sharing key, since a fresh PRF result is only ever available mid-ceremony
+// (there's no way to request just PRF without a full assertion). Re-running
+// it for an already-authenticated account is harmless: it just re-verifies
+// the same passkey and overwrites the cached API key with an equivalent one.
+async function performPasskeyLoginCeremony(): Promise<void> {
+  const { attemptId, options } = await publicFetch("/auth/login/options", {});
+  const requestOptions = (window as any).PublicKeyCredential.parseRequestOptionsFromJSON(options);
+  ensurePrfExtensionInput(requestOptions);
+  const credential: any = await navigator.credentials.get({ publicKey: requestOptions });
+  const loginResult = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
+  setApiKey(loginResult.api_key);
+  const backfillFields = await completeLoginSharingKey(credential, loginResult);
+  if (Object.keys(backfillFields).length > 0) {
+    // Separate authenticated call, not another /auth/login/verify — that
+    // ceremony's challenge is single-use and was already consumed by the
+    // call above. Best-effort: a failure here just means we try again next
+    // login, same as if PRF hadn't been available yet at all.
+    apiFetch("/admin/me/sharing-key", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential_id: credential.id, ...backfillFields }),
+    }).catch(() => {});
+  }
+}
+
 el("passkey-login-btn").addEventListener("click", async () => {
   if (!passkeysSupported()) {
     showMessage("login-message", "This browser doesn't support passkeys. Try an up-to-date Chrome, Safari, or Firefox, or use an API key below.", "error");
     return;
   }
   try {
-    const { attemptId, options } = await publicFetch("/auth/login/options", {});
-    const requestOptions = (window as any).PublicKeyCredential.parseRequestOptionsFromJSON(options);
-    ensurePrfExtensionInput(requestOptions);
-    const credential: any = await navigator.credentials.get({ publicKey: requestOptions });
-    const loginResult = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
-    setApiKey(loginResult.api_key);
-    const backfillFields = await completeLoginSharingKey(credential, loginResult);
-    if (Object.keys(backfillFields).length > 0) {
-      // Separate authenticated call, not another /auth/login/verify — that
-      // ceremony's challenge is single-use and was already consumed by the
-      // call above. Best-effort: a failure here just means we try again next
-      // login, same as if PRF hadn't been available yet at all.
-      apiFetch("/admin/me/sharing-key", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credential_id: credential.id, ...backfillFields }),
-      }).catch(() => {});
-    }
+    await performPasskeyLoginCeremony();
     await tryLogin(true);
   } catch (err: any) {
     showMessage("login-message", "Failed to log in: " + err.message, "error");
   }
 });
+
+// Called from the "Unlock with passkey" button shown when a page reload left
+// currentUser signed in (via the cached API key — see tryLogin) but with no
+// sharing key: a PRF-capable authenticator's key is deliberately never
+// persisted anywhere (server or IndexedDB — see keystore.ts) and can only be
+// recovered by an actual passkey ceremony, which tryLogin's plain API-key
+// resume never performs on its own.
+async function unlockSharingKey() {
+  if (!passkeysSupported()) {
+    showMessage("app-message", "This browser doesn't support passkeys, so encrypted buckets can't be unlocked here.", "error");
+    return;
+  }
+  try {
+    await performPasskeyLoginCeremony();
+    await renderApp();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to unlock: " + err.message, "error");
+  }
+}
+(window as any).unlockSharingKey = unlockSharingKey;
 
 function renderWhoami() {
   el("whoami").textContent = currentUser.display_name
@@ -453,16 +504,6 @@ async function deleteDevice(mac: string) {
 }
 (window as any).deleteDevice = deleteDevice;
 
-function bucketLabelsFor(bucketIds: string[] | undefined): string {
-  if (!bucketIds || bucketIds.length === 0) return '<span class="hint">none</span>';
-  return bucketIds
-    .map((id) => {
-      const b = allBucketsCache.find((x) => x.id === id);
-      return escapeHtml(b ? b.label : id);
-    })
-    .join(", ");
-}
-
 function openBucketModal(mac: string) {
   bucketModalMac = mac;
   const device = devicesCache.find((d) => d.mac === mac);
@@ -583,31 +624,52 @@ function formatUptime(createdAtSeconds: number): string {
   return Math.floor(seconds / 60) + "m";
 }
 
+// Short relative phrasing ("5 minutes ago", "2 days ago") for a table cell —
+// the exact timestamp is still available on hover (see renderDevicesTable's
+// lastSeen title attribute).
+function formatRelativeTime(epochSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - epochSeconds);
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return minutes + (minutes === 1 ? " minute ago" : " minutes ago");
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return hours + (hours === 1 ? " hour ago" : " hours ago");
+  const days = Math.round(hours / 24);
+  if (days < 30) return days + (days === 1 ? " day ago" : " days ago");
+  const months = Math.round(days / 30);
+  if (months < 12) return months + (months === 1 ? " month ago" : " months ago");
+  const years = Math.round(months / 12);
+  return years + (years === 1 ? " year ago" : " years ago");
+}
+
 // Green/yellow/red pill matching the physical battery level, using the same
 // spectra palette as everything else (see style.css's brand-dots comment).
+// The raw voltage is still available on hover for anyone who wants it.
 function batteryPillHtml(voltage: number): string {
   const pct = batteryPercent(voltage);
   const tone = pct >= 50 ? "green" : pct >= 20 ? "yellow" : "red";
-  return '<span class="pill ' + tone + '">' + voltage.toFixed(2) + "V &middot; " + pct + "%</span>";
+  return '<span class="pill ' + tone + '" title="' + voltage.toFixed(2) + 'V">' + pct + "%</span>";
 }
 
 function renderDevicesTable(devices: any[]) {
   const tbody = el("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No devices registered yet &mdash; add one below.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No devices registered yet &mdash; add one below.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
     const battery = d.last_battery_voltage != null ? batteryPillHtml(d.last_battery_voltage) : '<span class="hint">n/a</span>';
     const lastSeen = d.last_seen_at
-      ? new Date(d.last_seen_at * 1000).toLocaleString() + (d.last_seen_ip ? " (" + escapeHtml(d.last_seen_ip) + ")" : "")
+      ? '<span title="' + escapeHtml(new Date(d.last_seen_at * 1000).toLocaleString()) +
+        (d.last_seen_ip ? " · " + escapeHtml(d.last_seen_ip) : "") + '">' +
+        formatRelativeTime(d.last_seen_at) + "</span>"
       : '<span class="hint">never</span>';
     const firmware = d.running_firmware_version
       ? escapeHtml(d.running_firmware_version)
       : '<span class="hint">unknown</span>';
     const board = d.board
-      ? '<span class="pill">' + escapeHtml(d.board) + "</span>"
-      : '<span class="hint">unknown</span>';
+      ? '<span class="pill" title="MAC ' + escapeHtml(d.mac) + '">' + escapeHtml(d.board) + "</span>"
+      : '<span class="hint" title="MAC ' + escapeHtml(d.mac) + '">unknown</span>';
     const uptime = d.created_at
       ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatUptime(d.created_at) + "</span>"
       : '<span class="hint">n/a</span>';
@@ -618,7 +680,6 @@ function renderDevicesTable(devices: any[]) {
       ? '<img class="device-thumb" src="' + currentImageThumbUrl + '" alt="" onclick="openLightbox(\'' + d.current_image.id + '\', \'' + escapeHtml(d.current_image.source_bucket_id) + '\', \'' + escapeHtml(d.current_image.filename).replace(/'/g, "\\'") + '\')">'
       : escapeHtml(d.current_image.filename);
     return "<tr>" +
-      "<td><code>" + escapeHtml(d.mac) + "</code></td>" +
       "<td>" + escapeHtml(d.label || "") + "</td>" +
       "<td>" + board + "</td>" +
       "<td>" + currentImage + "</td>" +
@@ -626,7 +687,7 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + uptime + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
-      "<td>" + bucketLabelsFor(d.bucket_ids) + '<br><button class="ghost sm" onclick="openBucketModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
+      '<td><button class="ghost sm" onclick="openBucketModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
       '<td><button class="ghost sm" onclick="openScheduleModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
       '<td><button class="danger sm" onclick="deleteDevice(\'' + escapeHtml(d.mac) + '\')">Remove</button></td>' +
       "</tr>";
@@ -1769,7 +1830,16 @@ async function renderApp() {
       }
     }));
   } else if (allBucketsCache.some((b) => b.key)) {
-    showMessage("app-message", "Log in with your passkey (not just an API key) to unlock encrypted bucket contents.", "error");
+    // A plain reload only resumes the cached API key (see tryLogin) — it
+    // can't recover a PRF-backed sharing key on its own, so this needs an
+    // actual passkey ceremony rather than just a login/reload retry. Build
+    // the button directly (not via showMessage, which escapes its text)
+    // since it needs to stay clickable.
+    el("app-message").innerHTML =
+      '<div class="message error">' +
+      "Encrypted bucket contents are locked. " +
+      '<button class="sm" onclick="unlockSharingKey()">Unlock with passkey</button>' +
+      "</div>";
   }
 
   // Old object URLs point at Blobs from the previous render — revoke before

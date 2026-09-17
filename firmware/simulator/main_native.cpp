@@ -5,10 +5,13 @@
 // #includes reach for resolves to firmware/simulator/stubs/ instead (see the
 // Makefile's -I order). See README.md for the full design rationale.
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <pthread.h>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 #include "stubs/Arduino.h"
@@ -20,6 +23,47 @@
 // Declared extern in stubs/esp_sleep.h; esp_sleep_enable_timer_wakeup() sets
 // it, read below to decide how long to pause between simulated boot cycles.
 uint64_t g_sleep_us = 0;
+
+// Ctrl+C (SIGINT) not killing the running simulator was reported as a real
+// bug (not just a rough edge): launching this binary as a shell background
+// job (`./sim-ee02 &`, or the equivalent a Makefile `run` target's child
+// process ends up as) has SIGINT's disposition set to SIG_IGN by the shell's
+// own job control *before* main() ever runs - standard behavior so Ctrl+C in
+// a terminal doesn't kill backgrounded jobs out from under you. POSIX says a
+// signal generated while its disposition is SIG_IGN is discarded immediately,
+// before pending/blocked-set semantics even come into play - so merely
+// blocking SIGINT and waiting on it (sigwait()) is not enough on its own;
+// the signal has to actually not be ignored at the moment it's sent, or it
+// never becomes pending for anything to catch. Confirmed both ways with
+// isolated repros outside this codebase - plain sigwait() without resetting
+// the disposition first stayed unkillable, resetting it fixed it.
+//
+// The fix here: reset the disposition away from SIG_IGN, then block the
+// signal set on the main thread before any other thread is created (every
+// thread spawned afterward - SDL's internal ones, GattBridge's, BLE's -
+// inherits this mask at creation), and consume it via a dedicated sigwait()
+// thread rather than a normal handler function, since a handler would still
+// have to not get its disposition stomped by anything spawned later.
+static void installSignalWatcher() {
+    // Must happen before the sigmask block below - see comment above.
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &set, nullptr);
+    std::thread([set]() mutable {
+        int sig = 0;
+        sigwait(&set, &sig);
+        // Best-effort: closes GattBridge's listener socket/thread cleanly.
+        // Not essential for correctness - the OS reclaims sockets/threads on
+        // process exit regardless - but tidy while it's cheap to do.
+        GattBridge::stop();
+        _exit(0);
+    }).detach();
+}
 
 #ifndef BOARD_MAIN_CPP
 #error "BOARD_MAIN_CPP must be set by the Makefile, e.g. -DBOARD_MAIN_CPP=\"../src/ee02/main.cpp\""
@@ -64,6 +108,8 @@ static void applyServerFlag(const std::string &serverUrl) {
 }
 
 int main(int argc, char **argv) {
+    installSignalWatcher();
+
     std::string serverUrl = "http://localhost:8787";
     bool doReset = false;
     std::string exportPath;

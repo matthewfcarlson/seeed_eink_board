@@ -4,6 +4,7 @@ import { requireAdmin } from "../../lib/admin-middleware";
 import { deleteImageBlobs, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
 import {
+  bucketKeyUpsertStatement,
   computeAuthorizedPrincipals,
   deleteBucketKey,
   deleteBucketKeysForBucket,
@@ -66,12 +67,17 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
 
     const id = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);
-    await c.env.DB.prepare(
-      "INSERT INTO buckets (id, owner_id, label, created_at, is_public, public_key_raw) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-      .bind(id, c.var.user.id, label, now, isPublic ? 1 : 0, publicKeyRaw)
-      .run();
-    await upsertBucketKey(c.env, id, "user", c.var.user.id, key, 1);
+    // Atomic: a bucket row that ever committed without its owner's key row
+    // would be permanently unwritable and unrecoverable (the Worker never
+    // sees the raw key to re-wrap later) — see bucketKeyUpsertStatement's
+    // comment. Two sequential `.run()` calls here previously left exactly
+    // that gap open to any interruption between them.
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO buckets (id, owner_id, label, created_at, is_public, public_key_raw) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(id, c.var.user.id, label, now, isPublic ? 1 : 0, publicKeyRaw),
+      bucketKeyUpsertStatement(c.env, id, "user", c.var.user.id, key, 1),
+    ]);
 
     return c.json({ id, label, owner_id: c.var.user.id, is_owner: true, is_public: isPublic }, 201);
   });

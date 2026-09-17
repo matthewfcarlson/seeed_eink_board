@@ -95,7 +95,7 @@ export function renderAdminPage(): string {
     <p class="hint hint-block">New device? The <strong>+</strong> button takes you to Device Setup, which pairs over Bluetooth and registers it to this account in one step. "Last image sent" below is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>MAC</th><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
+        <thead><tr><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Uptime</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
         <tbody id="devices-table"></tbody>
       </table>
     </div>

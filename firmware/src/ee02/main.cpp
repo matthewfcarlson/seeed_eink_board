@@ -22,7 +22,12 @@ DeviceApp::RunState runState;
  * Renders a plain-text banner on the e-ink panel so a device sitting in config
  * mode is self-explanatory without a serial console attached. Board-specific
  * (not shared via device_app.h) because the layout is tuned to this panel's
- * 1600x1200 resolution.
+ * resolution. Drawn with drawStringPortrait() (portrait canvas: 1200 wide x
+ * 1600 tall - DISPLAY_HEIGHT x DISPLAY_WIDTH) rather than drawString(), so it
+ * reads right-side up on a mounted device, matching normal image content
+ * (which the Worker rotates the same way before sending - see
+ * worker/src/lib/decode.ts's rotate90CW) instead of the raw landscape buffer
+ * orientation.
  */
 void showConfigModeScreen() {
     if (!display.begin()) {
@@ -34,13 +39,13 @@ void showConfigModeScreen() {
     mac.toUpperCase();
 
     display.clear(Spectra6Color::WHITE);
-    display.drawString(40, 40, "E-INK SETUP MODE", Spectra6Color::BLACK, 6);
-    display.drawString(40, 200, "CONNECT VIA BLUETOOTH TO", Spectra6Color::BLACK, 4);
-    display.drawString(40, 260, "DEVICE NAME: EINK-SETUP", Spectra6Color::BLACK, 4);
-    display.drawString(40, 340, "THEN OPEN /PROVISION FROM", Spectra6Color::BLACK, 4);
-    display.drawString(40, 400, "CHROME OR EDGE (NOT SAFARI)", Spectra6Color::BLACK, 4);
-    display.drawString(40, 480, "MAC:", Spectra6Color::BLACK, 4);
-    display.drawString(40, 540, mac, Spectra6Color::BLACK, 5);
+    display.drawStringPortrait(40, 40, "E-INK SETUP MODE", Spectra6Color::BLACK, 6);
+    display.drawStringPortrait(40, 200, "CONNECT VIA BLUETOOTH TO", Spectra6Color::BLACK, 4);
+    display.drawStringPortrait(40, 260, "DEVICE NAME: EINK-SETUP", Spectra6Color::BLACK, 4);
+    display.drawStringPortrait(40, 340, "THEN OPEN /PROVISION FROM", Spectra6Color::BLACK, 4);
+    display.drawStringPortrait(40, 400, "CHROME OR EDGE (NOT SAFARI)", Spectra6Color::BLACK, 4);
+    display.drawStringPortrait(40, 480, "MAC:", Spectra6Color::BLACK, 4);
+    display.drawStringPortrait(40, 540, mac, Spectra6Color::BLACK, 5);
     display.refresh();
 }
 

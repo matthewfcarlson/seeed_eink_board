@@ -277,6 +277,22 @@ normally-authenticated call — not a field on `/auth/login/verify` itself,
 because that ceremony's challenge is single-use and already consumed by the
 time the client can decide a backfill is needed.
 
+**A synced passkey (iCloud Keychain, Google Password Manager, etc.) used from
+a second browser recovers the same sharing key there too**, since PRF output
+is deterministic from the credential's own key material — the same thing
+that's actually synced — not from anything browser-local. That only holds
+when *this* ceremony actually returns a usable PRF result, though: hybrid/
+QR-code cross-device WebAuthn frequently doesn't carry PRF through, and older
+or non-platform authenticators may not support it at all. `admin.ts`'s
+`completeLoginSharingKey()` used to handle "no PRF this time, no local
+IndexedDB cache either" by silently minting a brand new keypair — which,
+whenever the server already had an established `sharing_public_key` for the
+account, silently forked that browser onto a cryptographic identity none of
+the user's existing buckets (or other browsers) recognize, with no error at
+all. It now throws instead in exactly that case (an established server
+identity that this ceremony can't recover) and only still auto-generates a
+fresh keypair when the server has no identity for the account at all yet.
+
 **Sharing a bucket:** the invite link (`POST /admin/buckets/{id}/invite`,
 unchanged) gains a `#key=<base64url>` URL fragment carrying the raw bucket
 key, appended client-side — a fragment is never sent to the server in any

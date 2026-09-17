@@ -25,15 +25,43 @@ export function parseWrappedBucketKey(value: unknown): WrappedBucketKey | null {
 }
 
 /**
+ * Builds (but doesn't run) the upsert statement for one principal's wrapped
+ * copy of a bucket key at a specific key version — split out from
+ * upsertBucketKey so a caller that must not let this succeed independently
+ * of a sibling write (see POST /admin/buckets below: a bucket row committed
+ * without its owner's key row is a permanently unwritable, unrecoverable
+ * bucket, since the Worker never sees the raw key to re-wrap later) can fold
+ * it into one `env.DB.batch([...])` instead of two separate `.run()` calls.
+ */
+export function bucketKeyUpsertStatement(
+  env: Env,
+  bucketId: string,
+  principalType: PrincipalType,
+  principalId: string,
+  wrapped: WrappedBucketKey,
+  keyVersion: number
+): D1PreparedStatement {
+  const now = Math.floor(Date.now() / 1000);
+  return env.DB.prepare(
+    `INSERT INTO bucket_keys (bucket_id, principal_type, principal_id, key_version, ephemeral_pub, nonce, ciphertext, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(bucket_id, principal_type, principal_id, key_version) DO UPDATE SET
+       ephemeral_pub = excluded.ephemeral_pub,
+       nonce = excluded.nonce,
+       ciphertext = excluded.ciphertext,
+       created_at = excluded.created_at`
+  ).bind(bucketId, principalType, principalId, keyVersion, wrapped.ephemeralPub, wrapped.nonce, wrapped.ciphertext, now);
+}
+
+/**
  * Upserts one principal's wrapped copy of a bucket key at a specific key
- * version — called whenever a bucket is created (wrap for the owner, version
- * 1), a share is accepted (wrap for the new collaborator, at the bucket's
- * current version), a bucket is assigned to a device (same), or a rotation
- * is started/finalized (wrap at `key_version + 1` — see
- * migrations/0016_bucket_key_rotation.sql and routes/admin/buckets.ts's
- * rotate/* handlers). Idempotent: re-wrapping the same
- * (bucket, principal, key_version) tuple just replaces the row — an old and
- * a new version can coexist for the same principal mid-rotation, which is
+ * version — called whenever a share is accepted (wrap for the new
+ * collaborator, at the bucket's current version), a bucket is assigned to a
+ * device (same), or a rotation is started/finalized (wrap at
+ * `key_version + 1` — see migrations/0016_bucket_key_rotation.sql and
+ * routes/admin/buckets.ts's rotate/* handlers). Idempotent: re-wrapping the
+ * same (bucket, principal, key_version) tuple just replaces the row — an old
+ * and a new version can coexist for the same principal mid-rotation, which is
  * exactly why key_version joined the primary key.
  */
 export async function upsertBucketKey(
@@ -44,18 +72,7 @@ export async function upsertBucketKey(
   wrapped: WrappedBucketKey,
   keyVersion: number
 ): Promise<void> {
-  const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare(
-    `INSERT INTO bucket_keys (bucket_id, principal_type, principal_id, key_version, ephemeral_pub, nonce, ciphertext, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(bucket_id, principal_type, principal_id, key_version) DO UPDATE SET
-       ephemeral_pub = excluded.ephemeral_pub,
-       nonce = excluded.nonce,
-       ciphertext = excluded.ciphertext,
-       created_at = excluded.created_at`
-  )
-    .bind(bucketId, principalType, principalId, keyVersion, wrapped.ephemeralPub, wrapped.nonce, wrapped.ciphertext, now)
-    .run();
+  await bucketKeyUpsertStatement(env, bucketId, principalType, principalId, wrapped, keyVersion).run();
 }
 
 /** One principal's wrapped key at one specific version — callers that just
