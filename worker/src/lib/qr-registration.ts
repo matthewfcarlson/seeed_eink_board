@@ -10,22 +10,18 @@ function formatMac(mac: string): string {
 }
 
 /**
- * Renders a "scan to register this device" screen for an unregistered device:
- * a QR code linking to the admin claim page, plus a short message and the MAC
- * address drawn with a hand-rolled bitmap font (see font5x7.ts — Photon's
- * draw_text is exposed in its types but is a silent no-op in this WASM build,
- * confirmed by testing it against a blank canvas). Built in portrait
- * orientation and rotated 90°CW, matching the same geometry photos go
- * through, so it displays right-side-up on the physical screen. No
- * dithering — QR codes need crisp high-contrast modules, not diffused noise —
- * so pixels are mapped directly to the nearest palette color.
+ * Renders a QR code plus up to three lines of caption text, in portrait
+ * orientation rotated 90°CW to match the same geometry photos go through
+ * (so it displays right-side-up on the physical screen). No dithering — QR
+ * codes need crisp high-contrast modules, not diffused noise — so pixels
+ * are mapped directly to the nearest palette color. Shared by
+ * renderRegistrationBuffer (unregistered device) and renderNoBucketBuffer
+ * (registered device, zero buckets assigned) below, which differ only in
+ * the URL and caption.
  */
-export async function renderRegistrationBuffer(
-  mac: string,
-  registrationUrl: string
-): Promise<{ packed: Uint8Array; hash: string }> {
+async function renderQrScreenBuffer(url: string, lines: string[]): Promise<{ packed: Uint8Array; hash: string }> {
   const qr = qrcode(0, "M");
-  qr.addData(registrationUrl);
+  qr.addData(url);
   qr.make();
   const moduleCount = qr.getModuleCount();
 
@@ -58,9 +54,9 @@ export async function renderRegistrationBuffer(
   const textScale = 8;
   const lineHeight = 7 * textScale + 30;
   const textY = qrY + qrSize + 80;
-  drawText5x7(rgba, PORTRAIT_WIDTH, PORTRAIT_HEIGHT, "SCAN TO SET UP", 60, textY, textScale);
-  drawText5x7(rgba, PORTRAIT_WIDTH, PORTRAIT_HEIGHT, "THIS FRAME", 60, textY + lineHeight, textScale);
-  drawText5x7(rgba, PORTRAIT_WIDTH, PORTRAIT_HEIGHT, formatMac(mac), 60, textY + lineHeight * 2 + 20, textScale);
+  lines.forEach((line, i) => {
+    drawText5x7(rgba, PORTRAIT_WIDTH, PORTRAIT_HEIGHT, line, 60, textY + lineHeight * i + (i > 0 ? 20 : 0), textScale);
+  });
 
   const landscape = rotate90CW(rgba, PORTRAIT_WIDTH, PORTRAIT_HEIGHT);
 
@@ -77,4 +73,24 @@ export async function renderRegistrationBuffer(
   const packed = packToNibbles(indices);
   const hash = await computeHash16(packed);
   return { packed, hash };
+}
+
+/** Renders a "scan to register this device" screen for an unregistered
+ *  device: a QR code linking to the admin claim page, plus the MAC address
+ *  drawn with a hand-rolled bitmap font (see font5x7.ts — Photon's draw_text
+ *  is exposed in its types but is a silent no-op in this WASM build,
+ *  confirmed by testing it against a blank canvas). */
+export function renderRegistrationBuffer(mac: string, registrationUrl: string): Promise<{ packed: Uint8Array; hash: string }> {
+  return renderQrScreenBuffer(registrationUrl, ["SCAN TO SET UP", "THIS FRAME", formatMac(mac)]);
+}
+
+/** Renders a "no images assigned yet" screen for a device that's already
+ *  registered/claimed but has zero buckets assigned (device_buckets has no
+ *  rows for it) — served by /image_packed in place of a 404, so a frame
+ *  never just shows a blank/stale screen after being claimed. The QR links
+ *  to that device's bucket-assignment modal in /admin (see
+ *  registration-url.ts's assignBucketUrl and admin.ts's ?assign_bucket=
+ *  handling). */
+export function renderNoBucketBuffer(mac: string, assignUrl: string): Promise<{ packed: Uint8Array; hash: string }> {
+  return renderQrScreenBuffer(assignUrl, ["NO IMAGES YET", "SCAN TO ADD SOME", formatMac(mac)]);
 }

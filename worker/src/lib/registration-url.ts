@@ -13,3 +13,15 @@ export function registrationUrl(requestUrl: string, mac: string, secret?: string
   if (secret) url.searchParams.set("secret", secret);
   return url.toString();
 }
+
+/** Builds the admin URL for assigning buckets to an already-registered device
+ *  that currently has none — same "scan the device's own screen" out-of-band
+ *  channel as registrationUrl above, but for a device past the claim step.
+ *  `?assign_bucket=<mac>` is read by admin.ts to auto-open that device's
+ *  bucket-assignment modal once devices/buckets have loaded. */
+export function assignBucketUrl(requestUrl: string, mac: string): string {
+  const origin = new URL(requestUrl).origin;
+  const url = new URL(`${origin}/admin`);
+  url.searchParams.set("assign_bucket", mac);
+  return url.toString();
+}

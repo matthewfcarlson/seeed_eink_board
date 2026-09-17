@@ -330,6 +330,21 @@ async function tryLogin(showError: boolean): Promise<boolean> {
     renderPublicBucketCheckboxVisibility();
     el("login").style.display = "none";
     el("app").style.display = "block";
+    // On a fresh page load (as opposed to just completing a passkey ceremony,
+    // which already populated these), the sharing keypair only lives in
+    // memory for the tab that unlocked it. Restore it from this browser's
+    // IndexedDB fallback (see keystore.ts) before rendering, so a reload
+    // doesn't strand every private bucket behind "isn't unlocked in this
+    // session" until the user logs out and back in with their passkey. If
+    // this authenticator uses PRF instead, its key was never stashed here in
+    // the first place, and this stays a no-op.
+    if (!sharingPrivateKey) {
+      const local = await localKeystoreGet();
+      if (local) {
+        sharingPrivateKey = await importPrivateKeyPkcs8(local.privateKeyPkcs8);
+        sharingPublicKeyRaw = local.publicKeyRaw;
+      }
+    }
     await renderApp();
     return true;
   } catch (err: any) {
@@ -472,6 +487,29 @@ el("bucket-modal-cancel-btn").addEventListener("click", () => {
   el("bucket-modal-overlay").classList.remove("open");
 });
 
+// Only pop the bucket-assignment modal open automatically once per page
+// load — see claimModalAutoOpened's comment above for why.
+let assignBucketModalAutoOpened = false;
+
+function renderAssignBucketBanner() {
+  const params = new URLSearchParams(location.search);
+  const mac = params.get("assign_bucket");
+  const banner = el("assign-bucket-banner");
+  if (!mac) {
+    banner.innerHTML = "";
+    return;
+  }
+  banner.innerHTML =
+    '<div class="message success">' +
+    "Scanned from a device with no images assigned yet: <code>" + escapeHtml(mac) + "</code>. " +
+    '<button class="sm" onclick="openBucketModal(\'' + escapeHtml(mac) + '\')">Assign buckets&hellip;</button>' +
+    "</div>";
+  if (!assignBucketModalAutoOpened) {
+    assignBucketModalAutoOpened = true;
+    openBucketModal(mac);
+  }
+}
+
 el("bucket-modal-save-btn").addEventListener("click", async () => {
   const checked = Array.from(document.querySelectorAll<HTMLInputElement>("#bucket-modal-list input[type=checkbox]:checked")).map(
     (input) => input.value
@@ -501,6 +539,9 @@ el("bucket-modal-save-btn").addEventListener("click", async () => {
       body: JSON.stringify({ bucket_ids: checked, keys }),
     });
     el("bucket-modal-overlay").classList.remove("open");
+    if (new URLSearchParams(location.search).get("assign_bucket")) {
+      history.replaceState(null, "", location.pathname);
+    }
     await renderApp();
   } catch (err: any) {
     showMessage("app-message", "Failed to save buckets: " + err.message, "error");
@@ -1688,6 +1729,9 @@ async function renderApp() {
   const devices = devicesResult.devices;
   devicesCache = devices;
   allBucketsCache = bucketsResult.buckets;
+  // Needs devicesCache/allBucketsCache populated (openBucketModal reads both) —
+  // unlike renderClaimBanner/renderJoinBucketBanner above, which don't.
+  renderAssignBucketBanner();
 
   // Unwrap every bucket's content key this session can access, before
   // rendering anything that needs to decrypt a thumbnail. A bucket this

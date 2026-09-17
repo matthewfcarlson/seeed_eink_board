@@ -5,8 +5,8 @@ import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
 import { getRotationSnapshot, markServed, peekPendingImage } from "../lib/rotation";
 import { getPackedImage } from "../lib/image-store";
-import { renderRegistrationBuffer } from "../lib/qr-registration";
-import { registrationUrl } from "../lib/registration-url";
+import { renderNoBucketBuffer, renderRegistrationBuffer } from "../lib/qr-registration";
+import { assignBucketUrl, registrationUrl } from "../lib/registration-url";
 
 /**
  * GET /image_packed — contract-critical (firmware/src/main.cpp fetchAndDisplayImage()).
@@ -70,7 +70,26 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
 
     const snapshot = await getRotationSnapshot(c.env, deviceKey);
     const pending = peekPendingImage(snapshot);
-    if (!pending) return c.text("No images available", 404);
+    // Registered but nothing to show — no bucket assigned, every assigned
+    // bucket has zero images, or removed from every bucket it had. Same
+    // "never leave the screen on a bare error" reasoning as the
+    // unregistered-device QR branch above, just one step later in the
+    // device's lifecycle. Unencrypted, like that branch: there may be no
+    // bucket (and so no key) to encrypt under here at all.
+    if (!pending) {
+      const { packed, hash } = await renderNoBucketBuffer(mac, assignBucketUrl(c.req.url, mac));
+      return new Response(packed, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(packed.byteLength),
+          "Content-Disposition": "attachment; filename=image.bin",
+          "X-Image-Hash": hash,
+          "X-Image-Name": "no-images-available",
+          "X-Device-ID": deviceKey,
+        },
+      });
+    }
 
     const knownHash = c.req.query("known_hash");
     if (knownHash && knownHash === pending.image.packedHash) {

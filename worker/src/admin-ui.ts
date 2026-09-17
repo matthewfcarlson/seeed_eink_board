@@ -31,6 +31,7 @@ export function renderAdminPage(): string {
   .login-brand .brand-dots span { width: 9px; height: 9px; }
   .login-brand h2 { margin: 0; }
   #form { display: none; }
+  .brand-link { text-decoration: none; color: inherit; }
 </style>
 </head>
 <body>
@@ -71,10 +72,10 @@ export function renderAdminPage(): string {
 
 <div class="page" id="app">
   <div class="topbar">
-    <div class="brand">
+    <a class="brand brand-link" href="/">
       <div class="brand-dots"><span></span><span></span><span></span><span></span><span></span><span></span></div>
       <span class="brand-name">E-Ink Admin</span>
-    </div>
+    </a>
     <div class="topbar-right">
       <span id="whoami"></span>
       <button class="ghost sm" id="logout-btn">Log out</button>
@@ -84,6 +85,7 @@ export function renderAdminPage(): string {
   <div id="app-message"></div>
   <div id="claim-banner"></div>
   <div id="join-bucket-banner"></div>
+  <div id="assign-bucket-banner"></div>
 
   <div class="card">
     <div class="card-head">

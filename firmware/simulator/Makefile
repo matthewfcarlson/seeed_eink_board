@@ -77,6 +77,9 @@ all: sim-$(BOARD)
 sim-$(BOARD): $(SRCS) $(wildcard stubs/*.h) $(wildcard stubs/mbedtls/*.h) gatt_bridge.h display_render.h
 	$(CXX) $(CXXFLAGS) $(BOARD_DEFINES) $(SRCS) -o $@ $(LDFLAGS)
 
+run-$(BOARD): sim-$(BOARD)
+	./sim-$(BOARD)
+
 # Native pipeline tests (tools/test_*.cpp against tools/gen_*_vectors.mjs
 # fixtures) - see tools/run_native_tests.sh. `run` gates on these passing so
 # a broken crypto/inflate pipeline is caught before the simulator ever boots,

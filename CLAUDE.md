@@ -324,12 +324,57 @@ assumed from documentation:
   committed, since a self-consistent-but-wrong implementation would round-trip
   fine locally while failing to interoperate with anything real.
 
+**Bucket-key rotation** (migrations `0016_bucket_key_rotation.sql`) closes the
+revocation gap above: an owner can rotate a bucket's key from `/admin` (a new
+AES-256-GCM key, every image's raw/packed/thumb blobs re-encrypted under it,
+then re-wrapped for every *currently* authorized principal). `buckets.
+key_version` and `images.key_version` track which generation each image is
+actually encrypted under; `bucket_keys`' primary key is `(bucket_id,
+principal_type, principal_id, key_version)` so an old and new wrapped key can
+coexist for a principal for the duration of the job. Because the Worker can't
+decrypt, the client drives the whole thing — `POST /admin/buckets/:id/rotate/
+start` → per-image `POST .../reencrypt-image/:imageId` (idempotent, resumable
+via `GET .../rotate/status` if the tab closes mid-job) → `POST .../finalize`,
+which recomputes the authorized-principal set fresh (so a share added
+mid-rotation is still included), upserts new-version `bucket_keys`, **deletes
+the old-version rows** (the actual revocation), and bumps `buckets.
+key_version`. This is a genuinely expensive operation — structurally a full
+re-download-and-re-upload of every image in the bucket, since there's no way
+to shortcut it without the Worker ever holding a key — and the confirmation
+UI says so. `/device_config`'s `bucket_keys` entries and `/image_packed`'s
+response both carry `key_version` (`X-Bucket-Key-Version` header); firmware's
+`BucketKey` struct and `fetchAndDisplayImage()`'s lookup match on `(bucket_id,
+key_version)` together, not `bucket_id` alone, precisely so a device holding
+both an old and new key mid-rotation picks the right one per image.
+
+**Packed-blob compression** (migration `0017_packed_encoding.sql`) also
+shipped: the client compresses the packed 4bpp buffer with `CompressionStream
+('deflate-raw')` before encrypting, only when it clears a minimum savings
+threshold (`worker/src/client/compress.ts`), and records `images.
+packed_encoding` (`identity` or `deflate-raw`, echoed via `/image_packed`'s
+`X-Packed-Encoding` header — `Content-Length` for a compressed image is a
+sanity-bounded upper limit, not the fixed `bufferSize + 28` an identity
+response still gets). Real dithered content compresses well (measured
+32–76% smaller depending on how flat vs. noisy the image is — even a
+deliberately adversarial fully-random-index buffer cleared 32%). Firmware
+inflates via `tinfl` (`firmware/lib/common/tinfl.h/.c`, the inflate-only
+extract of miniz, taken from a copy of `miniz.c` already vendored on this
+project's own machine by esptool's flasher stub — not written from scratch,
+since a subtly-wrong DEFLATE decoder is exactly the kind of bug that's easy
+to ship and hard to notice). `fetchAndDisplayImage()` decrypts+inflates in
+small fixed-size streaming chunks straight into `display.getBuffer()` (via
+mbedtls's incremental `mbedtls_gcm_starts/_update/_finish` and `tinfl`'s
+`TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF` mode, which lets that same buffer
+double as inflate's own history window) — not decrypt-into-a-second-buffer-
+then-inflate, which doesn't fit EE04's memory budget. `display.refresh()` is
+still only reached after the GCM tag verifies, same invariant as the
+identity path. **EE04 is now at ~78% static RAM usage** (was ~75% before this
+feature) — tight, flagged deliberately, not a false green light. The
+simulator's GCM stub (`firmware/simulator/stubs/mbedtls/gcm.h`) grew the same
+streaming trio, hand-rolled the same way as its existing one-shot function,
+and was cross-checked against real WebCrypto output the same way.
+
 **Known gaps, not oversights:**
-- No crypto-level revocation. Deleting a `bucket_shares`/`device_buckets` row
-  only blocks *new* access — anyone who already unwrapped a bucket's key
-  keeps it. A "rotate this bucket's key" admin action (new key, re-encrypt
-  every blob, re-wrap for remaining principals) is the real fix and doesn't
-  exist yet.
 - No way to register a second passkey on an existing account. Losing your
   one passkey now means permanently losing access to every bucket you own or
   were shared — not just losing login, since the operator can't recover a
@@ -337,16 +382,17 @@ assumed from documentation:
 - No ESP32 flash encryption. A lost/stolen device's on-device private key
   (and therefore every bucket key ever wrapped for it) isn't protected at
   rest.
-- Packed blobs aren't compressed (encrypted ciphertext doesn't gzip
-  meaningfully, and compressing *before* encrypting would mean teaching the
-  firmware to inflate — a pure storage optimization, deliberately deferred,
-  decoupled from the encryption work itself).
-- No devices have shipped yet, so this landed as a breaking change with no
-  migration path for older plaintext-format images — re-upload is the only
-  option. If real devices exist by the time this changes again, firmware
-  must be OTA'd and confirmed running *before* the Worker side deploys, since
-  a bare Worker deploy would instantly break any device still on old
-  firmware.
+- Rotating a bucket's key re-derives every image from its stored raw
+  original using a centered/no-zoom crop, because per-image crop/pan/zoom
+  choices aren't persisted anywhere — they're baked into pixels at upload
+  time. An image originally uploaded with a custom crop reframes to
+  centered/no-zoom after a rotation. Cosmetic, not a security issue.
+- No devices have shipped yet, so encrypted buckets landed as a breaking
+  change with no migration path for older plaintext-format images —
+  re-upload is the only option. If real devices exist by the time this
+  changes again, firmware must be OTA'd and confirmed running *before* the
+  Worker side deploys, since a bare Worker deploy would instantly break any
+  device still on old firmware.
 
 ### Image Rotation
 

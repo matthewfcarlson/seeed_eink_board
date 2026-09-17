@@ -68,54 +68,97 @@ export function renderLandingPage(): string {
   details.curious[open] summary { margin-bottom: 12px; }
 
   /* ---------- hero e-ink refresh animation ----------
-     Mimics a real e-ink panel's refresh cycle: a couple of full-panel color
-     flashes (clearing ghosting), then the new image is revealed underneath
-     while the flash layer goes transparent. Two scenes alternate forever.
-     All three layers share one 16s timeline so the flash is always fully
-     opaque at the instant a scene's visibility toggles. */
-  .eink-scene { animation: 16s linear infinite; }
+     Mimics a real e-ink panel's refresh cycle: a quick full-panel
+     black/white clearing flash, then the new scene builds up one color
+     layer at a time instead of popping in all at once — sun first (the
+     flash's own last frame is white, so the sun's yellow reads as the
+     first "real" color rather than a second, redundant flash step),
+     then the hills, the sky behind them, and finally the small red/black
+     details. Two scenes alternate forever on one shared 20s timeline, so
+     every element's keyframe percentages line up against each other.
+
+     Layer color and paint (z-)order are independent on purpose: the SVG
+     below keeps each scene's shapes in their original, visually-correct
+     document order (e.g. the blue sky rect stays *before* the green hills
+     that overlap it, so the hills paint on top), while these keyframes
+     control only *when* a shape's opacity ramps to 1 — a shape's class
+     just says which reveal step it belongs to, not where it sits in the
+     stack. A color can also appear in more than one non-adjacent spot in
+     the DOM (e.g. scene B's ripple is green but must paint *after* the
+     blue lake to sit on top of the water) — that's fine, the same
+     layer-b-green class just gets applied at both spots and both fade in
+     together.
+
+     Each layer's own keyframes only need to describe *when it fades in* —
+     the parent .eink-scene-a/-b group masks it to invisible for the rest
+     of the cycle, so the layer can just hold opacity:1 afterward. */
+  .eink-scene { animation: 20s linear infinite; }
   .eink-scene-a { animation-name: eink-scene-a; }
   .eink-scene-b { animation-name: eink-scene-b; }
-  .eink-flash { animation: eink-flash 16s linear infinite; }
+  .eink-flash { animation: eink-flash 20s linear infinite; }
 
   @keyframes eink-flash {
-    0%   { fill: #241f1a; opacity: 1; }
-    5%   { fill: #241f1a; opacity: 1; }
-    6%   { fill: #ffffff; opacity: 1; }
-    11%  { fill: #ffffff; opacity: 1; }
-    12%  { fill: #c98f1c; opacity: 1; }
-    17%  { fill: #c98f1c; opacity: 1; }
-    18%  { opacity: 0; }
-    48%  { opacity: 0; }
-    49%  { fill: #241f1a; opacity: 1; }
-    54%  { fill: #241f1a; opacity: 1; }
-    55%  { fill: #ffffff; opacity: 1; }
-    60%  { fill: #ffffff; opacity: 1; }
-    61%  { fill: #2e6e8e; opacity: 1; }
-    66%  { fill: #2e6e8e; opacity: 1; }
-    67%  { opacity: 0; }
-    96%  { opacity: 0; }
+    0%   { opacity: 0; }
+    45%  { opacity: 0; }
+    46%  { fill: #241f1a; opacity: 1; }
+    47%  { fill: #241f1a; opacity: 1; }
+    48%  { fill: #ffffff; opacity: 1; }
+    49%  { fill: #ffffff; opacity: 1; }
+    50%  { opacity: 0; }
+    95%  { opacity: 0; }
+    96%  { fill: #241f1a; opacity: 1; }
     97%  { fill: #241f1a; opacity: 1; }
-    100% { fill: #241f1a; opacity: 1; }
+    98%  { fill: #ffffff; opacity: 1; }
+    99%  { fill: #ffffff; opacity: 1; }
+    100% { opacity: 0; }
   }
   @keyframes eink-scene-a {
-    0%   { opacity: 0; }
-    17%  { opacity: 0; }
-    18%  { opacity: 1; }
-    48%  { opacity: 1; }
-    49%  { opacity: 0; }
+    0%   { opacity: 1; }
+    45%  { opacity: 1; }
+    46%  { opacity: 0; }
     100% { opacity: 0; }
   }
   @keyframes eink-scene-b {
     0%   { opacity: 0; }
-    54%  { opacity: 0; }
-    55%  { opacity: 1; }
-    96%  { opacity: 1; }
-    97%  { opacity: 0; }
+    49%  { opacity: 0; }
+    50%  { opacity: 1; }
+    95%  { opacity: 1; }
+    96%  { opacity: 0; }
     100% { opacity: 0; }
   }
+
+  /* Scene A layer build order: yellow sun, green hills, blue sky, red
+     flowers, black accent. */
+  .layer-a-yellow { animation: 20s linear infinite layer-a-yellow; }
+  .layer-a-green  { animation: 20s linear infinite layer-a-green; }
+  .layer-a-blue   { animation: 20s linear infinite layer-a-blue; }
+  .layer-a-red    { animation: 20s linear infinite layer-a-red; }
+  .layer-a-black  { animation: 20s linear infinite layer-a-black; }
+  @keyframes layer-a-yellow { 0%, 1%  { opacity: 0; } 3%,  100% { opacity: 1; } }
+  @keyframes layer-a-green  { 0%, 5%  { opacity: 0; } 7%,  100% { opacity: 1; } }
+  @keyframes layer-a-blue   { 0%, 9%  { opacity: 0; } 11%, 100% { opacity: 1; } }
+  @keyframes layer-a-red    { 0%, 13% { opacity: 0; } 15%, 100% { opacity: 1; } }
+  @keyframes layer-a-black  { 0%, 17% { opacity: 0; } 19%, 100% { opacity: 1; } }
+
+  /* Scene B layer build order: yellow sun, green mountains, blue lake,
+     red flag, black dock/birds. */
+  .layer-b-yellow { animation: 20s linear infinite layer-b-yellow; }
+  .layer-b-green  { animation: 20s linear infinite layer-b-green; }
+  .layer-b-blue   { animation: 20s linear infinite layer-b-blue; }
+  .layer-b-red    { animation: 20s linear infinite layer-b-red; }
+  .layer-b-black  { animation: 20s linear infinite layer-b-black; }
+  @keyframes layer-b-yellow { 0%, 51% { opacity: 0; } 53%, 100% { opacity: 1; } }
+  @keyframes layer-b-green  { 0%, 55% { opacity: 0; } 57%, 100% { opacity: 1; } }
+  @keyframes layer-b-blue   { 0%, 59% { opacity: 0; } 61%, 100% { opacity: 1; } }
+  @keyframes layer-b-red    { 0%, 63% { opacity: 0; } 65%, 100% { opacity: 1; } }
+  @keyframes layer-b-black  { 0%, 67% { opacity: 0; } 69%, 100% { opacity: 1; } }
+
   @media (prefers-reduced-motion: reduce) {
-    .eink-scene, .eink-flash { animation: none; }
+    .eink-scene, .eink-flash,
+    .layer-a-green, .layer-a-blue, .layer-a-yellow, .layer-a-red, .layer-a-black,
+    .layer-b-green, .layer-b-blue, .layer-b-yellow, .layer-b-red, .layer-b-black {
+      animation: none;
+    }
     .eink-scene-a { opacity: 1; }
     .eink-scene-b, .eink-flash { opacity: 0; }
   }
@@ -157,27 +200,51 @@ export function renderLandingPage(): string {
       <rect x="66" y="40" width="268" height="228" fill="#ffffff"/>
 
       <g class="eink-scene eink-scene-a">
-        <rect x="66" y="40" width="268" height="140" fill="#2e6e8e"/>
-        <circle cx="272" cy="82" r="26" fill="#c98f1c"/>
-        <path d="M66 180 L150 118 L200 160 L250 122 L334 176 L334 268 L66 268 Z" fill="#4c7a4e"/>
-        <path d="M66 210 L130 168 L188 202 L246 166 L334 214 L334 268 L66 268 Z" fill="#3d6640"/>
-        <circle cx="120" cy="236" r="9" fill="#b23b3b"/>
-        <circle cx="146" cy="248" r="6" fill="#b23b3b"/>
-        <circle cx="106" cy="252" r="5" fill="#241f1a"/>
+        <g class="layer-a-blue">
+          <rect x="66" y="40" width="268" height="140" fill="#2e6e8e"/>
+        </g>
+        <g class="layer-a-yellow">
+          <circle cx="272" cy="82" r="26" fill="#c98f1c"/>
+        </g>
+        <g class="layer-a-green">
+          <path d="M66 180 L150 118 L200 160 L250 122 L334 176 L334 268 L66 268 Z" fill="#4c7a4e"/>
+          <path d="M66 210 L130 168 L188 202 L246 166 L334 214 L334 268 L66 268 Z" fill="#3d6640"/>
+        </g>
+        <g class="layer-a-red">
+          <circle cx="120" cy="236" r="9" fill="#b23b3b"/>
+          <circle cx="146" cy="248" r="6" fill="#b23b3b"/>
+        </g>
+        <g class="layer-a-black">
+          <circle cx="106" cy="252" r="5" fill="#241f1a"/>
+        </g>
       </g>
 
       <g class="eink-scene eink-scene-b">
         <rect x="66" y="40" width="268" height="228" fill="#ffffff"/>
-        <path d="M66 150 L110 122 L150 144 L190 116 L334 150 L334 172 L66 172 Z" fill="#4c7a4e"/>
-        <rect x="66" y="172" width="268" height="96" fill="#2e6e8e"/>
-        <circle cx="150" cy="88" r="18" fill="#c98f1c"/>
-        <polygon points="142,172 158,172 152,230 148,230" fill="#c98f1c" opacity="0.55"/>
-        <path d="M66 172 L110 190 L150 176 L190 196 L334 172 Z" fill="#3d6640" opacity="0.45"/>
-        <path d="M96 250 L96 268 M230 250 L230 268 M90 250 L236 250" stroke="#241f1a" stroke-width="4" fill="none" stroke-linecap="round"/>
-        <path d="M250 226 Q262 214 278 226 L272 236 L256 236 Z" fill="#241f1a"/>
-        <polygon points="264,214 264,226 272,220" fill="#b23b3b"/>
-        <path d="M270 66 L280 60 L290 66" stroke="#241f1a" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-        <path d="M290 76 L300 70 L310 76" stroke="#241f1a" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+        <g class="layer-b-green">
+          <path d="M66 150 L110 122 L150 144 L190 116 L334 150 L334 172 L66 172 Z" fill="#4c7a4e"/>
+        </g>
+        <g class="layer-b-blue">
+          <rect x="66" y="172" width="268" height="96" fill="#2e6e8e"/>
+        </g>
+        <g class="layer-b-yellow">
+          <circle cx="150" cy="88" r="18" fill="#c98f1c"/>
+          <polygon points="142,172 158,172 152,230 148,230" fill="#c98f1c" opacity="0.55"/>
+        </g>
+        <g class="layer-b-green">
+          <path d="M66 172 L110 190 L150 176 L190 196 L334 172 Z" fill="#3d6640" opacity="0.45"/>
+        </g>
+        <g class="layer-b-black">
+          <path d="M96 250 L96 268 M230 250 L230 268 M90 250 L236 250" stroke="#241f1a" stroke-width="4" fill="none" stroke-linecap="round"/>
+          <path d="M250 226 Q262 214 278 226 L272 236 L256 236 Z" fill="#241f1a"/>
+        </g>
+        <g class="layer-b-red">
+          <polygon points="264,214 264,226 272,220" fill="#b23b3b"/>
+        </g>
+        <g class="layer-b-black">
+          <path d="M270 66 L280 60 L290 66" stroke="#241f1a" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+          <path d="M290 76 L300 70 L310 76" stroke="#241f1a" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+        </g>
       </g>
 
       <rect class="eink-flash" x="66" y="40" width="268" height="228" fill="#241f1a"/>

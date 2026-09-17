@@ -34,7 +34,37 @@ const CHAR_CONFIG_UUID = "514a006a-319b-4e01-ba80-aa38bf8e5b1f";
 const CHAR_COMMAND_UUID = "1bc65320-3316-4de8-8a2c-89c89fa792ff";
 const CHAR_SCAN_RESULTS_UUID = "97c497fa-7e94-4fe6-bad2-68ffd9d34d5e";
 
-const simOrigin = new URLSearchParams(window.location.search).get("sim");
+let simOrigin = new URLSearchParams(window.location.search).get("sim");
+
+// firmware/simulator/stubs/NimBLEDevice.h's fixed SIM_GATT_PORT - one
+// simulator process (whichever board is currently in config mode) can be
+// listening here at a time. Only ever probed when this page's own origin is
+// itself a local dev one (see isLocalDevOrigin below) - a deployed page has
+// no reason to go looking at a visitor's localhost, and doing so anyway
+// would be a pointless (and slightly rude) port probe against every real
+// visitor.
+const LOCAL_SIMULATOR_ORIGIN = "http://localhost:8790";
+const LOCAL_SIMULATOR_PROBE_TIMEOUT_MS = 500;
+
+function isLocalDevOrigin(): boolean {
+  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+}
+
+/** Best-effort: is firmware/simulator's fake GATT bridge listening right
+ *  now? Times out quickly rather than waiting out a full connection-refused
+ *  cycle, since "nothing there" needs to feel instant, not like a hang. */
+async function detectLocalSimulator(): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOCAL_SIMULATOR_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${LOCAL_SIMULATOR_ORIGIN}/gatt/info`, { signal: controller.signal });
+    return res.ok ? LOCAL_SIMULATOR_ORIGIN : null;
+  } catch {
+    return null; // nothing listening, or it errored - either way, no simulator to use
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // Same localStorage key admin.ts's KEY_STORAGE uses — this page and /admin
 // are served from the same origin, so a passkey login there is already
@@ -184,8 +214,17 @@ async function connectSim() {
   }
 }
 
-function connect() {
-  return simOrigin ? connectSim() : connectBle();
+async function connect() {
+  if (simOrigin) return connectSim();
+  if (isLocalDevOrigin()) {
+    showMessage("Looking for a local simulator...", "info");
+    const detected = await detectLocalSimulator();
+    if (detected) {
+      simOrigin = detected;
+      return connectSim();
+    }
+  }
+  return connectBle();
 }
 
 function onDisconnected() {
@@ -317,10 +356,13 @@ el("save-btn").addEventListener("click", async () => {
 if (simOrigin) {
   // No device picker for a fake HTTP transport - just connect immediately.
   void connectSim();
-} else if (!(navigator as any).bluetooth) {
+} else if (!(navigator as any).bluetooth && !isLocalDevOrigin()) {
   // @beacio/core/auto installs a stub navigator.bluetooth on essentially
   // every browser (real, extension-backed, or its own install-prompting
-  // dummy) - this only fires in the (now rare) case none of those apply.
+  // dummy) - this only fires in the (now rare) case none of those apply. On
+  // a local dev origin, leave the button enabled anyway - connect() tries a
+  // local simulator before giving up, so "no Bluetooth" isn't necessarily
+  // the end of the story there the way it is on a real deployment.
   el("unsupported").style.display = "block";
   el<HTMLButtonElement>("connect-btn").disabled = true;
 }
