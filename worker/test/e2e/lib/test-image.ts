@@ -6,14 +6,11 @@ import { createHash } from "node:crypto";
 // renders the exported JPEG this suite decodes).
 const EE02_WIDTH = 1600;
 const EE02_HEIGHT = 1200;
-export const EE02_PACKED_BYTES = (EE02_WIDTH * EE02_HEIGHT) / 2;
 
-// EE04: 800x480 4bpp, no on-device rotation (firmware/src/ee04/display.h -
-// native row-major push) - see lib/media-constants.ts's BoardGeometry.
+// EE04: 800x480 4bpp native buffer (firmware/src/ee04/display.h) - see
+// lib/media-constants.ts's BoardGeometry.
 const EE04_WIDTH = 800;
 const EE04_HEIGHT = 480;
-export const EE04_PACKED_BYTES = (EE04_WIDTH * EE04_HEIGHT) / 2;
-export { EE04_HEIGHT };
 
 const BLACK_NIBBLE = 0x0;
 const RED_NIBBLE = 0x3;
@@ -60,13 +57,14 @@ export function buildTestPackedImage(): { packed: Uint8Array; packedHash: string
   return { packed, packedHash: hashPacked(packed) };
 }
 
-/** Same idea as buildTestPackedImage(), but for EE04, which does no on-device
- *  or simulator-side rotation at all (config.h's DISPLAY_MOUNTED_ROTATED is
- *  0) - a straightforward row-based top/bottom split already appears exactly
- *  that way once displayed. */
+/** Same idea as buildTestPackedImage(), and for the same reason: EE04 is
+ *  also mounted physically rotated now (config.h's DISPLAY_MOUNTED_ROTATED
+ *  is 1, portrait only for now), so this needs the same column-based split
+ *  as EE02's - a row-based split here would appear left/right once rotated
+ *  back for viewing, not top/bottom. */
 export function buildEe04TestPackedImage(): { packed: Uint8Array; packedHash: string } {
-  const rowThreshold = EE04_HEIGHT / 2;
-  const packed = packRowMajor(EE04_WIDTH, EE04_HEIGHT, (row, _col) => (row < rowThreshold ? BLACK_NIBBLE : RED_NIBBLE));
+  const colThreshold = EE04_WIDTH / 2;
+  const packed = packRowMajor(EE04_WIDTH, EE04_HEIGHT, (_row, col) => (col >= colThreshold ? BLACK_NIBBLE : RED_NIBBLE));
   return { packed, packedHash: hashPacked(packed) };
 }
 
@@ -76,5 +74,3 @@ export function buildEe04TestPackedImage(): { packed: Uint8Array; packedHash: st
 export function buildDummyBlob(label: string): Uint8Array {
   return new TextEncoder().encode(`e2e-test-${label}`);
 }
-
-export { EE02_HEIGHT };

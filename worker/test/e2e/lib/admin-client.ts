@@ -1,5 +1,16 @@
 import type { WrappedKey } from "../../../src/client/crypto";
-import { DEFAULT_BOARD_ID, type BoardId } from "../../../src/lib/media-constants";
+import { BOARD_IDS, type BoardId, type PackedEncoding } from "../../../src/lib/media-constants";
+
+/** One board's already-encrypted packed+thumbnail ciphertext for an upload/
+ *  reencrypt-image call - see routes/admin/images.ts's doc comment. A bucket
+ *  isn't board-scoped (migrations/0019_image_board_variants.sql), so both
+ *  routes require every board's variant in one call. */
+export interface CiphertextVariant {
+  packedHash: string;
+  packed: Uint8Array;
+  thumb: Uint8Array;
+  packedEncoding?: PackedEncoding;
+}
 
 /**
  * Thin fetch wrapper over the /admin API this e2e suite exercises - not a
@@ -107,6 +118,10 @@ export class AdminClient {
     });
   }
 
+  async deleteBucket(id: string): Promise<{ deleted: string }> {
+    return this.json(`/admin/buckets/${id}`, { method: "DELETE" });
+  }
+
   async getRawImageCiphertext(imageId: string): Promise<Uint8Array> {
     const res = await fetch(`${this.baseUrl}/admin/images/${imageId}/raw`, { headers: this.authHeaders() });
     if (!res.ok) throw new Error(`GET raw image failed: ${res.status} ${await res.text()}`);
@@ -132,13 +147,9 @@ export class AdminClient {
     bucketId: string,
     rotationId: string,
     imageId: string,
-    opts: { packedHash: string; raw: Uint8Array; packed: Uint8Array; thumb: Uint8Array }
+    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }
   ): Promise<void> {
-    const form = new FormData();
-    form.set("packed_hash", opts.packedHash);
-    form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
-    form.set("packed", new Blob([new Uint8Array(opts.packed)]), "packed.bin");
-    form.set("thumb", new Blob([new Uint8Array(opts.thumb)]), "thumb.bin");
+    const form = buildVariantFormData(opts);
     const res = await fetch(`${this.baseUrl}/admin/buckets/${bucketId}/rotate/${rotationId}/reencrypt-image/${imageId}`, {
       method: "POST",
       headers: this.authHeaders(),
@@ -203,14 +214,12 @@ export class AdminClient {
   async createBucket(
     label: string,
     wrappedKeyForSelf: WrappedKey,
-    opts?: { is_public?: boolean; public_key_raw?: string; target_board?: BoardId }
-  ): Promise<{ id: string; is_public?: boolean; target_board?: BoardId }> {
-    // Defaults to EE02 - every existing e2e fixture (buildTestPackedImage,
-    // the simulator flow) is built against that board's 1600x1200 geometry.
+    opts?: { is_public?: boolean; public_key_raw?: string }
+  ): Promise<{ id: string; is_public?: boolean }> {
     return this.json("/admin/buckets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label, key: wrappedKeyForSelf, target_board: DEFAULT_BOARD_ID, ...opts }),
+      body: JSON.stringify({ label, key: wrappedKeyForSelf, ...opts }),
     });
   }
 
@@ -222,22 +231,19 @@ export class AdminClient {
     });
   }
 
-  /** Uploads three already-encrypted ciphertext blobs (raw/packed/thumb) -
-   *  see worker/src/routes/admin/images.ts's doc comment. This suite builds
-   *  synthetic ciphertext directly (lib/test-image.ts) rather than running
-   *  the real browser decode/dither pipeline, since the Worker never
-   *  inspects plaintext either way. */
+  /** Uploads one raw-original ciphertext blob plus, for every board, that
+   *  board's packed+thumbnail ciphertext (see worker/src/routes/admin/
+   *  images.ts's doc comment). This suite builds synthetic ciphertext
+   *  directly (lib/test-image.ts) rather than running the real browser
+   *  decode/dither pipeline, since the Worker never inspects plaintext
+   *  either way. */
   async uploadImage(
     bucketId: string,
     filename: string,
-    opts: { packedHash: string; raw: Uint8Array; packed: Uint8Array; thumb: Uint8Array }
+    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }
   ): Promise<void> {
-    const form = new FormData();
-    form.set("packed_hash", opts.packedHash);
+    const form = buildVariantFormData(opts);
     form.set("dither_algorithm", "floyd_steinberg");
-    form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
-    form.set("packed", new Blob([new Uint8Array(opts.packed)]), "packed.bin");
-    form.set("thumb", new Blob([new Uint8Array(opts.thumb)]), "thumb.bin");
 
     const res = await fetch(
       `${this.baseUrl}/admin/images/upload?device_key=${encodeURIComponent(bucketId)}&filename=${encodeURIComponent(filename)}`,
@@ -247,4 +253,17 @@ export class AdminClient {
       throw new Error(`POST /admin/images/upload failed: ${res.status} ${await res.text()}`);
     }
   }
+}
+
+function buildVariantFormData(opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }): FormData {
+  const form = new FormData();
+  form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
+  for (const board of BOARD_IDS) {
+    const variant = opts.variants[board];
+    form.set(`packed_hash__${board}`, variant.packedHash);
+    form.set(`packed_encoding__${board}`, variant.packedEncoding ?? "identity");
+    form.set(`packed__${board}`, new Blob([new Uint8Array(variant.packed)]), `packed-${board}.bin`);
+    form.set(`thumb__${board}`, new Blob([new Uint8Array(variant.thumb)]), `thumb-${board}.bin`);
+  }
+  return form;
 }

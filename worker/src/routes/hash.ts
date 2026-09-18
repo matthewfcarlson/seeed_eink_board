@@ -4,6 +4,7 @@ import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
 import { getRotationSnapshot, peekPendingImage } from "../lib/rotation";
+import { getImageVariant } from "../lib/image-store";
 import { renderRegistrationBuffer } from "../lib/qr-registration";
 import { registrationUrl } from "../lib/registration-url";
 
@@ -25,6 +26,9 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     const lookup = await resolveDeviceKey(c.env, mac);
     const deviceKey = lookup.deviceKey;
 
+    const reportedBoard = c.req.header("X-Device-Board");
+    const board = reportedBoard && isValidBoardId(reportedBoard) ? reportedBoard : DEFAULT_BOARD_ID;
+
     if (deviceKey !== DEFAULT_DEVICE_KEY) {
       const valid = await verifyDeviceSignature(
         c.env,
@@ -40,8 +44,6 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     // A real but unregistered MAC gets a "scan to register" QR instead of any
     // bucket's rotation — see plan §QR registration.
     if (deviceKey === DEFAULT_DEVICE_KEY) {
-      const reportedBoard = c.req.header("X-Device-Board");
-      const board = reportedBoard && isValidBoardId(reportedBoard) ? reportedBoard : DEFAULT_BOARD_ID;
       const { hash } = await renderRegistrationBuffer(
         mac,
         registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret")),
@@ -54,6 +56,9 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     const pending = peekPendingImage(snapshot);
     if (!pending) return c.text("No image", 404);
 
-    return c.text(pending.image.packedHash, 200, { "Content-Type": "text/plain" });
+    const variant = await getImageVariant(c.env, pending.image.id, board);
+    if (!variant) return c.text("No image", 404);
+
+    return c.text(variant.packedHash, 200, { "Content-Type": "text/plain" });
   });
 }

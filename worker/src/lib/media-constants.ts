@@ -15,12 +15,13 @@ export type BoardId = "ee02-13in3" | "ee04-7in3";
  * firmware expects, exactly matching that board's DISPLAY_WIDTH/HEIGHT.
  * `needsRotation`: true means the source photo is cropped to an upright
  * (portrait) `displayHeight`x`displayWidth` canvas and then rotated 90°CW —
- * EE02's dual-UC8179 driver expects landscape 1600x1200 with no on-device
- * rotation, so the server/client pipeline does it once, ahead of time.
- * false means the board's own driver does no rotation at all (see
- * firmware/src/ee04/display.h's "no buffer transpose... driven natively
- * 800x480 row-major" comment) — the source photo is cropped directly to
- * `displayWidth`x`displayHeight`, no rotation step at all.
+ * both boards are mounted physically rotated and their drivers expect the
+ * native landscape buffer (EE02's dual-UC8179 at 1600x1200, EE04's ED2208 at
+ * 800x480) with no on-device rotation, so the server/client pipeline does
+ * the rotation once, ahead of time. false would mean the board's own driver
+ * does no rotation at all and the source photo is cropped directly to
+ * `displayWidth`x`displayHeight` — no board currently ships mounted flat,
+ * but the flag stays generic in case one does later.
  */
 export interface BoardGeometry {
   displayWidth: number;
@@ -30,7 +31,7 @@ export interface BoardGeometry {
 
 export const BOARD_GEOMETRY: Record<BoardId, BoardGeometry> = {
   "ee02-13in3": { displayWidth: 1600, displayHeight: 1200, needsRotation: true },
-  "ee04-7in3": { displayWidth: 800, displayHeight: 480, needsRotation: false },
+  "ee04-7in3": { displayWidth: 800, displayHeight: 480, needsRotation: true },
 };
 
 export const BOARD_IDS = Object.keys(BOARD_GEOMETRY) as BoardId[];
@@ -39,10 +40,11 @@ export function isValidBoardId(value: string): value is BoardId {
   return (BOARD_IDS as string[]).includes(value);
 }
 
-// The only board the image pipeline supported before per-board geometry
-// existed — every bucket created before migrations/0019_bucket_target_board.sql
-// defaults to this, and it's the fallback for a request that omits/mis-sends
-// X-Device-Board (e.g. an old firmware build).
+// The only board the image pipeline supported before per-board variants
+// existed — migrations/0019_image_board_variants.sql backfills every
+// pre-existing image's variant under this board id, and it's the fallback
+// for a request that omits/mis-sends X-Device-Board (e.g. an old firmware
+// build).
 export const DEFAULT_BOARD_ID: BoardId = "ee02-13in3";
 
 export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";

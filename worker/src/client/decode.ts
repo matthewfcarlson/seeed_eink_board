@@ -70,12 +70,13 @@ async function decodeToUprightBuffer(
 
 /**
  * Decode -> EXIF-correct -> crop -> orient for `board`'s screen (see
- * lib/media-constants.ts's BoardGeometry). A board whose driver does its own
- * 90° rotation on-device (EE02) is cropped to an upright canvas here and
- * then rotated to match; a board with no on-device rotation (EE04) is
- * cropped directly to its native landscape size, with no rotation step.
- * `upright` is always the crop before any rotation, in natural viewing
- * orientation — used to generate the dashboard thumbnail.
+ * lib/media-constants.ts's BoardGeometry). A board mounted physically
+ * rotated (needsRotation, currently both EE02 and EE04) is cropped to an
+ * upright canvas here and then rotated 90°CW to match its native landscape
+ * buffer — the driver itself does no on-device rotation either way. A board
+ * mounted flat (none currently) would be cropped directly to its native
+ * size, no rotation step. `upright` is always the crop before any rotation,
+ * in natural viewing orientation — used to generate the dashboard thumbnail.
  */
 export async function decodeToBoardBuffer(file: Blob, crop: CropParams = DEFAULT_CROP, board: BoardId): Promise<{
   rgba: Uint8ClampedArray;

@@ -14,7 +14,8 @@ import {
   wrapKeyFor,
 } from "../../src/client/crypto";
 import { AdminClient } from "./lib/admin-client";
-import { buildDummyBlob, buildTestPackedImage } from "./lib/test-image";
+import { buildDummyBlob } from "./lib/test-image";
+import { buildBothBoardVariants } from "./lib/test-variants";
 import { registerTestAccount } from "./lib/virtual-authenticator";
 import { grantSuperuser, startWranglerDev, type WranglerDevHandle } from "./lib/wrangler-dev";
 
@@ -66,12 +67,9 @@ describe("e2e: public buckets", () => {
     });
     expect(is_public).toBe(true);
 
-    const { packed, packedHash } = buildTestPackedImage();
     await adminA.uploadImage(bucketId, "e2e-test.bin", {
-      packedHash,
-      packed: await aesGcmEncryptBlob(bucketKey, packed),
       raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
-      thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb")),
+      variants: await buildBothBoardVariants(bucketKey),
     });
 
     // --- Account B: an ordinary (non-superuser, non-owner) account ---
@@ -97,10 +95,8 @@ describe("e2e: public buckets", () => {
     // No write access: upload, rename, and delete must all be refused.
     await expect(
       adminB.uploadImage(bucketId, "should-fail.bin", {
-        packedHash: "0000000000000000",
-        packed: await aesGcmEncryptBlob(bucketKey, packed),
         raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
-        thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb")),
+        variants: await buildBothBoardVariants(bucketKey),
       })
     ).rejects.toThrow(/403/);
     await expect(adminB.patchBucket(bucketId, { label: "hijacked" })).rejects.toThrow(/403/);
@@ -137,12 +133,9 @@ describe("e2e: public buckets", () => {
       public_key_raw: toBase64(bucketKeyRaw),
     });
 
-    const { packed: oldPacked, packedHash: oldHash } = buildTestPackedImage();
     await adminA.uploadImage(bucketId, "rotate-me.bin", {
-      packedHash: oldHash,
-      packed: await aesGcmEncryptBlob(bucketKey, oldPacked),
       raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw-v1")),
-      thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb-v1")),
+      variants: await buildBothBoardVariants(bucketKey),
     });
 
     const { apiKey: apiKeyB } = await registerTestAccount(wrangler.baseUrl);
@@ -159,13 +152,10 @@ describe("e2e: public buckets", () => {
     const started = await adminA.rotateStart(bucketId, wrappedForANew);
     expect(started.image_ids).toHaveLength(1);
 
-    const { packed: newPacked, packedHash: newHash } = buildTestPackedImage();
     for (const imageId of started.image_ids) {
       await adminA.reencryptImage(bucketId, started.rotation_id, imageId, {
-        packedHash: newHash,
-        packed: await aesGcmEncryptBlob(newBucketKey, newPacked),
         raw: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("raw-v2")),
-        thumb: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("thumb-v2")),
+        variants: await buildBothBoardVariants(newBucketKey),
       });
     }
 
@@ -203,12 +193,9 @@ describe("e2e: public buckets", () => {
       public_key_raw: toBase64(bucketKeyRaw),
     });
 
-    const { packed, packedHash } = buildTestPackedImage();
     await adminA.uploadImage(bucketId, "gap-test.bin", {
-      packedHash,
-      packed: await aesGcmEncryptBlob(bucketKey, packed),
       raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
-      thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb")),
+      variants: await buildBothBoardVariants(bucketKey),
     });
 
     // B assigns the public bucket to B's own device - exactly the flow the
@@ -249,10 +236,8 @@ describe("e2e: public buckets", () => {
 
     for (const imageId of started.image_ids) {
       await adminA.reencryptImage(bucketId, started.rotation_id, imageId, {
-        packedHash: packedHash,
-        packed: await aesGcmEncryptBlob(newBucketKey, packed),
         raw: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("raw")),
-        thumb: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("thumb")),
+        variants: await buildBothBoardVariants(newBucketKey),
       });
     }
 

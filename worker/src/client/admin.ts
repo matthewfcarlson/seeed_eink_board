@@ -30,7 +30,7 @@ import {
 } from "./crypto";
 import { DEFAULT_CROP, decodeToBoardBuffer, type CropParams } from "./decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
-import { DEFAULT_BOARD_ID, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
+import { BOARD_IDS, type DitherAlgorithm } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
 import { makeThumbnailJpeg } from "./thumbnail";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
@@ -60,30 +60,19 @@ let sharingPublicKeyRaw: Uint8Array | null = null;
 // renderApp() from each bucket's caller-specific WrappedKey.
 const bucketAesKeys = new Map<string, CryptoKey>();
 
-// Human-friendly labels for the two boards, used by the bucket-creation
-// dropdown and bucket-card pill (kept in the client rather than
-// lib/media-constants.ts since it's presentation-only, no geometry).
-const BOARD_LABELS: Record<BoardId, string> = {
-  "ee02-13in3": "13.3\" Spectra 6 (EE02)",
-  "ee04-7in3": "7.3\" Six-Color (EE04)",
-};
-
-// ---- Upload / crop modal state ----
-// CSS size of the crop viewport (see .crop-viewport in style.css), one preset
-// per board so the on-screen crop preview matches that board's aspect ratio —
-// see decode.ts's decodeToBoardBuffer. EE02's is 3:4 (its upright pre-rotation
-// crop, 1200x1600); EE04's is 5:3 (its native landscape crop, 800x480 — no
-// rotation step at all). Reassigned by openUploadModal() before each render;
-// applied as inline width/height on #upload-crop-viewport (the CSS class only
-// sets a default 210x280 fallback).
-const CROP_BOX_SIZES: Record<BoardId, { w: number; h: number }> = {
-  "ee02-13in3": { w: 210, h: 280 },
-  "ee04-7in3": { w: 280, h: 168 },
-};
-let CROP_BOX_W = CROP_BOX_SIZES[DEFAULT_BOARD_ID].w;
-let CROP_BOX_H = CROP_BOX_SIZES[DEFAULT_BOARD_ID].h;
+// CSS size of the crop viewport (see .crop-viewport in style.css) — EE02's
+// upright (pre-rotation) 3:4 ratio (1200x1600). A bucket isn't board-scoped
+// (migrations/0019_image_board_variants.sql) and confirmUpload()/
+// reencryptOneImage() always crop+pack for every board from this one
+// interactive crop, so there's one reference box for the preview rather than
+// a per-board one: the same panX/panY/zoom fractions this box produces are
+// applied independently against each other board's own upright target in
+// decode.ts's decodeToBoardBuffer — a reasonable approximation for boards
+// with a different aspect ratio (EE04's upright crop is 3:5, not 3:4), not a
+// second crop UI.
+const CROP_BOX_W = 210;
+const CROP_BOX_H = 280;
 let uploadModalDeviceKey: string | null = null;
-let uploadModalBoard: BoardId = DEFAULT_BOARD_ID;
 let uploadModalFile: File | null = null;
 let uploadObjectUrl: string | null = null;
 let cropNatural = { w: 0, h: 0 };
@@ -537,25 +526,15 @@ function openBucketModal(mac: string) {
   bucketModalMac = mac;
   const device = devicesCache.find((d) => d.mac === mac);
   const currentBucketIds = device ? device.bucket_ids : [];
-  const deviceBoard = device ? device.board : null;
   const list = el("bucket-modal-list");
   list.innerHTML = allBucketsCache.length
     ? '<div class="bucket-checkbox-list">' +
       allBucketsCache
-        .map((b) => {
-          // Mirrors the server-side guard in PATCH /admin/devices/:mac/buckets
-          // — a bucket's images are packed for one board only (migrations/
-          // 0019_bucket_target_board.sql). Only enforced once this device's
-          // board is actually known (self-reported on its first
-          // /device_config call) — nothing to check against otherwise.
-          const mismatched = !!deviceBoard && !!b.target_board && b.target_board !== deviceBoard;
-          const boardNote = mismatched
-            ? ' <span class="hint">(different screen size: ' + escapeHtml(BOARD_LABELS[b.target_board as BoardId] ?? b.target_board) + ")</span>"
-            : "";
-          return '<label' + (mismatched ? ' title="This bucket is packed for a different screen size"' : "") + '><input type="checkbox" value="' +
-            escapeHtml(b.id) + '" ' + (currentBucketIds.includes(b.id) ? "checked" : "") + (mismatched ? " disabled" : "") +
-            "> " + escapeHtml(b.label) + boardNote + "</label>";
-        })
+        .map(
+          (b) =>
+            '<label><input type="checkbox" value="' + escapeHtml(b.id) + '" ' +
+            (currentBucketIds.includes(b.id) ? "checked" : "") + "> " + escapeHtml(b.label) + "</label>"
+        )
         .join("") +
       "</div>"
     : '<p class="hint">No buckets yet — create one in the Image Buckets section first.</p>';
@@ -983,16 +962,11 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
 
   const publicPill = bucket.is_public ? '<span class="pill green">Public</span>' : "";
   const sharedPill = isSharedWithMe ? '<span class="pill">Shared</span>' : "";
-  const boardPill = bucket.target_board
-    ? '<span class="pill" title="Images in this bucket are packed for this screen">' +
-      escapeHtml(BOARD_LABELS[bucket.target_board as BoardId] ?? bucket.target_board) + "</span>"
-    : "";
 
   const titleRow =
     '<div class="card-head">' +
       "<h3>" + escapeHtml(bucket.label) + "</h3>" +
       '<div style="display:flex; gap:6px; align-items:center;">' +
-        boardPill +
         publicPill +
         sharedPill +
         '<span class="pill blue">' + images.length + (images.length === 1 ? " photo" : " photos") + "</span>" +
@@ -1051,9 +1025,6 @@ function openUploadModal(deviceKey: string) {
     return;
   }
   uploadModalDeviceKey = deviceKey;
-  uploadModalBoard = (allBucketsCache.find((b) => b.id === deviceKey)?.target_board as BoardId) ?? DEFAULT_BOARD_ID;
-  CROP_BOX_W = CROP_BOX_SIZES[uploadModalBoard].w;
-  CROP_BOX_H = CROP_BOX_SIZES[uploadModalBoard].h;
   uploadModalFile = null;
   if (uploadObjectUrl) { URL.revokeObjectURL(uploadObjectUrl); uploadObjectUrl = null; }
   cropState = { ...DEFAULT_CROP };
@@ -1226,32 +1197,42 @@ async function confirmUpload() {
 
   try {
     const rawBytes = new Uint8Array(await file.arrayBuffer());
-    const board = uploadModalBoard;
-    const landscape = await decodeToBoardBuffer(file, cropState, board);
-    enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-    const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
-    const packed = packToNibbles(indices);
-    const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
-
-    // Compress the plaintext packed buffer BEFORE encrypting it - ciphertext
-    // doesn't compress meaningfully (see compress.ts's doc comment). Only
-    // actually ships the compressed form if it's meaningfully smaller.
-    const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
-
-    const [rawCiphertext, packedCiphertext, thumbCiphertext] = await Promise.all([
-      aesGcmEncryptBlob(bucketKey, rawBytes),
-      aesGcmEncryptBlob(bucketKey, packedForUpload),
-      aesGcmEncryptBlob(bucketKey, thumbnail),
-    ]);
-    const packedHash = await computeHash16(packedCiphertext);
+    const rawCiphertext = await aesGcmEncryptBlob(bucketKey, rawBytes);
 
     const formData = new FormData();
     formData.set("dither_algorithm", dither);
-    formData.set("packed_encoding", packedEncoding);
-    formData.set("packed_hash", packedHash);
     formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
-    formData.set("packed", new Blob([new Uint8Array(packedCiphertext)]), "packed.bin");
-    formData.set("thumb", new Blob([new Uint8Array(thumbCiphertext)]), "thumb.bin");
+
+    // A bucket isn't board-scoped (migrations/0019_image_board_variants.sql)
+    // - every upload generates every board's rendition from this one crop,
+    // so any device subscribed to this bucket, whatever its screen, is
+    // servable without a second upload.
+    await Promise.all(
+      BOARD_IDS.map(async (board) => {
+        const landscape = await decodeToBoardBuffer(file, cropState, board);
+        enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+        const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
+        const packed = packToNibbles(indices);
+        const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
+
+        // Compress the plaintext packed buffer BEFORE encrypting it -
+        // ciphertext doesn't compress meaningfully (see compress.ts's doc
+        // comment). Only actually ships the compressed form if it's
+        // meaningfully smaller.
+        const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
+        const [packedCiphertext, thumbCiphertext] = await Promise.all([
+          aesGcmEncryptBlob(bucketKey, packedForUpload),
+          aesGcmEncryptBlob(bucketKey, thumbnail),
+        ]);
+        const packedHash = await computeHash16(packedCiphertext);
+
+        formData.set(`packed_encoding__${board}`, packedEncoding);
+        formData.set(`packed_hash__${board}`, packedHash);
+        formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
+        formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+      })
+    );
 
     // No Content-Type header: FormData needs the browser to set its own
     // multipart boundary, which apiFetch only does when we don't override it.
@@ -1395,34 +1376,38 @@ async function reencryptOneImage(
   if (!res.ok) throw new Error(res.status + " " + res.statusText);
   const rawCiphertext = new Uint8Array(await res.arrayBuffer());
   const rawBytes = await aesGcmDecryptBlob(oldKey, rawCiphertext);
-
-  const board = (allBucketsCache.find((b) => b.id === bucketId)?.target_board as BoardId) ?? DEFAULT_BOARD_ID;
-  const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(rawBytes)]), DEFAULT_CROP, board);
-  enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-  const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
-  const packed = packToNibbles(indices);
-  const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
-
-  // Re-decides compression fresh from the freshly-recomputed packed bytes,
-  // same as confirmUpload() - this does NOT try to preserve whatever
-  // packed_encoding the image happened to have before rotation (there's
-  // nothing stored server-side to read a "how was this compressed" answer
-  // from without the bucket key anyway).
-  const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
-
-  const [newRawCiphertext, newPackedCiphertext, newThumbCiphertext] = await Promise.all([
-    aesGcmEncryptBlob(newKey, rawBytes),
-    aesGcmEncryptBlob(newKey, packedForUpload),
-    aesGcmEncryptBlob(newKey, thumbnail),
-  ]);
-  const packedHash = await computeHash16(newPackedCiphertext);
+  const newRawCiphertext = await aesGcmEncryptBlob(newKey, rawBytes);
 
   const formData = new FormData();
-  formData.set("packed_encoding", packedEncoding);
-  formData.set("packed_hash", packedHash);
   formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
-  formData.set("packed", new Blob([new Uint8Array(newPackedCiphertext)]), "packed.bin");
-  formData.set("thumb", new Blob([new Uint8Array(newThumbCiphertext)]), "thumb.bin");
+
+  // Every board's variant gets re-derived and re-uploaded together, same as
+  // confirmUpload() - this does NOT try to preserve whatever packed_encoding
+  // each variant happened to have before rotation (there's nothing stored
+  // server-side to read a "how was this compressed" answer from without the
+  // bucket key anyway).
+  await Promise.all(
+    BOARD_IDS.map(async (board) => {
+      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(rawBytes)]), DEFAULT_CROP, board);
+      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
+      const packed = packToNibbles(indices);
+      const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
+
+      const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
+      const [newPackedCiphertext, newThumbCiphertext] = await Promise.all([
+        aesGcmEncryptBlob(newKey, packedForUpload),
+        aesGcmEncryptBlob(newKey, thumbnail),
+      ]);
+      const packedHash = await computeHash16(newPackedCiphertext);
+
+      formData.set(`packed_encoding__${board}`, packedEncoding);
+      formData.set(`packed_hash__${board}`, packedHash);
+      formData.set(`packed__${board}`, new Blob([new Uint8Array(newPackedCiphertext)]), `packed-${board}.bin`);
+      formData.set(`thumb__${board}`, new Blob([new Uint8Array(newThumbCiphertext)]), `thumb-${board}.bin`);
+    })
+  );
 
   await apiFetch(
     "/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/" + encodeURIComponent(rotationId) + "/reencrypt-image/" + encodeURIComponent(imageId),
@@ -1602,12 +1587,6 @@ el("create-bucket-btn").addEventListener("click", async () => {
   const input = el<HTMLInputElement>("new-bucket-label");
   const label = input.value.trim();
   if (!label) return;
-  const boardSelect = el<HTMLSelectElement>("new-bucket-board");
-  const targetBoard = boardSelect.value as BoardId | "";
-  if (!targetBoard) {
-    showMessage("app-message", "Pick a target screen size for this bucket.", "error");
-    return;
-  }
   if (!sharingPublicKeyRaw) {
     showMessage("app-message", "Can't create an encrypted bucket yet — log out and back in with your passkey first.", "error");
     return;
@@ -1624,8 +1603,7 @@ el("create-bucket-btn").addEventListener("click", async () => {
     const bucketKeyRaw = await exportAesKeyRaw(bucketKey);
     const key = await wrapKeyFor(sharingPublicKeyRaw, bucketKeyRaw, HKDF_INFO_BUCKET_WRAP);
     const makePublicCheckbox = el<HTMLInputElement>("new-bucket-public-checkbox");
-    const body: { label: string; key: WrappedKey; is_public?: boolean; public_key_raw?: string; target_board: BoardId } =
-      { label, key, target_board: targetBoard };
+    const body: { label: string; key: WrappedKey; is_public?: boolean; public_key_raw?: string } = { label, key };
     if (makePublicCheckbox.checked) {
       body.is_public = true;
       body.public_key_raw = toBase64(bucketKeyRaw);
@@ -1636,7 +1614,6 @@ el("create-bucket-btn").addEventListener("click", async () => {
       body: JSON.stringify(body),
     });
     input.value = "";
-    boardSelect.value = "";
     makePublicCheckbox.checked = false;
     await renderApp();
   } catch (err: any) {

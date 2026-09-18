@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { DITHER_ALGORITHMS, PACKED_ENCODINGS, isValidPackedEncoding, type DitherAlgorithm, type Env } from "../../types";
+import { BOARD_IDS, DEFAULT_BOARD_ID, DITHER_ALGORITHMS, type BoardId, type DitherAlgorithm, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketAccess, assertBucketReadAccess } from "../../lib/bucket-access";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
@@ -29,13 +29,15 @@ async function findImageDeviceKey(env: Env, id: string): Promise<string | null> 
  * Ingestion (decode -> EXIF-correct -> resize/crop -> rotate -> enhance ->
  * dither -> pack -> hash -> encrypt) runs entirely client-side now — see root
  * CLAUDE.md's encrypted-buckets plan. This route never sees plaintext: it
- * receives three already-encrypted blobs (raw original, packed 4bpp, thumbnail)
- * plus a client-computed content hash, and its only job is validate-and-store,
- * gated by the same assertBucketAccess check as before. `dither_algorithm` and
- * `packed_hash` are trusted client-reported metadata (display/change-detection
- * only) — the Worker has no way to verify them without the bucket key, same
- * trust boundary it always implicitly had for upload *content*, now extended
- * to these two fields as well.
+ * receives one raw-original ciphertext blob plus, for every board in
+ * BOARD_IDS, that board's packed+thumbnail ciphertext and a client-computed
+ * content hash (see lib/image-upload.ts) — a bucket isn't board-scoped, so
+ * every upload generates every board's rendition up front rather than
+ * waiting to find out which boards actually need one. `dither_algorithm` and
+ * each board's `packed_hash` are trusted client-reported metadata (display/
+ * change-detection only) — the Worker has no way to verify them without the
+ * bucket key, same trust boundary it always implicitly had for upload
+ * *content*, now extended to these fields as well.
  */
 export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/images/upload", requireAdmin, async (c) => {
@@ -54,23 +56,12 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     if (!isValidDitherAlgorithm(ditherParam)) {
       return c.json({ error: `dither_algorithm must be one of: ${DITHER_ALGORITHMS.join(", ")}` }, 400);
     }
-    // Trusted client-reported metadata, same trust boundary as dither_algorithm/
-    // packed_hash above (see this function's doc comment) - describes what the
-    // client compressed/encrypted, not something this route can verify without
-    // the bucket key. Not part of the shared CiphertextUpload* validators in
-    // lib/image-upload.ts since reencrypt-image (bucket key rotation) re-wraps
-    // existing ciphertext under a new key and must never change this field.
-    const packedEncodingParam = typeof body.packed_encoding === "string" ? body.packed_encoding : "identity";
-    if (!isValidPackedEncoding(packedEncodingParam)) {
-      return c.json({ error: `packed_encoding must be one of: ${PACKED_ENCODINGS.join(", ")}` }, 400);
-    }
 
     const fields = validateCiphertextUploadFields(body);
     if ("error" in fields) return c.json({ error: fields.error }, 400);
     const bytes = await readCiphertextUploadBytes(fields);
     if ("error" in bytes) return c.json({ error: bytes.error }, 400);
-    const { rawBytes, packedBytes, thumbBytes } = bytes;
-    const packedHash = fields.packedHash;
+    const { rawBytes, variants } = bytes;
 
     // A freshly-uploaded image is always encrypted under the bucket's
     // CURRENT key version, whatever that happens to be (1 outside a
@@ -89,26 +80,35 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     const id = existing?.id ?? crypto.randomUUID();
 
     await Promise.all([
-      putPackedImage(c.env, deviceKey, id, packedBytes),
       putRawImage(c.env, deviceKey, id, rawBytes),
-      putThumbnail(c.env, deviceKey, id, thumbBytes),
+      ...BOARD_IDS.flatMap((board) => [
+        putPackedImage(c.env, deviceKey, id, board, variants[board].packedBytes),
+        putThumbnail(c.env, deviceKey, id, board, variants[board].thumbBytes),
+      ]),
     ]);
 
     const now = Math.floor(Date.now() / 1000);
-    await c.env.DB.prepare(
-      `INSERT INTO images (id, device_key, filename, dither_algorithm, packed_hash, packed_bytes, raw_bytes, created_at, key_version, packed_encoding)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(device_key, filename) DO UPDATE SET
-         dither_algorithm = excluded.dither_algorithm,
-         packed_hash = excluded.packed_hash,
-         packed_bytes = excluded.packed_bytes,
-         raw_bytes = excluded.raw_bytes,
-         created_at = excluded.created_at,
-         key_version = excluded.key_version,
-         packed_encoding = excluded.packed_encoding`
-    )
-      .bind(id, deviceKey, filename, ditherParam, packedHash, packedBytes.byteLength, rawBytes.byteLength, now, keyVersion, packedEncodingParam)
-      .run();
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(device_key, filename) DO UPDATE SET
+           dither_algorithm = excluded.dither_algorithm,
+           raw_bytes = excluded.raw_bytes,
+           created_at = excluded.created_at,
+           key_version = excluded.key_version`
+      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion),
+      ...BOARD_IDS.map((board) =>
+        c.env.DB.prepare(
+          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(image_id, board) DO UPDATE SET
+             packed_encoding = excluded.packed_encoding,
+             packed_hash = excluded.packed_hash,
+             packed_bytes = excluded.packed_bytes`
+        ).bind(id, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength)
+      ),
+    ]);
 
     await invalidateRotationCache(c.env, deviceKey);
     await invalidateRotationCacheForBucketConsumers(c.env, deviceKey);
@@ -119,9 +119,16 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
         device_key: deviceKey,
         filename,
         dither_algorithm: ditherParam,
-        packed_hash: packedHash,
-        packed_bytes: packedBytes.byteLength,
-        packed_encoding: packedEncodingParam,
+        variants: Object.fromEntries(
+          BOARD_IDS.map((board) => [
+            board,
+            {
+              packed_hash: fields.variants[board].packedHash,
+              packed_bytes: variants[board].packedBytes.byteLength,
+              packed_encoding: fields.variants[board].packedEncoding,
+            },
+          ])
+        ),
       },
       201
     );
@@ -137,27 +144,48 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     }
 
     const rows = await c.env.DB.prepare(
-      "SELECT id, filename, dither_algorithm, packed_hash, packed_bytes, raw_bytes, created_at, key_version FROM images WHERE device_key = ? ORDER BY filename ASC"
+      "SELECT id, filename, dither_algorithm, raw_bytes, created_at, key_version FROM images WHERE device_key = ? ORDER BY filename ASC"
     )
       .bind(deviceKey)
       .all<{
         id: string;
         filename: string;
         dither_algorithm: string;
-        packed_hash: string;
-        packed_bytes: number;
         raw_bytes: number;
         created_at: number;
         key_version: number;
       }>();
 
+    if (rows.results.length === 0) return c.json({ images: [] });
+
+    const variantRows = await c.env.DB.prepare(
+      `SELECT image_id, board, packed_hash, packed_bytes, packed_encoding FROM image_variants
+       WHERE image_id IN (${rows.results.map(() => "?").join(",")})`
+    )
+      .bind(...rows.results.map((r) => r.id))
+      .all<{ image_id: string; board: BoardId; packed_hash: string; packed_bytes: number; packed_encoding: string }>();
+
+    const variantsByImage = new Map<string, Record<string, { packed_hash: string; packed_bytes: number; packed_encoding: string }>>();
+    for (const v of variantRows.results) {
+      const entry = variantsByImage.get(v.image_id) ?? {};
+      entry[v.board] = { packed_hash: v.packed_hash, packed_bytes: v.packed_bytes, packed_encoding: v.packed_encoding };
+      variantsByImage.set(v.image_id, entry);
+    }
+
     // Ciphertext, base64-encoded — the dashboard decrypts and builds its own
-    // data URL client-side with the bucket key it already holds.
+    // data URL client-side with the bucket key it already holds. Preview
+    // thumbnail: DEFAULT_BOARD_ID's variant, falling back to whichever board
+    // actually has one — this is a human preview, not board-specific.
     const images = await Promise.all(
-      rows.results.map(async (row) => ({
-        ...row,
-        thumbnail_ciphertext_b64: await getThumbnailCiphertextB64(c.env, deviceKey, row.id),
-      }))
+      rows.results.map(async (row) => {
+        const variants = variantsByImage.get(row.id) ?? {};
+        const previewBoard = (variants[DEFAULT_BOARD_ID] ? DEFAULT_BOARD_ID : (Object.keys(variants)[0] as BoardId | undefined)) ?? null;
+        return {
+          ...row,
+          variants,
+          thumbnail_ciphertext_b64: previewBoard ? await getThumbnailCiphertextB64(c.env, deviceKey, row.id, previewBoard) : null,
+        };
+      })
     );
     return c.json({ images });
   });
@@ -172,6 +200,10 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       return c.json({ error: "Forbidden" }, 403);
     }
 
+    // image_variants.image_id references images(id) - must go before the
+    // images delete below or D1 rejects it as a FOREIGN KEY constraint
+    // failure (see migrations/0019_image_board_variants.sql).
+    await c.env.DB.prepare("DELETE FROM image_variants WHERE image_id = ?").bind(id).run();
     await c.env.DB.prepare("DELETE FROM images WHERE id = ?").bind(id).run();
     await deleteImageBlobs(c.env, deviceKey, id);
     await invalidateRotationCache(c.env, deviceKey);

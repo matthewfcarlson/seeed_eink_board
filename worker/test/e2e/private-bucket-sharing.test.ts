@@ -18,7 +18,8 @@ import {
   wrapKeyFor,
 } from "../../src/client/crypto";
 import { AdminClient } from "./lib/admin-client";
-import { buildDummyBlob, buildTestPackedImage } from "./lib/test-image";
+import { buildDummyBlob } from "./lib/test-image";
+import { buildBothBoardVariants } from "./lib/test-variants";
 import { registerTestAccount } from "./lib/virtual-authenticator";
 import { startWranglerDev, type WranglerDevHandle } from "./lib/wrangler-dev";
 
@@ -110,12 +111,9 @@ describe("e2e: private bucket sharing", () => {
     const { id: bucketId, is_public } = await adminA.createBucket("private-e2e-bucket", wrappedForA);
     expect(is_public).toBeFalsy();
 
-    const { packed, packedHash } = buildTestPackedImage();
     await adminA.uploadImage(bucketId, "shared-e2e.bin", {
-      packedHash,
-      packed: await aesGcmEncryptBlob(bucketKey, packed),
       raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
-      thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb")),
+      variants: await buildBothBoardVariants(bucketKey),
     });
 
     // --- A creates a real invite link, exactly like admin.ts's createBucketInvite ---
@@ -181,12 +179,9 @@ describe("e2e: private bucket sharing", () => {
     const wrappedForA = await wrapKeyFor(await exportPublicKeyRaw(aKeyPair.publicKey), bucketKeyRaw, HKDF_INFO_BUCKET_WRAP);
     const { id: bucketId } = await adminA.createBucket("private-e2e-rotate-bucket", wrappedForA);
 
-    const { packed: oldPacked, packedHash: oldHash } = buildTestPackedImage();
     await adminA.uploadImage(bucketId, "rotate-me.bin", {
-      packedHash: oldHash,
-      packed: await aesGcmEncryptBlob(bucketKey, oldPacked),
       raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw-v1")),
-      thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb-v1")),
+      variants: await buildBothBoardVariants(bucketKey),
     });
 
     // --- A invites B; B joins for real (non-public) access ---
@@ -241,13 +236,10 @@ describe("e2e: private bucket sharing", () => {
     const started = await adminA.rotateStart(bucketId, wrappedForANew);
     expect(started.image_ids).toHaveLength(1);
 
-    const { packed: newPacked, packedHash: newHash } = buildTestPackedImage();
     for (const imageId of started.image_ids) {
       await adminA.reencryptImage(bucketId, started.rotation_id, imageId, {
-        packedHash: newHash,
-        packed: await aesGcmEncryptBlob(newBucketKey, newPacked),
         raw: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("raw-v2")),
-        thumb: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("thumb-v2")),
+        variants: await buildBothBoardVariants(newBucketKey),
       });
     }
 

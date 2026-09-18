@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { PACKED_ENCODINGS, isValidPackedEncoding, isValidBoardId, type Env } from "../../types";
+import { BOARD_IDS, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { deleteImageBlobs, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
@@ -49,20 +49,12 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
   // anyone else gets 403 rather than the flag silently being dropped.
   app.post("/admin/buckets", requireAdmin, async (c) => {
     const body = await c.req
-      .json<{ label?: string; key?: unknown; is_public?: boolean; public_key_raw?: string; target_board?: string }>()
+      .json<{ label?: string; key?: unknown; is_public?: boolean; public_key_raw?: string }>()
       .catch(() => ({}) as never);
     const label = body.label?.trim();
     if (!label) return c.json({ error: "label is required" }, 400);
     const key = parseWrappedBucketKey(body.key);
     if (!key) return c.json({ error: "key (wrapped bucket key for the caller) is required" }, 400);
-    // Required, not defaulted — see migrations/0019_bucket_target_board.sql.
-    // A bucket's images are packed once, client-side, for exactly one board's
-    // geometry; forcing an explicit choice here avoids anyone accidentally
-    // packing a bucket for the wrong screen.
-    if (!body.target_board || !isValidBoardId(body.target_board)) {
-      return c.json({ error: "target_board (which device screen this bucket's images are packed for) is required" }, 400);
-    }
-    const targetBoard = body.target_board;
 
     let isPublic = false;
     let publicKeyRaw: string | null = null;
@@ -82,17 +74,17 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     // that gap open to any interruption between them.
     await c.env.DB.batch([
       c.env.DB.prepare(
-        "INSERT INTO buckets (id, owner_id, label, created_at, is_public, public_key_raw, target_board) VALUES (?, ?, ?, ?, ?, ?, ?)"
-      ).bind(id, c.var.user.id, label, now, isPublic ? 1 : 0, publicKeyRaw, targetBoard),
+        "INSERT INTO buckets (id, owner_id, label, created_at, is_public, public_key_raw) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(id, c.var.user.id, label, now, isPublic ? 1 : 0, publicKeyRaw),
       bucketKeyUpsertStatement(c.env, id, "user", c.var.user.id, key, 1),
     ]);
 
-    return c.json({ id, label, owner_id: c.var.user.id, is_owner: true, is_public: isPublic, target_board: targetBoard }, 201);
+    return c.json({ id, label, owner_id: c.var.user.id, is_owner: true, is_public: isPublic }, 201);
   });
 
   app.get("/admin/buckets", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      `SELECT id, owner_id, label, created_at, key_version, is_public, public_key_raw, target_board FROM buckets
+      `SELECT id, owner_id, label, created_at, key_version, is_public, public_key_raw FROM buckets
        WHERE owner_id = ?1 OR id IN (SELECT bucket_id FROM bucket_shares WHERE user_id = ?1)
           OR is_public = 1
        ORDER BY created_at ASC`
@@ -106,7 +98,6 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
         key_version: number;
         is_public: number;
         public_key_raw: string | null;
-        target_board: string;
       }>();
 
     // Each bucket's caller-specific wrapped key AT THE BUCKET'S CURRENT
@@ -135,7 +126,6 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
           is_public: row.is_public === 1,
           key,
           public_key_raw: !key && row.is_public === 1 ? row.public_key_raw : null,
-          target_board: row.target_board,
         };
       })
     );
@@ -209,6 +199,10 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     await Promise.all(images.results.map((row) => deleteImageBlobs(c.env, id, row.id)));
 
     await c.env.DB.batch([
+      // image_variants.image_id references images(id) - must go before the
+      // images delete below or D1 rejects it as a FOREIGN KEY constraint
+      // failure (see migrations/0019_image_board_variants.sql).
+      c.env.DB.prepare("DELETE FROM image_variants WHERE image_id IN (SELECT id FROM images WHERE device_key = ?)").bind(id),
       c.env.DB.prepare("DELETE FROM images WHERE device_key = ?").bind(id),
       c.env.DB.prepare("DELETE FROM device_buckets WHERE bucket_id = ?").bind(id),
       c.env.DB.prepare("DELETE FROM bucket_shares WHERE bucket_id = ?").bind(id),
@@ -508,34 +502,41 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     if ("error" in fields) return c.json({ error: fields.error }, 400);
     const bytes = await readCiphertextUploadBytes(fields);
     if ("error" in bytes) return c.json({ error: bytes.error }, 400);
-    const { rawBytes, packedBytes, thumbBytes } = bytes;
+    const { rawBytes, variants } = bytes;
 
-    // The client re-derives `packed` from scratch (decode -> dither -> pack,
-    // see admin.ts's reencryptOneImage()) rather than reusing the existing
-    // ciphertext, so it re-decides compression fresh too - trust whatever it
-    // reports here the same way admin/images.ts's upload route does, rather
-    // than assuming this image's previous packed_encoding still applies.
-    const packedEncodingParam = typeof body.packed_encoding === "string" ? body.packed_encoding : "identity";
-    if (!isValidPackedEncoding(packedEncodingParam)) {
-      return c.json({ error: `packed_encoding must be one of: ${PACKED_ENCODINGS.join(", ")}` }, 400);
-    }
-
+    // The client re-derives every board's `packed` from scratch (decode ->
+    // dither -> pack, see admin.ts's reencryptOneImage()) rather than
+    // reusing the existing ciphertext, so it re-decides compression fresh
+    // too - trust whatever it reports the same way admin/images.ts's upload
+    // route does, rather than assuming this image's previous
+    // packed_encoding still applies.
     await Promise.all([
-      putPackedImage(c.env, id, imageId, packedBytes),
       putRawImage(c.env, id, imageId, rawBytes),
-      putThumbnail(c.env, id, imageId, thumbBytes),
+      ...BOARD_IDS.flatMap((board) => [
+        putPackedImage(c.env, id, imageId, board, variants[board].packedBytes),
+        putThumbnail(c.env, id, imageId, board, variants[board].thumbBytes),
+      ]),
     ]);
 
-    await c.env.DB.prepare(
-      "UPDATE images SET packed_hash = ?, packed_bytes = ?, raw_bytes = ?, key_version = ?, packed_encoding = ? WHERE id = ?"
-    )
-      .bind(fields.packedHash, packedBytes.byteLength, rawBytes.byteLength, rotation.new_key_version, packedEncodingParam, imageId)
-      .run();
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE images SET raw_bytes = ?, key_version = ? WHERE id = ?")
+        .bind(rawBytes.byteLength, rotation.new_key_version, imageId),
+      ...BOARD_IDS.map((board) =>
+        c.env.DB.prepare(
+          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(image_id, board) DO UPDATE SET
+             packed_encoding = excluded.packed_encoding,
+             packed_hash = excluded.packed_hash,
+             packed_bytes = excluded.packed_bytes`
+        ).bind(imageId, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength)
+      ),
+    ]);
 
-    // The packed blob (and its hash) just changed under the same image id —
-    // any cached rotation snapshot must be invalidated now, not left for the
-    // next unrelated upload/delete, or a device could be served this image's
-    // stale packed_hash/X-Bucket-Key-Version pairing.
+    // The packed blobs (and their hashes) just changed under the same image
+    // id — any cached rotation snapshot must be invalidated now, not left
+    // for the next unrelated upload/delete, or a device could be served
+    // this image's stale packed_hash/X-Bucket-Key-Version pairing.
     await invalidateRotationCache(c.env, id);
     await invalidateRotationCacheForBucketConsumers(c.env, id);
 

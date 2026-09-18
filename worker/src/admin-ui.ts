@@ -128,14 +128,6 @@ export function renderAdminPage(): string {
         <label>New bucket name</label>
         <input type="text" id="new-bucket-label" placeholder="Living room rotation">
       </div>
-      <div class="row">
-        <label>Target screen</label>
-        <select id="new-bucket-board">
-          <option value="" disabled selected>Select a screen size&hellip;</option>
-          <option value="ee02-13in3">13.3" Spectra 6 (EE02)</option>
-          <option value="ee04-7in3">7.3" Six-Color (EE04)</option>
-        </select>
-      </div>
       <button id="create-bucket-btn">Create bucket</button>
     </div>
     <div class="row checkbox-row" id="new-bucket-public-row" style="display:none; margin-top:10px;">

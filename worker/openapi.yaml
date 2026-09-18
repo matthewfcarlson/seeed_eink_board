@@ -118,10 +118,6 @@ components:
         dither_algorithm:
           type: string
           enum: [floyd_steinberg, atkinson, ordered, none]
-        packed_hash:
-          type: string
-        packed_bytes:
-          type: integer
         raw_bytes:
           type: integer
         created_at:
@@ -129,18 +125,33 @@ components:
         key_version:
           type: integer
           description: >-
-            Which of the bucket's key versions this image's three KV blobs are
-            actually encrypted under right now — see
-            migrations/0016_bucket_key_rotation.sql. Lags the bucket's own
-            key_version between a rotation's start and this image's
-            reencrypt-image call.
+            Which of the bucket's key versions this image's raw blob and
+            every board variant's blobs are actually encrypted under right
+            now — see migrations/0016_bucket_key_rotation.sql. Lags the
+            bucket's own key_version between a rotation's start and this
+            image's reencrypt-image call.
+        variants:
+          type: object
+          description: >-
+            A bucket is never board-scoped — see
+            migrations/0019_image_board_variants.sql. Keyed by board id
+            (e.g. `ee02-13in3`, `ee04-7in3`); every upload generates every
+            board's variant, so this is normally populated for all of them.
+          additionalProperties:
+            type: object
+            properties:
+              packed_hash: { type: string }
+              packed_bytes: { type: integer }
+              packed_encoding: { type: string, enum: [identity, deflate-raw] }
         thumbnail_ciphertext_b64:
           type: string
           nullable: true
           description: >-
             Base64 of the AES-256-GCM-encrypted thumbnail (12-byte nonce
-            prepended). The dashboard decrypts this client-side with the
-            bucket key — it is not a renderable data URL on its own.
+            prepended) for one representative board's variant (a human
+            preview, not board-specific). The dashboard decrypts this
+            client-side with the bucket key — it is not a renderable data
+            URL on its own.
     Device:
       type: object
       properties:
@@ -768,13 +779,13 @@ paths:
     post:
       summary: Upload one image's re-encrypted ciphertext for an in-progress rotation (owner only)
       description: >-
-        Same three-blob shape as /admin/images/upload (raw/packed/thumb
-        ciphertext + a client-computed packed_hash), minus filename/
-        device_key/dither_algorithm, which don't change. Overwrites the
-        image's three KV blobs and bumps its key_version to the rotation's
-        new_key_version. Idempotent — calling it again for an image already
-        on the new version is a safe no-op (`already_migrated: true`, nothing
-        rewritten).
+        Same shape as /admin/images/upload (one raw blob plus every board's
+        packed+thumb ciphertext and a client-computed packed_hash), minus
+        filename/device_key/dither_algorithm, which don't change. Overwrites
+        the image's raw blob and every board's packed/thumb KV blobs, and
+        bumps its key_version to the rotation's new_key_version. Idempotent —
+        calling it again for an image already on the new version is a safe
+        no-op (`already_migrated: true`, nothing rewritten).
       parameters:
         - $ref: '#/components/parameters/BucketIdPath'
         - name: rotationId
@@ -791,12 +802,24 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [raw, packed, thumb, packed_hash]
+              required:
+                - raw
+                - packed__ee02-13in3
+                - thumb__ee02-13in3
+                - packed_hash__ee02-13in3
+                - packed__ee04-7in3
+                - thumb__ee04-7in3
+                - packed_hash__ee04-7in3
               properties:
-                raw: { type: string, format: binary }
-                packed: { type: string, format: binary }
-                thumb: { type: string, format: binary }
-                packed_hash: { type: string }
+                raw: { type: string, format: binary, description: The single raw-original ciphertext, shared by every board's variant. }
+                packed__ee02-13in3: { type: string, format: binary }
+                thumb__ee02-13in3: { type: string, format: binary }
+                packed_hash__ee02-13in3: { type: string }
+                packed_encoding__ee02-13in3: { type: string, enum: [identity, deflate-raw], default: identity }
+                packed__ee04-7in3: { type: string, format: binary }
+                thumb__ee04-7in3: { type: string, format: binary }
+                packed_hash__ee04-7in3: { type: string }
+                packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
       responses:
         '200':
           description: OK
@@ -909,11 +932,13 @@ paths:
       description: >-
         Decode, EXIF-correct, crop, enhance, dither, pack, and AES-256-GCM-encrypt
         all run client-side now — see root CLAUDE.md's encrypted-buckets plan. This
-        endpoint never sees plaintext: it stores three opaque ciphertext blobs
-        (raw original, packed 4bpp, thumbnail) plus a client-computed content hash,
-        gated by the same bucket-access check as before. `dither_algorithm` and
-        `packed_hash` are trusted client-reported metadata — the Worker has no way
-        to verify them without the bucket key.
+        endpoint never sees plaintext: it stores one opaque raw-original ciphertext
+        blob plus, for every board (migrations/0019_image_board_variants.sql — a
+        bucket is never board-scoped), that board's packed+thumbnail ciphertext and
+        a client-computed content hash, gated by the same bucket-access check as
+        before. `dither_algorithm` and each board's `packed_hash` are trusted
+        client-reported metadata — the Worker has no way to verify them without the
+        bucket key.
       parameters:
         - name: device_key
           in: query
@@ -930,18 +955,28 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [raw, packed, thumb, packed_hash]
+              required:
+                - raw
+                - packed__ee02-13in3
+                - thumb__ee02-13in3
+                - packed_hash__ee02-13in3
+                - packed__ee04-7in3
+                - thumb__ee04-7in3
+                - packed_hash__ee04-7in3
               properties:
-                raw: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the original as-uploaded bytes }
-                packed: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the packed 4bpp buffer }
-                thumb: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the dashboard preview JPEG }
+                raw: { type: string, format: binary, description: AES-256-GCM ciphertext (12-byte nonce prepended) of the original as-uploaded bytes, shared by every board's variant. }
                 dither_algorithm:
                   type: string
                   enum: [floyd_steinberg, atkinson, ordered]
                   default: floyd_steinberg
-                packed_hash:
-                  type: string
-                  description: 16-char hex content hash, computed client-side over the packed ciphertext.
+                packed__ee02-13in3: { type: string, format: binary, description: AES-256-GCM ciphertext of EE02's packed 4bpp buffer (1600x1200) }
+                thumb__ee02-13in3: { type: string, format: binary, description: AES-256-GCM ciphertext of EE02's dashboard preview JPEG }
+                packed_hash__ee02-13in3: { type: string, description: 16-char hex content hash over EE02's packed ciphertext. }
+                packed_encoding__ee02-13in3: { type: string, enum: [identity, deflate-raw], default: identity }
+                packed__ee04-7in3: { type: string, format: binary, description: AES-256-GCM ciphertext of EE04's packed 4bpp buffer (800x480) }
+                thumb__ee04-7in3: { type: string, format: binary, description: AES-256-GCM ciphertext of EE04's dashboard preview JPEG }
+                packed_hash__ee04-7in3: { type: string, description: 16-char hex content hash over EE04's packed ciphertext. }
+                packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
       responses:
         '201': { description: Uploaded }
         '400': { description: Missing or malformed field }

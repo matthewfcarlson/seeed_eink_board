@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import type { Env } from "../../types";
+import { DEFAULT_BOARD_ID, isValidBoardId, type Env } from "../../types";
 import { normalizeMac } from "../../lib/mac";
 import { invalidateDeviceCache } from "../../lib/auth-device";
 import { getRotationSnapshot, invalidateRotationCache } from "../../lib/rotation";
@@ -21,18 +21,24 @@ const SECRET_PATTERN = /^[0-9a-f]{16,64}$/i;
  *  panel — which holds its last completed refresh through power loss — is still showing the
  *  previous one. Falls back to a thumbnail-less entry if that image has since been deleted
  *  from its bucket(s). */
-async function buildCurrentImage(env: Env, deviceKey: string) {
+async function buildCurrentImage(env: Env, deviceKey: string, deviceBoard: string | null) {
   const snapshot = await getRotationSnapshot(env, deviceKey);
   if (!snapshot.lastReturned) return null;
   const image = snapshot.images.find((img) => img.id === snapshot.lastReturned);
   if (!image) return { id: null, filename: snapshot.lastReturned, source_bucket_id: null, thumbnail_ciphertext_b64: null };
+  // This device's own board's thumbnail variant (a bucket isn't board-scoped
+  // — see migrations/0019_image_board_variants.sql — so its current image
+  // isn't necessarily rendered the same way for every device subscribed to
+  // that bucket). Falls back to DEFAULT_BOARD_ID if this device hasn't
+  // self-reported one yet.
+  const board = deviceBoard && isValidBoardId(deviceBoard) ? deviceBoard : DEFAULT_BOARD_ID;
   return {
     id: image.id,
     filename: image.filename,
     // Which bucket's key decrypts this thumbnail — a device can subscribe to
     // several, so its current image isn't necessarily from its own bucket id.
     source_bucket_id: image.sourceDeviceKey,
-    thumbnail_ciphertext_b64: await getThumbnailCiphertextB64(env, image.sourceDeviceKey, image.id),
+    thumbnail_ciphertext_b64: await getThumbnailCiphertextB64(env, image.sourceDeviceKey, image.id, board),
   };
 }
 
@@ -126,7 +132,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       rows.results.map(async (row) => ({
         ...row,
         bucket_ids: bucketIdsByMac.get(row.mac) ?? [],
-        current_image: await buildCurrentImage(c.env, row.mac),
+        current_image: await buildCurrentImage(c.env, row.mac, (row.board as string | null) ?? null),
       }))
     );
     return c.json({ devices });
@@ -174,9 +180,9 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       .catch(() => ({}) as never);
     if (!Array.isArray(body.bucket_ids)) return c.json({ error: "bucket_ids must be an array" }, 400);
 
-    const row = await c.env.DB.prepare("SELECT user_id, board FROM devices WHERE mac = ?")
+    const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
       .bind(mac)
-      .first<{ user_id: string | null; board: string | null }>();
+      .first<{ user_id: string | null }>();
     if (!row) return c.json({ error: "Not found" }, 404);
     if (row.user_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
 
@@ -198,23 +204,10 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       // bumps buckets.key_version, which is correct: a newly-assigned device
       // needs whatever version the bucket's images are actually encrypted
       // under right now.
-      const bucket = await c.env.DB.prepare("SELECT key_version, target_board FROM buckets WHERE id = ?")
+      const bucket = await c.env.DB.prepare("SELECT key_version FROM buckets WHERE id = ?")
         .bind(bucketId)
-        .first<{ key_version: number; target_board: string }>();
+        .first<{ key_version: number }>();
       bucketKeyVersions.set(bucketId, bucket?.key_version ?? 1);
-      // A bucket's images are packed once, client-side, for exactly one
-      // board's geometry (migrations/0019_bucket_target_board.sql) — a
-      // mismatched device would otherwise fail /image_packed's content-length
-      // check on every wake. Only checked when this device's board is
-      // already known (self-reported via X-Device-Board on its first
-      // /device_config call) — a never-yet-connected device has nothing to
-      // check against, and image-packed.ts guards it defensively regardless.
-      if (row.board && bucket && bucket.target_board !== row.board) {
-        return c.json(
-          { error: `Bucket ${bucketId} is packed for ${bucket.target_board}, but this device is ${row.board}` },
-          400
-        );
-      }
     }
 
     const previousBucketIds = await c.env.DB.prepare("SELECT bucket_id FROM device_buckets WHERE device_mac = ?")

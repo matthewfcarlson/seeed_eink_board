@@ -47,13 +47,16 @@
 #define DISPLAY_HEIGHT  480
 #define BUFFER_SIZE     192000  // (800 * 480) / 2 bytes (4bpp)
 
-// Unlike EE02, this panel is mounted flat - no on-device rotation and no
-// physical mounting rotation to undo (see display.h's "no buffer transpose...
-// driven natively 800x480 row-major" comment). The simulator's
-// display_render.cpp renders straight through instead of undoing a rotation
-// - see main_native.cpp's DisplayRender::present() calls. Matches worker/src/
-// lib/media-constants.ts's BoardGeometry.needsRotation (false) for this board.
-#define DISPLAY_MOUNTED_ROTATED 0
+// Like EE02, this panel is mounted physically rotated - portrait only for
+// now, so content is pre-rotated 90°CW before it ever reaches the driver
+// (which itself still does no on-device transpose - see display.h's "no
+// buffer transpose... driven natively 800x480 row-major" comment; the
+// buffer stays native 800x480 landscape, it's just displayed sideways). The
+// simulator's display_render.cpp undoes that rotation for on-screen/export
+// display - see main_native.cpp's DisplayRender::present() calls. Matches
+// worker/src/lib/media-constants.ts's BoardGeometry.needsRotation (true)
+// for this board.
+#define DISPLAY_MOUNTED_ROTATED 1
 
 // SPI
 #define SPI_CLOCK_HZ    10000000  // 10 MHz, Mode 0 — same as EE02

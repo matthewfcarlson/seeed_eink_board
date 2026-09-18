@@ -6,9 +6,6 @@ function image(id: string): ImageMeta {
   return {
     id,
     filename: `${id}.bin`,
-    packedHash: `hash-${id}`,
-    packedBytes: 960_000,
-    packedEncoding: "identity",
     sourceDeviceKey: "device-1",
     keyVersion: 1,
   };
@@ -116,8 +113,8 @@ describe("getRotationSnapshot", () => {
               const [deviceKey] = _args as [string];
               const row =
                 deviceKey === "bucket-a"
-                  ? { id: "img-z", filename: "z.bin", packed_hash: "h1", packed_bytes: 1, key_version: 1, packed_encoding: "identity" }
-                  : { id: "img-a", filename: "a.bin", packed_hash: "h2", packed_bytes: 1, key_version: 1, packed_encoding: "identity" };
+                  ? { id: "img-z", filename: "z.bin", key_version: 1 }
+                  : { id: "img-a", filename: "a.bin", key_version: 1 };
               return { results: [row] };
             }
             throw new Error(`unexpected all() query: ${sql}`);

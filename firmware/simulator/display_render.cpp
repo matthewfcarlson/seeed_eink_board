@@ -103,16 +103,18 @@ void present(const uint8_t *buffer, size_t bufferSize, int width, int height, bo
 
     // `buffer` is in the hardware's native scan order (width x height, e.g.
     // 1600x1200 for EE02, 800x480 for EE04 - see config.h's DISPLAY_WIDTH/
-    // HEIGHT). When undoMountRotation is set (EE02), every producer of
-    // content (worker/src/client/decode.ts for photos, lib/qr-registration.ts
-    // for the "scan to register" screen, display.cpp's own drawString() for
-    // the config-mode banner) draws in portrait and calls rotate90CW before
-    // it ever reaches here, because that panel is mounted physically rotated
-    // so it reads right-side-up. Undo that rotation - a 90-degree
-    // counterclockwise turn - so this window shows the same portrait
-    // orientation a real mounted device would. When it's clear (EE04),
-    // content is already produced in the panel's native landscape
-    // orientation with no rotation at all, so render it straight through.
+    // HEIGHT). When undoMountRotation is set (both EE02 and EE04 - portrait
+    // only for now), every producer of content (worker/src/client/decode.ts
+    // for photos, lib/qr-registration.ts for the "scan to register" screen,
+    // display.cpp's own drawString() for the config-mode banner) draws in
+    // portrait and calls rotate90CW before it ever reaches here, because
+    // that panel is mounted physically rotated so it reads right-side-up.
+    // Undo that rotation - a 90-degree counterclockwise turn - so this
+    // window shows the same portrait orientation a real mounted device
+    // would. When it's clear, content is already produced in the panel's
+    // native landscape orientation with no rotation at all, so render it
+    // straight through - for a board mounted flat; no board currently ships
+    // that way.
     int outW = undoMountRotation ? height : width;
     int outH = undoMountRotation ? width : height;
     std::vector<uint8_t> rgb((size_t)outW * (size_t)outH * 3);

@@ -86,12 +86,7 @@ CREATE TABLE buckets (
   -- other bucket's - the whole rest of the pipeline (client encrypt-before-
   -- upload, GCM tamper-detection, firmware decrypt) needs zero changes.
   is_public      INTEGER NOT NULL DEFAULT 0,
-  public_key_raw TEXT,
-  -- Which board this bucket's images are packed for (migrations/
-  -- 0019_bucket_target_board.sql) - see lib/media-constants.ts's BoardId.
-  -- Immutable after creation; every image in this bucket was dithered/packed
-  -- at this board's geometry.
-  target_board TEXT NOT NULL DEFAULT 'ee02-13in3'
+  public_key_raw TEXT
 );
 
 CREATE TABLE device_buckets (
@@ -173,24 +168,38 @@ CREATE TABLE images (
   device_key        TEXT NOT NULL,
   filename          TEXT NOT NULL,
   dither_algorithm  TEXT NOT NULL DEFAULT 'floyd_steinberg',
-  -- 'identity' (stored bytes are the plain packed 4bpp buffer, pre-encryption)
-  -- or 'deflate-raw' (client-side DEFLATE-compressed before encryption - see
-  -- migrations/0017_packed_encoding.sql and client/compress.ts). Ciphertext
-  -- itself doesn't compress, so this only ever describes the plaintext that
-  -- was encrypted, never something the Worker can verify independently.
-  packed_encoding   TEXT NOT NULL DEFAULT 'identity',
-  packed_hash       TEXT NOT NULL,
-  packed_bytes      INTEGER NOT NULL,
   raw_bytes         INTEGER NOT NULL,
   created_at        INTEGER NOT NULL,
-  -- Which of the owning bucket's key versions this image's three KV blobs are
-  -- actually encrypted under right now (see migrations/0016_bucket_key_rotation.sql).
-  -- Lags buckets.key_version between a rotation's start and this image's
+  -- Which of the owning bucket's key versions this image's raw blob and
+  -- every board variant's blobs are actually encrypted under right now (see
+  -- migrations/0016_bucket_key_rotation.sql). A rotation re-derives and
+  -- re-uploads every board's variant for an image in one client call, so
+  -- this stays one per-image value rather than moving to image_variants
+  -- alongside packed_hash/packed_bytes/packed_encoding below. Lags
+  -- buckets.key_version between a rotation's start and this image's
   -- reencrypt-image call; equal to it once migrated.
   key_version       INTEGER NOT NULL DEFAULT 1,
   UNIQUE(device_key, filename)
 );
 CREATE INDEX idx_images_device_key_filename ON images(device_key, filename);
+
+-- One packed+thumbnail variant per (image, board) - migrations/
+-- 0019_image_board_variants.sql. See lib/media-constants.ts's BoardId; not a
+-- foreign key, same reasoning as devices.board (a fixed, small, code-defined
+-- vocabulary). The Worker never sees plaintext to re-render a variant later,
+-- so the client (admin.ts's confirmUpload/reencryptOneImage) generates every
+-- board's variant on every upload - there are only two boards today.
+CREATE TABLE image_variants (
+  image_id        TEXT NOT NULL REFERENCES images(id),
+  board           TEXT NOT NULL,
+  -- 'identity' or 'deflate-raw' - see migrations/0017_packed_encoding.sql
+  -- and client/compress.ts. Describes the plaintext that was encrypted for
+  -- THIS board's variant, never something the Worker can verify independently.
+  packed_encoding TEXT NOT NULL DEFAULT 'identity',
+  packed_hash     TEXT NOT NULL,
+  packed_bytes    INTEGER NOT NULL,
+  PRIMARY KEY (image_id, board)
+);
 
 -- Per-device schedule override, or nothing (firmware runs on its own compiled-in
 -- default). No shared 'global'/'default' fallback row (removed in migrations/

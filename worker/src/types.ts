@@ -1,5 +1,3 @@
-import type { PackedEncoding } from "./lib/media-constants";
-
 export interface Env {
   DB: D1Database;
   KV: KVNamespace;
@@ -11,24 +9,28 @@ export interface Env {
   GITHUB_TOKEN?: string;
 }
 
+/**
+ * Which image, in which bucket, at which key version — purely identity, not
+ * bytes. A device's actual packed bytes/hash/encoding for this image are a
+ * per-(image, board) variant (migrations/0019_image_board_variants.sql,
+ * lib/image-store.ts's getImageVariant) resolved at serve time from the
+ * requesting device's own X-Device-Board, not cached here — a bucket can mix
+ * EE02/EE04 devices, so there's no single "this image's bytes" to cache
+ * per rotation snapshot.
+ */
 export interface ImageMeta {
   id: string;
   filename: string;
-  packedHash: string;
-  packedBytes: number;
-  // 'identity' or 'deflate-raw' - see lib/media-constants.ts's PackedEncoding
-  // and migrations/0017_packed_encoding.sql. Tells /image_packed (via the
-  // X-Packed-Encoding response header) and firmware which decode path to use.
-  packedEncoding: PackedEncoding;
-  // Which of the device's subscribed buckets this image's KV blobs actually live
-  // under (a device can subscribe to several — see device_buckets in schema.sql) —
+  // Which of the device's subscribed buckets this image lives under (a
+  // device can subscribe to several — see device_buckets in schema.sql) —
   // see rotation.ts.
   sourceDeviceKey: string;
-  // Which key version this image's KV blobs are actually encrypted under right
-  // now (see migrations/0016_bucket_key_rotation.sql) — carried through to
-  // /image_packed's X-Bucket-Key-Version header so a device mid-rotation (still
-  // holding both an old and new bucket key) knows which one decrypts this
-  // particular image.
+  // Which key version this image's raw blob and every board variant's blobs
+  // are actually encrypted under right now (see migrations/
+  // 0016_bucket_key_rotation.sql) — carried through to /image_packed's
+  // X-Bucket-Key-Version header so a device mid-rotation (still holding both
+  // an old and new bucket key) knows which one decrypts this particular
+  // image.
   keyVersion: number;
 }
 

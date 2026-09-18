@@ -12,12 +12,13 @@ function formatMac(mac: string): string {
 /**
  * Renders a QR code plus up to three lines of caption text, sized for
  * `board`'s screen (see lib/media-constants.ts's BoardGeometry). A
- * rotation-needing board (EE02) draws onto an upright canvas and rotates
- * 90°CW to match the same geometry photos go through; a board that does no
- * on-device rotation (EE04) draws directly onto its native landscape
- * canvas. No dithering — QR codes need crisp high-contrast modules, not
- * diffused noise — so pixels are mapped directly to the nearest palette
- * color. Shared by renderRegistrationBuffer (unregistered device) and
+ * rotation-needing board (currently both EE02 and EE04 — portrait only for
+ * now) draws onto an upright canvas and rotates 90°CW to match the same
+ * geometry photos go through; a board mounted flat (none currently) would
+ * draw directly onto its native landscape canvas, no rotation step. No
+ * dithering — QR codes need crisp high-contrast modules, not diffused
+ * noise — so pixels are mapped directly to the nearest palette color.
+ * Shared by renderRegistrationBuffer (unregistered device) and
  * renderNoBucketBuffer (registered device, zero buckets assigned) below,
  * which differ only in the URL and caption.
  */
@@ -38,8 +39,8 @@ async function renderQrScreenBuffer(
   const rgba = new Uint8ClampedArray(uprightWidth * uprightHeight * 4).fill(255);
 
   // Proportional to canvas size rather than fixed pixel constants - boards
-  // with very different aspect ratios (EE02's tall portrait-before-rotation
-  // vs EE04's native landscape) both need the QR/text to actually fit.
+  // with different upright (pre-rotation) aspect ratios (EE02's 3:4 vs
+  // EE04's 3:5) both need the QR/text to actually fit.
   const shortSide = Math.min(uprightWidth, uprightHeight);
   const qrAreaPx = Math.floor(shortSide * 0.55);
   const moduleSize = Math.max(1, Math.floor(qrAreaPx / moduleCount));

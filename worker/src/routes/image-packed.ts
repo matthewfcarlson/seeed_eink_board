@@ -4,7 +4,7 @@ import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
 import { getRotationSnapshot, markServed, peekPendingImage } from "../lib/rotation";
-import { getPackedImage } from "../lib/image-store";
+import { getImageVariant, getPackedImage } from "../lib/image-store";
 import { renderNoBucketBuffer, renderRegistrationBuffer } from "../lib/qr-registration";
 import { assignBucketUrl, registrationUrl } from "../lib/registration-url";
 
@@ -78,29 +78,23 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     const snapshot = await getRotationSnapshot(c.env, deviceKey);
     const pending = peekPendingImage(snapshot);
 
-    // Even with a pending image, it may have been packed for a different
-    // board than this device (a bucket's target_board — see migrations/
-    // 0019_bucket_target_board.sql — should never mismatch an assigned
-    // device's board; PATCH /admin/devices/:mac/buckets guards against it at
-    // assignment time). This is a last-resort check: if it ever does
-    // mismatch, serving those bytes would fail the firmware's content-length
-    // check (or worse, render garbage) rather than gracefully degrade like
-    // every other "nothing to show" case here.
-    const pendingBucket = pending
-      ? await c.env.DB.prepare("SELECT target_board FROM buckets WHERE id = ?")
-          .bind(pending.image.sourceDeviceKey)
-          .first<{ target_board: string }>()
-      : null;
-    const boardMismatch = !!pending && !!pendingBucket && pendingBucket.target_board !== board;
+    // A bucket is never board-scoped (any mix of EE02/EE04 devices can
+    // subscribe to the same one — see migrations/0019_image_board_variants.sql),
+    // but a given image may still lack a variant for this device's board if
+    // it predates that migration and was never re-uploaded. This is a
+    // last-resort check: if it ever happens, serving nothing would be safer
+    // than the firmware's content-length check failing (or worse, rendering
+    // garbage), so it's treated the same as "no pending image" below.
+    const variant = pending ? await getImageVariant(c.env, pending.image.id, board) : null;
 
     // Registered but nothing to show — no bucket assigned, every assigned
     // bucket has zero images, removed from every bucket it had, or (see
-    // boardMismatch above) its one pending image is wrong-sized for this
-    // device. Same "never leave the screen on a bare error" reasoning as the
-    // unregistered-device QR branch above, just one step later in the
-    // device's lifecycle. Unencrypted, like that branch: there may be no
-    // bucket (and so no key) to encrypt under here at all.
-    if (!pending || boardMismatch) {
+    // variant lookup above) its one pending image has no rendition for this
+    // device's board. Same "never leave the screen on a bare error"
+    // reasoning as the unregistered-device QR branch above, just one step
+    // later in the device's lifecycle. Unencrypted, like that branch: there
+    // may be no bucket (and so no key) to encrypt under here at all.
+    if (!pending || !variant) {
       const { packed, hash } = await renderNoBucketBuffer(mac, assignBucketUrl(c.req.url, mac), board);
       return new Response(packed, {
         status: 200,
@@ -116,11 +110,11 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     }
 
     const knownHash = c.req.query("known_hash");
-    if (knownHash && knownHash === pending.image.packedHash) {
-      return new Response(null, { status: 304, headers: { "X-Image-Hash": pending.image.packedHash } });
+    if (knownHash && knownHash === variant.packedHash) {
+      return new Response(null, { status: 304, headers: { "X-Image-Hash": variant.packedHash } });
     }
 
-    const bytes = await getPackedImage(c.env, pending.image.sourceDeviceKey, pending.image.id);
+    const bytes = await getPackedImage(c.env, pending.image.sourceDeviceKey, pending.image.id, board);
     if (!bytes) return c.text("Failed to process image", 500);
 
     const writeback = await markServed(c.env, deviceKey, snapshot, pending.index, pending.image.id);
@@ -132,7 +126,7 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
         "Content-Type": "application/octet-stream",
         "Content-Length": String(bytes.byteLength),
         "Content-Disposition": "attachment; filename=image.bin",
-        "X-Image-Hash": pending.image.packedHash,
+        "X-Image-Hash": variant.packedHash,
         "X-Image-Name": pending.image.filename,
         "X-Device-ID": deviceKey,
         // Which of this device's (possibly several) subscribed buckets the
@@ -148,7 +142,7 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
         // 'identity' or 'deflate-raw' - see migrations/0017_packed_encoding.sql. Tells
         // device_app.h's fetchAndDisplayImage() whether to stream ciphertext straight
         // into the display buffer (identity) or decrypt+inflate it chunk-by-chunk.
-        "X-Packed-Encoding": pending.image.packedEncoding,
+        "X-Packed-Encoding": variant.packedEncoding,
       },
     });
   });

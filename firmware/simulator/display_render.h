@@ -40,13 +40,14 @@ void setWindowTitle(const char *title);
 // entirely in export mode - see setExportPath()); safe to call repeatedly
 // with the same size (typical - only one board per process).
 //
-// `undoMountRotation`: true (EE02) undoes the 90° rotation every content
-// producer applies before a physically-rotated-mounted panel, so the window/
-// export shows the same portrait orientation a real mounted device would -
-// see config.h's DISPLAY_MOUNTED_ROTATED, which main_native.cpp reads to
-// pass this. false (EE04) renders the buffer straight through at width x
-// height, no rotation - that board is mounted flat with no on-device
-// rotation at all.
+// `undoMountRotation`: true (both EE02 and EE04 - portrait only for now)
+// undoes the 90° rotation every content producer applies before a
+// physically-rotated-mounted panel, so the window/export shows the same
+// portrait orientation a real mounted device would - see config.h's
+// DISPLAY_MOUNTED_ROTATED, which main_native.cpp reads to pass this. false
+// would render the buffer straight through at width x height, no rotation -
+// for a board mounted flat with no on-device rotation at all; no board
+// currently ships that way.
 void present(const uint8_t *buffer, size_t bufferSize, int width, int height, bool undoMountRotation);
 
 // Pumps the SDL event queue. Returns true if Space was pressed since the
