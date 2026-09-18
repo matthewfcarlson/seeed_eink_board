@@ -7,7 +7,6 @@ import {
   bucketKeyUpsertStatement,
   computeAuthorizedPrincipals,
   deleteBucketKey,
-  deleteBucketKeysForBucket,
   getBucketKey,
   parseWrappedBucketKey,
   upsertBucketKey,
@@ -198,18 +197,23 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
       .all<{ id: string }>();
     await Promise.all(images.results.map((row) => deleteImageBlobs(c.env, id, row.id)));
 
+    // Children before parents, in one batch - image_variants.image_id
+    // references images(id), and bucket_keys.bucket_id references
+    // buckets(id), so D1 rejects any of these run out of order as a
+    // FOREIGN KEY constraint failure.
     await c.env.DB.batch([
-      // image_variants.image_id references images(id) - must go before the
-      // images delete below or D1 rejects it as a FOREIGN KEY constraint
-      // failure (see migrations/0019_image_board_variants.sql).
       c.env.DB.prepare("DELETE FROM image_variants WHERE image_id IN (SELECT id FROM images WHERE device_key = ?)").bind(id),
       c.env.DB.prepare("DELETE FROM images WHERE device_key = ?").bind(id),
       c.env.DB.prepare("DELETE FROM device_buckets WHERE bucket_id = ?").bind(id),
       c.env.DB.prepare("DELETE FROM bucket_shares WHERE bucket_id = ?").bind(id),
       c.env.DB.prepare("DELETE FROM bucket_invites WHERE bucket_id = ?").bind(id),
+      c.env.DB.prepare("DELETE FROM bucket_keys WHERE bucket_id = ?").bind(id),
+      // bucket_rotations rows outlive a finalized rotation (status flips to
+      // 'completed', the row itself is never removed) - a bucket that was
+      // ever key-rotated would otherwise trip this same FK failure.
+      c.env.DB.prepare("DELETE FROM bucket_rotations WHERE bucket_id = ?").bind(id),
       c.env.DB.prepare("DELETE FROM buckets WHERE id = ?").bind(id),
     ]);
-    await deleteBucketKeysForBucket(c.env, id);
 
     return c.json({ deleted: id });
   });

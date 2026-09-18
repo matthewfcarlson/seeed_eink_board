@@ -131,10 +131,6 @@ export async function deleteBucketKey(env: Env, bucketId: string, principalType:
     .run();
 }
 
-export async function deleteBucketKeysForBucket(env: Env, bucketId: string): Promise<void> {
-  await env.DB.prepare("DELETE FROM bucket_keys WHERE bucket_id = ?").bind(bucketId).run();
-}
-
 /** One principal this Worker recognizes for bucket-key wrapping purposes —
  *  either the account itself (user) or a physical board (device). */
 export interface PrincipalRef {

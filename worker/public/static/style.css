@@ -220,6 +220,7 @@ button.icon-btn.add { background: var(--blue); }
 button.icon-btn.add:hover { background: var(--blue-dark); }
 
 button.sm, .btn.sm { padding: 6px 13px; font-size: 0.82em; }
+button.xs, .btn.xs { padding: 4px 9px; font-size: 0.74em; }
 
 /* ---------- forms ---------- */
 
@@ -445,6 +446,42 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .photo-tile-add:hover { border-color: var(--blue); color: var(--blue-dark); background: var(--blue-tint); }
 .photo-tile-add .plus { font-size: 1.6em; line-height: 1; font-weight: 400; }
+
+/* ---------- bucket cards ---------- */
+
+.bucket-card-head { align-items: center; flex-wrap: wrap; }
+.bucket-title-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+.bucket-title-main h3 { overflow-wrap: anywhere; }
+.bucket-title-main.editing { align-items: stretch; }
+.bucket-title-edit {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: min(100%, 260px);
+}
+.bucket-title-input {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 420px;
+  padding: 6px 10px;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+.bucket-meta-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.bucket-rename-btn { flex: none; }
 
 /* ---------- lightbox ---------- */
 

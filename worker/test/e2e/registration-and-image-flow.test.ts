@@ -220,5 +220,13 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
     //    again at the start of this one.
     await assertDisplaysUploadedImage("ee02", "boot4-still-image", ee02Image.packedHash);
     await assertDisplaysUploadedImage("ee04", "boot4-still-image", ee04Image.packedHash);
+
+    // 7. Deleting the bucket must actually succeed - a bucket with an image
+    //    that has variant rows for both boards (migrations/
+    //    0019_image_board_variants.sql) previously tripped a FOREIGN KEY
+    //    constraint failure, because DELETE /admin/buckets/:id deleted the
+    //    images row before its image_variants children.
+    await admin.deleteBucket(bucketId);
+    expect((await admin.getBuckets()).find((b) => b.id === bucketId)).toBeUndefined();
   });
 });

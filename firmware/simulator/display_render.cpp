@@ -5,6 +5,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "vendor/stb_image_write.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -52,9 +53,14 @@ void ensureWindow(int width, int height) {
     }
     if (!g_window) {
         SDL_Init(SDL_INIT_VIDEO);
-        // Resizable: SDL_RenderSetLogicalSize below locks the content to the
-        // buffer's own aspect ratio and letterboxes to fit whatever size the
-        // user drags the window to, rather than stretching it.
+        // Resizable: present() computes a letterboxed destination rect every
+        // frame (see below) to keep the buffer's own aspect ratio locked and
+        // fit within whatever size the user drags the window to, rather than
+        // stretching it. (SDL_RenderSetLogicalSize looks like it should do
+        // this automatically, but its auto-letterboxing has proven flaky on
+        // macOS/Metal for tall aspect ratios like EE04's 480x800 - resizing
+        // wide would stretch content instead of letterboxing - so this does
+        // it manually instead.)
         g_window = SDL_CreateWindow(g_windowTitle.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                      width, height, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
         g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
@@ -62,9 +68,23 @@ void ensureWindow(int width, int height) {
         SDL_SetWindowSize(g_window, width, height);
     }
     g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, width, height);
-    SDL_RenderSetLogicalSize(g_renderer, width, height);
     g_texW = width;
     g_texH = height;
+}
+
+// Largest width x height x centered offset for a g_texW x g_texH texture
+// that fits inside the renderer's current output size without exceeding it
+// or distorting its aspect ratio - i.e. manual letterboxing.
+SDL_Rect letterboxDestRect() {
+    int outputW = 0, outputH = 0;
+    SDL_GetRendererOutputSize(g_renderer, &outputW, &outputH);
+    if (outputW <= 0 || outputH <= 0 || g_texW <= 0 || g_texH <= 0) {
+        return SDL_Rect{0, 0, outputW, outputH};
+    }
+    double scale = std::min((double)outputW / g_texW, (double)outputH / g_texH);
+    int destW = (int)(g_texW * scale);
+    int destH = (int)(g_texH * scale);
+    return SDL_Rect{(outputW - destW) / 2, (outputH - destH) / 2, destW, destH};
 }
 
 void writeJpeg(const std::vector<uint8_t> &rgb, int width, int height) {
@@ -148,7 +168,8 @@ void present(const uint8_t *buffer, size_t bufferSize, int width, int height, bo
     ensureWindow(outW, outH);
     SDL_UpdateTexture(g_texture, nullptr, rgb.data(), outW * 3);
     SDL_RenderClear(g_renderer);
-    SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
+    SDL_Rect dest = letterboxDestRect();
+    SDL_RenderCopy(g_renderer, g_texture, nullptr, &dest);
     SDL_RenderPresent(g_renderer);
 }
 

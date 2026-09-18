@@ -963,16 +963,22 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
   const publicPill = bucket.is_public ? '<span class="pill green">Public</span>' : "";
   const sharedPill = isSharedWithMe ? '<span class="pill">Shared</span>' : "";
 
+  const renameButton = isOwnedShareable
+    ? '<button class="ghost xs bucket-rename-btn" onclick="startRenameBucket(\'' + escapeHtml(bucket.id) + '\')">Rename</button>'
+    : "";
+
   const titleRow =
-    '<div class="card-head">' +
-      "<h3>" + escapeHtml(bucket.label) + "</h3>" +
-      '<div style="display:flex; gap:6px; align-items:center;">' +
+    '<div class="card-head bucket-card-head">' +
+      '<div class="bucket-title-main">' +
+        "<h3>" + escapeHtml(bucket.label) + "</h3>" +
+        renameButton +
+      "</div>" +
+      '<div class="bucket-meta-pills">' +
         publicPill +
         sharedPill +
         '<span class="pill blue">' + images.length + (images.length === 1 ? " photo" : " photos") + "</span>" +
       "</div>" +
-    "</div>" +
-    (isOwnedShareable ? '<button class="ghost sm" onclick="renameBucket(\'' + escapeHtml(bucket.id) + '\')">Rename</button>' : "");
+    "</div>";
 
   return (
     '<div class="card">' +
@@ -1274,24 +1280,93 @@ async function createBucketInvite(bucketId: string) {
 }
 (window as any).createBucketInvite = createBucketInvite;
 
-async function renameBucket(bucketId: string) {
-  const bucket = allBucketsCache.find((b) => b.id === bucketId);
-  const next = prompt("New label:", (bucket && bucket.label) || "");
-  if (next === null) return;
-  const trimmed = next.trim();
-  if (!trimmed) return;
-  try {
-    await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label: trimmed }),
-    });
-    await renderApp();
-  } catch (err: any) {
-    showMessage("app-message", "Failed to rename bucket: " + err.message, "error");
-  }
+function renderBucketTitleView(titleMain: HTMLElement, bucket: any) {
+  titleMain.classList.remove("editing");
+  titleMain.replaceChildren();
+
+  const heading = document.createElement("h3");
+  heading.textContent = bucket.label;
+  titleMain.appendChild(heading);
+
+  const renameButton = document.createElement("button");
+  renameButton.type = "button";
+  renameButton.className = "ghost xs bucket-rename-btn";
+  renameButton.textContent = "Rename";
+  renameButton.addEventListener("click", () => startRenameBucket(bucket.id));
+  titleMain.appendChild(renameButton);
 }
-(window as any).renameBucket = renameBucket;
+
+function startRenameBucket(bucketId: string) {
+  const bucket = allBucketsCache.find((b) => b.id === bucketId);
+  const bucketShell = document.getElementById("bucket-" + bucketId);
+  const titleMain = bucketShell?.querySelector<HTMLElement>(".bucket-title-main");
+  if (!bucket || !titleMain) return;
+
+  titleMain.classList.add("editing");
+  titleMain.replaceChildren();
+
+  const form = document.createElement("form");
+  form.className = "bucket-title-edit";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "bucket-title-input";
+  input.value = bucket.label || "";
+  input.setAttribute("aria-label", "Bucket name");
+
+  const saveButton = document.createElement("button");
+  saveButton.type = "submit";
+  saveButton.className = "sm";
+  saveButton.textContent = "Save";
+
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "ghost sm";
+  cancelButton.textContent = "Cancel";
+  cancelButton.addEventListener("click", () => renderBucketTitleView(titleMain, bucket));
+
+  form.append(input, saveButton, cancelButton);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const label = input.value.trim();
+    if (!label) {
+      showMessage("app-message", "Bucket name must not be blank.", "error");
+      input.focus();
+      return;
+    }
+    if (label === bucket.label) {
+      renderBucketTitleView(titleMain, bucket);
+      return;
+    }
+
+    input.disabled = true;
+    saveButton.disabled = true;
+    cancelButton.disabled = true;
+    try {
+      await apiFetch("/admin/buckets/" + encodeURIComponent(bucketId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label }),
+      });
+      bucket.label = label;
+      renderBucketTitleView(titleMain, bucket);
+    } catch (err: any) {
+      input.disabled = false;
+      saveButton.disabled = false;
+      cancelButton.disabled = false;
+      showMessage("app-message", "Failed to rename bucket: " + err.message, "error");
+      input.focus();
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") renderBucketTitleView(titleMain, bucket);
+  });
+
+  titleMain.appendChild(form);
+  input.focus();
+  input.select();
+}
+(window as any).startRenameBucket = startRenameBucket;
 
 async function deleteBucket(bucketId: string) {
   if (!confirm("Delete this bucket and all its images? This cannot be undone.")) return;

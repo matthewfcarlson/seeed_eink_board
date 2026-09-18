@@ -152,16 +152,18 @@ can be shared across accounts via invite link
 (`POST /admin/buckets/{id}/invite`). MAC and admin device list both show a
 device's MAC for registration.
 
-Every bucket has a `target_board` (`ee02-13in3`/`ee04-7in3`,
-`migrations/0019_bucket_target_board.sql`), chosen once at creation and
-immutable after: a bucket's images are dithered/packed client-side for one
-board's screen geometry (see `lib/media-constants.ts`'s `BoardGeometry`), and
-the Worker never sees plaintext to re-derive them for a different board
-later. `PATCH /admin/devices/:mac/buckets` rejects assigning a device to a
-bucket packed for a different board (once that device's board is
-self-reported); `/image_packed` also guards this defensively at serve time
-(falls back to the "no images assigned" QR rather than streaming a
-wrong-sized buffer) in case that assignment-time check is ever bypassed.
+A bucket is never board-scoped. Instead, every image gets a packed+thumbnail
+variant per board (`ee02-13in3`/`ee04-7in3` - see `lib/media-constants.ts`'s
+`BoardGeometry`, `migrations/0019_image_board_variants.sql`'s `image_variants`
+table), generated automatically on every upload
+(`worker/src/client/admin.ts`'s `confirmUpload`/`reencryptOneImage` loop over
+both boards from the same crop). Any device subscribed to a bucket is served
+whichever variant matches its own `X-Device-Board`
+(`lib/image-store.ts`'s `getImageVariant`), so one bucket happily mixes EE02
+and EE04 devices. If an image somehow lacks a variant for a requesting
+device's board (data that predates this feature and was never re-uploaded),
+`/image_packed` falls back to the "no images assigned" QR rather than
+streaming a wrong-sized buffer.
 
 ## Encrypted Image Buckets
 
@@ -257,6 +259,11 @@ tight, worth watching before adding more.
 - Rotating a bucket's key re-derives images from the stored raw original with
   a centered/no-zoom crop — per-image crop/pan/zoom isn't persisted, so a
   custom crop resets on rotation. Cosmetic, not a security issue.
+- The upload crop UI shows one reference board's aspect ratio (EE02's
+  portrait 3:4); the other board's variant is derived from the same
+  `panX`/`panY`/`zoom` fractions applied to its own aspect ratio, not a
+  second interactive preview — reasonable for centered content, imprecise
+  for an off-center manual crop on boards with very different shapes.
 - No devices have shipped yet, so encrypted buckets were a breaking change
   with no plaintext migration path. Once real devices exist, firmware must be
   OTA'd and confirmed running before any future breaking Worker change ships.

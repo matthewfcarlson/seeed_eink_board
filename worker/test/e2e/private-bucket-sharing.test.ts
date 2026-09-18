@@ -303,5 +303,13 @@ describe("e2e: private bucket sharing", () => {
       HKDF_INFO_BUCKET_WRAP
     );
     expect(deviceUnwrappedAfter).toEqual(newBucketKeyRaw);
+
+    // Cleanup is also a regression check for DELETE /admin/buckets/:id: this
+    // bucket now has image_variants, bucket_keys for multiple principals, an
+    // assigned device_buckets row, a consumed bucket_invites row, a
+    // bucket_shares row, and a completed bucket_rotations row. Deleting the
+    // bucket must remove all FK children before deleting buckets itself.
+    await adminA.deleteBucket(bucketId);
+    expect((await adminA.getBuckets()).find((b) => b.id === bucketId)).toBeUndefined();
   });
 });
