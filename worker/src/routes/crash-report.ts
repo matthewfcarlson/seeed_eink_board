@@ -3,9 +3,31 @@ import { DEFAULT_DEVICE_KEY, type Env } from "../types";
 import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
+import { isValidMac } from "../lib/validate";
 
 const MAX_BACKTRACE_ENTRIES = 16;
 const MAX_REPORTS_PER_DEVICE = 20;
+// Every field below is written to D1 and rendered in /admin's Firmware panel.
+// The sender is our own firmware, but the endpoint is signature-authed per
+// request, not tamper-proofed beyond that — bound each string so a buggy (or
+// hostile, MAC+secret-bearing) sender can't wedge arbitrarily large values
+// into the report list.
+const MAX_FIRMWARE_VERSION_LEN = 64;
+const MAX_RESET_REASON_LEN = 64;
+const MAX_CRASH_TASK_LEN = 32;
+const MAX_CRASH_PC_LEN = 16;
+const MAX_BACKTRACE_ENTRY_LEN = 16; // hex PCs like "0x420182a0"
+
+function boundedString(value: unknown, max: number): string | null {
+  if (typeof value !== "string" || !value.length) return null;
+  return value.slice(0, max);
+}
+
+function boundedInt(value: unknown, max: number): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const n = Math.trunc(value);
+  return n < 0 ? 0 : Math.min(n, max);
+}
 
 interface CrashReportBody {
   firmware_version?: string;
@@ -38,6 +60,8 @@ export function registerCrashReportRoute(app: Hono<{ Bindings: Env }>) {
     const macHeader = c.req.header("X-Device-MAC");
     if (!macHeader) return c.text("X-Device-MAC header is required", 400);
     const mac = normalizeMac(macHeader);
+    // Same validity gate as the other device-facing routes — see image-packed.ts.
+    if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
 
     const lookup = await resolveDeviceKey(c.env, mac);
     if (lookup.deviceKey !== DEFAULT_DEVICE_KEY) {
@@ -53,7 +77,8 @@ export function registerCrashReportRoute(app: Hono<{ Bindings: Env }>) {
     }
 
     const body = await c.req.json<CrashReportBody>().catch(() => null);
-    if (!body || !body.firmware_version || !body.reset_reason) {
+    if (!body || typeof body.firmware_version !== "string" || !body.firmware_version ||
+        typeof body.reset_reason !== "string" || !body.reset_reason) {
       return c.text("firmware_version and reset_reason are required", 400);
     }
 
@@ -63,7 +88,14 @@ export function registerCrashReportRoute(app: Hono<{ Bindings: Env }>) {
 
     const id = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);
-    const backtrace = Array.isArray(body.backtrace) ? body.backtrace.slice(0, MAX_BACKTRACE_ENTRIES) : null;
+    const backtrace = Array.isArray(body.backtrace)
+      ? body.backtrace
+          .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+          .slice(0, MAX_BACKTRACE_ENTRIES)
+          .map((entry) => entry.slice(0, MAX_BACKTRACE_ENTRY_LEN))
+      : null;
+    const bootAttempts = boundedInt(body.boot_attempts, 255);
+    const crashCause = boundedInt(body.crash_cause, 2147483647);
 
     await c.env.DB.batch([
       c.env.DB.prepare(
@@ -74,13 +106,13 @@ export function registerCrashReportRoute(app: Hono<{ Bindings: Env }>) {
       ).bind(
         id,
         mac,
-        body.firmware_version,
+        body.firmware_version.slice(0, MAX_FIRMWARE_VERSION_LEN),
         body.rolled_back ? 1 : 0,
-        body.reset_reason,
-        body.boot_attempts ?? 0,
-        body.crash_task ?? null,
-        body.crash_pc ?? null,
-        body.crash_cause ?? null,
+        body.reset_reason.slice(0, MAX_RESET_REASON_LEN),
+        bootAttempts ?? 0,
+        boundedString(body.crash_task, MAX_CRASH_TASK_LEN),
+        boundedString(body.crash_pc, MAX_CRASH_PC_LEN),
+        crashCause,
         backtrace ? JSON.stringify(backtrace) : null,
         typeof body.backtrace_corrupted === "boolean" ? (body.backtrace_corrupted ? 1 : 0) : null,
         now

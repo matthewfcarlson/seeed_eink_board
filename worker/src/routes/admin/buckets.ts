@@ -14,6 +14,11 @@ import {
   type WrappedBucketKey,
 } from "../../lib/bucket-keys";
 import { readCiphertextUploadBytes, validateCiphertextUploadFields } from "../../lib/image-upload";
+import {
+  MAX_BUCKET_LABEL,
+  isValidRawAesKeyB64,
+  validateLabel,
+} from "../../lib/validate";
 
 /**
  * Builds the admin join-bucket URL using the incoming request's own origin —
@@ -50,8 +55,8 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     const body = await c.req
       .json<{ label?: string; key?: unknown; is_public?: boolean; public_key_raw?: string }>()
       .catch(() => ({}) as never);
-    const label = body.label?.trim();
-    if (!label) return c.json({ error: "label is required" }, 400);
+    const label = validateLabel(body.label, MAX_BUCKET_LABEL);
+    if (!label) return c.json({ error: `label is required and must be 1-${MAX_BUCKET_LABEL} characters` }, 400);
     const key = parseWrappedBucketKey(body.key);
     if (!key) return c.json({ error: "key (wrapped bucket key for the caller) is required" }, 400);
 
@@ -59,7 +64,9 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     let publicKeyRaw: string | null = null;
     if (body.is_public) {
       if (!c.var.user.is_superuser) return c.json({ error: "Forbidden: only a superuser may create a public bucket" }, 403);
-      if (!body.public_key_raw) return c.json({ error: "public_key_raw is required when is_public is true" }, 400);
+      if (!isValidRawAesKeyB64(body.public_key_raw)) {
+        return c.json({ error: "public_key_raw must be base64 of the bucket's raw 32-byte AES-256 key (44 chars)" }, 400);
+      }
       isPublic = true;
       publicKeyRaw = body.public_key_raw;
     }
@@ -144,8 +151,10 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     const body = await c.req
       .json<{ label?: string; is_public?: boolean; public_key_raw?: string }>()
       .catch(() => ({}) as never);
-    const label = body.label?.trim();
-    if (body.label !== undefined && !label) return c.json({ error: "label must not be blank" }, 400);
+    const label = body.label === undefined ? undefined : validateLabel(body.label, MAX_BUCKET_LABEL);
+    if (body.label !== undefined && !label) {
+      return c.json({ error: `label must not be blank and must be at most ${MAX_BUCKET_LABEL} characters` }, 400);
+    }
     if (label === undefined && body.is_public === undefined) {
       return c.json({ error: "label or is_public is required" }, 400);
     }
@@ -165,7 +174,9 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
       if (!c.var.user.is_superuser) return c.json({ error: "Forbidden: only a superuser may make a bucket public" }, 403);
       isPublic = !!body.is_public;
       if (isPublic) {
-        if (!body.public_key_raw) return c.json({ error: "public_key_raw is required when setting is_public to true" }, 400);
+        if (!isValidRawAesKeyB64(body.public_key_raw)) {
+          return c.json({ error: "public_key_raw must be base64 of the bucket's raw 32-byte AES-256 key (44 chars)" }, 400);
+        }
         await c.env.DB.prepare("UPDATE buckets SET is_public = 1, public_key_raw = ? WHERE id = ?")
           .bind(body.public_key_raw, id)
           .run();
@@ -592,8 +603,11 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     // with, by design) permanently stuck decrypting with the old, now-stale
     // key after rotation — the rotation would silently break public reads
     // instead of revoking anything.
-    if (bucket.is_public === 1 && !body.public_key_raw) {
-      return c.json({ error: "public_key_raw (the new raw key, base64) is required to finalize a public bucket's rotation" }, 400);
+    if (bucket.is_public === 1 && !isValidRawAesKeyB64(body.public_key_raw)) {
+      return c.json(
+        { error: "public_key_raw (the new raw key, 44-char base64 of the 32-byte AES-256 key) is required to finalize a public bucket's rotation" },
+        400
+      );
     }
 
     // Recomputed HERE, not reused from rotate/start — a share accepted or a

@@ -73,7 +73,7 @@ export function renderProvisionPage(): string {
   <div id="register-logged-in" style="display:none;">
     <div class="row">
       <label>Label</label>
-      <input type="text" id="register-label" placeholder="Kitchen frame">
+      <input type="text" id="register-label" placeholder="Kitchen frame" maxlength="80">
     </div>
     <button id="register-btn">Register device</button>
   </div>

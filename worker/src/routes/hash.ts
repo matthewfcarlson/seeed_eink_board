@@ -7,6 +7,7 @@ import { getRotationSnapshot, peekPendingImage } from "../lib/rotation";
 import { getImageVariant } from "../lib/image-store";
 import { renderRegistrationBuffer } from "../lib/qr-registration";
 import { registrationUrl } from "../lib/registration-url";
+import { isValidMac } from "../lib/validate";
 
 /**
  * GET /hash — contract-critical (firmware/src/main.cpp checkImageChanged()).
@@ -23,6 +24,8 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     if (!macHeader) return c.text("X-Device-MAC header required", 400);
 
     const mac = normalizeMac(macHeader);
+    // Same validity gate as /image_packed — see that route's comment.
+    if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
     const lookup = await resolveDeviceKey(c.env, mac);
     const deviceKey = lookup.deviceKey;
 

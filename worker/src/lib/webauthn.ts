@@ -1,5 +1,6 @@
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import type { AuthenticationExtensionsClientInputs } from "@simplewebauthn/server";
+import { isValidP256PublicKeyB64 } from "./validate";
 
 export const RP_NAME = "E-Ink Frame Server";
 
@@ -35,6 +36,18 @@ export interface SharingKeyWrap {
 
 export function readSharingKeyWrap(body: Partial<SharingKeyWrap>): SharingKeyWrap | null {
   if (!body.sharing_public_key || !body.wrapped_sharing_key || !body.wrap_nonce) return null;
+  // The public half has a protocol-fixed size (raw 65-byte P-256 point → 88
+  // base64 chars) and the wrap nonce is always a 12-byte GCM IV (16 chars) —
+  // both produced by client/crypto.ts. The wrapped private key's length varies
+  // a little with PKCS#8 encoding, so it only gets a sane base64 + size bound.
+  // These fields gate the entire bucket-decryption identity, so a malformed
+  // upload should be rejected, not stored.
+  if (!isValidP256PublicKeyB64(body.sharing_public_key)) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(body.wrapped_sharing_key) || body.wrapped_sharing_key.length % 4 !== 0 ||
+      body.wrapped_sharing_key.length < 100 || body.wrapped_sharing_key.length > 400) {
+    return null;
+  }
+  if (!/^[A-Za-z0-9+/]{16}$/.test(body.wrap_nonce)) return null;
   return {
     sharing_public_key: body.sharing_public_key,
     wrapped_sharing_key: body.wrapped_sharing_key,

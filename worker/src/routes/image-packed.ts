@@ -7,6 +7,7 @@ import { getRotationSnapshot, markServed, peekPendingImage } from "../lib/rotati
 import { getImageVariant, getPackedImage } from "../lib/image-store";
 import { renderNoBucketBuffer, renderRegistrationBuffer } from "../lib/qr-registration";
 import { assignBucketUrl, registrationUrl } from "../lib/registration-url";
+import { isValidMac } from "../lib/validate";
 
 /**
  * GET /image_packed — contract-critical (firmware/src/main.cpp fetchAndDisplayImage()).
@@ -29,6 +30,10 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     if (!macHeader) return c.text("X-Device-MAC header required", 400);
 
     const mac = normalizeMac(macHeader);
+    // Real firmware always sends its 6-byte MAC (12 hex chars after
+    // normalizeMac) — anything else can't come from a device, so reject it
+    // before it can be rendered into the registration QR path below.
+    if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
     const lookup = await resolveDeviceKey(c.env, mac);
     const deviceKey = lookup.deviceKey;
 

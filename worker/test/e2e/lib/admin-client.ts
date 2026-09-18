@@ -73,11 +73,11 @@ export class AdminClient {
   /** PATCH /admin/me/sharing-key - backfills this account's users.sharing_public_key
    *  (see routes/admin/auth.ts's doc comment: normally a PRF-wrapped copy of the
    *  matching private key, produced after a successful WebAuthn PRF eval). The
-   *  Worker only validates that the three fields are non-empty strings - it can
+   *  Worker validates wire format (lib/webauthn.ts's readSharingKeyWrap) but can
    *  never decrypt wrapped_sharing_key either way - so a test that (like this
    *  one) already holds its principal's real keypair directly in memory can
-   *  populate the *public* half through this real endpoint with placeholder
-   *  values for the two fields it never needs to unwrap again. */
+   *  populate the *public* half through this real endpoint with same-shape
+   *  placeholder values for the two fields it never needs to unwrap again. */
   async setSharingPublicKey(credentialId: string, sharingPublicKeyB64: string): Promise<void> {
     await this.json("/admin/me/sharing-key", {
       method: "PATCH",
@@ -85,8 +85,10 @@ export class AdminClient {
       body: JSON.stringify({
         credential_id: credentialId,
         sharing_public_key: sharingPublicKeyB64,
-        wrapped_sharing_key: "test-placeholder-unused",
-        wrap_nonce: "test-placeholder-unused",
+        // Same shape the real client produces: a 12-byte GCM nonce and a
+        // PKCS#8-sized ciphertext blob, both base64.
+        wrap_nonce: Buffer.alloc(12).toString("base64"),
+        wrapped_sharing_key: Buffer.alloc(121).toString("base64"),
       }),
     });
   }

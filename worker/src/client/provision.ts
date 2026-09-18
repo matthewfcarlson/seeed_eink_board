@@ -336,22 +336,73 @@ el("scan-btn").addEventListener("click", async () => {
 });
 
 el("save-btn").addEventListener("click", async () => {
+  // Client-side mirror of the device's own bounds (config_manager.h's
+  // MAX_HOST_LENGTH/MAX_ENDPOINT_LENGTH and its setConfig() range checks):
+  // the firmware silently IGNORES out-of-range values, so without checking
+  // here a typo'd host or a blank port would appear to save while the device
+  // kept running with its previous setting. SSID (32 bytes) and WPA password
+  // (64 chars) are the WiFi spec's own limits.
+  const wifiSsid = el<HTMLInputElement>("wifi-ssid").value.trim();
+  const host = el<HTMLInputElement>("host").value.trim();
+  const endpoint = el<HTMLInputElement>("endpoint").value.trim();
+  const port = Number(el<HTMLInputElement>("port").value);
+  const sleepMinutes = Number(el<HTMLInputElement>("sleep_minutes").value);
+  const startHour = Number(el<HTMLInputElement>("active_start_hour").value);
+  const endHour = Number(el<HTMLInputElement>("active_end_hour").value);
+  const tzOffset = Number(el<HTMLInputElement>("timezone_offset_minutes").value);
+
   const config: any = {
-    wifi_ssid: el<HTMLInputElement>("wifi-ssid").value.trim(),
-    host: el<HTMLInputElement>("host").value.trim(),
-    port: Number(el<HTMLInputElement>("port").value),
+    wifi_ssid: wifiSsid,
+    host,
+    port,
     use_https: el<HTMLInputElement>("use_https").checked,
-    endpoint: el<HTMLInputElement>("endpoint").value.trim(),
-    sleep_minutes: Number(el<HTMLInputElement>("sleep_minutes").value),
-    active_start_hour: Number(el<HTMLInputElement>("active_start_hour").value),
-    active_end_hour: Number(el<HTMLInputElement>("active_end_hour").value),
-    timezone_offset_minutes: Number(el<HTMLInputElement>("timezone_offset_minutes").value),
+    endpoint,
+    sleep_minutes: sleepMinutes,
+    active_start_hour: startHour,
+    active_end_hour: endHour,
+    timezone_offset_minutes: tzOffset,
   };
   const password = el<HTMLInputElement>("wifi-password").value;
   if (password.length > 0) config.wifi_password = password;
 
   if (!config.wifi_ssid) {
     showMessage("WiFi network name is required.", "error");
+    return;
+  }
+  if (config.wifi_ssid.length > 32) {
+    showMessage("WiFi network name must be at most 32 characters.", "error");
+    return;
+  }
+  if (password.length > 64) {
+    showMessage("WiFi password must be at most 64 characters.", "error");
+    return;
+  }
+  if (!host || host.length > 127) {
+    showMessage("Server host is required and must be at most 127 characters.", "error");
+    return;
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    showMessage("Port must be a whole number between 1 and 65535.", "error");
+    return;
+  }
+  if (!endpoint || endpoint.length > 63) {
+    showMessage("Image path is required and must be at most 63 characters (e.g. /image_packed).", "error");
+    return;
+  }
+  if (!Number.isInteger(sleepMinutes) || sleepMinutes < 1 || sleepMinutes > 1440) {
+    showMessage("Refresh interval must be a whole number between 1 and 1440 minutes.", "error");
+    return;
+  }
+  if (!Number.isInteger(startHour) || startHour < 0 || startHour > 23) {
+    showMessage("Active start hour must be a whole number between 0 and 23.", "error");
+    return;
+  }
+  if (!Number.isInteger(endHour) || endHour < 0 || endHour > 23) {
+    showMessage("Active end hour must be a whole number between 0 and 23.", "error");
+    return;
+  }
+  if (!Number.isInteger(tzOffset) || tzOffset < -720 || tzOffset > 840) {
+    showMessage("Timezone offset must be a whole number between -720 and 840 minutes.", "error");
     return;
   }
 

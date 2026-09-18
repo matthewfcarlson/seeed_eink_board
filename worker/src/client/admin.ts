@@ -428,6 +428,10 @@ el("edit-name-btn").addEventListener("click", async () => {
   if (next === null) return;
   const trimmed = next.trim();
   if (!trimmed) return;
+  if (trimmed.length > 40) {
+    showMessage("app-message", "Display name must be at most 40 characters.", "error");
+    return;
+  }
   try {
     currentUser = await apiFetch("/admin/me", {
       method: "PATCH",
@@ -1189,6 +1193,13 @@ async function confirmUpload() {
   const file = uploadModalFile;
   if (!deviceKey || !file) return;
   const filename = (el<HTMLInputElement>("upload-filename-input").value || file.name).trim();
+  // Mirrors the server's validateFilename() (lib/validate.ts): the filename is
+  // the (bucket, filename) unique key and ends up in the X-Image-Name response
+  // header, so control characters and over-long values must never reach it.
+  if (!filename || filename.length > 255 || /[\u0000-\u001f\u007f]/.test(filename)) {
+    showMessage("app-message", "Filename must be 1-255 characters with no control characters.", "error");
+    return;
+  }
   const dither = el<HTMLSelectElement>("upload-dither-select").value as DitherAlgorithm;
 
   const bucketKey = bucketAesKeys.get(deviceKey);
@@ -1331,6 +1342,11 @@ function startRenameBucket(bucketId: string) {
     const label = input.value.trim();
     if (!label) {
       showMessage("app-message", "Bucket name must not be blank.", "error");
+      input.focus();
+      return;
+    }
+    if (label.length > 80) {
+      showMessage("app-message", "Bucket label must be at most 80 characters.", "error");
       input.focus();
       return;
     }
@@ -1662,6 +1678,10 @@ el("create-bucket-btn").addEventListener("click", async () => {
   const input = el<HTMLInputElement>("new-bucket-label");
   const label = input.value.trim();
   if (!label) return;
+  if (label.length > 80) {
+    showMessage("app-message", "Bucket label must be at most 80 characters.", "error");
+    return;
+  }
   if (!sharingPublicKeyRaw) {
     showMessage("app-message", "Can't create an encrypted bucket yet — log out and back in with your passkey first.", "error");
     return;

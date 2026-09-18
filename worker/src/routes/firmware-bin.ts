@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import type { Env } from "../types";
 import { getFirmwareBinary } from "../lib/firmware-store";
+import { isValidFirmwareVersion } from "../lib/validate";
 
 /**
  * GET /firmware_bin?version=X — contract-critical (firmware/lib/common/device_app.h's
@@ -20,6 +21,9 @@ export function registerFirmwareBinRoute(app: Hono<{ Bindings: Env }>) {
   app.get("/firmware_bin", async (c) => {
     const version = c.req.query("version");
     if (!version) return c.text("version query param is required", 400);
+    // Echoed back as the X-Firmware-Version response header below — bound the
+    // charset so a malformed query can't wedge the header write.
+    if (!isValidFirmwareVersion(version)) return c.text("Invalid firmware version", 400);
     const board = c.req.header("X-Device-Board");
     if (!board) return c.text("X-Device-Board header is required", 400);
 

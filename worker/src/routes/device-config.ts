@@ -6,6 +6,7 @@ import { verifyDeviceSignature } from "../lib/device-signature";
 import { resolveScheduleConfig } from "../lib/schedule";
 import { resolveFirmwareTarget } from "../lib/firmware-target";
 import { getBucketKeysForDevice } from "../lib/bucket-keys";
+import { isValidFirmwareVersion, isValidMac, isValidP256PublicKeyB64 } from "../lib/validate";
 
 /**
  * GET /device_config — contract-critical (firmware/lib/common/device_app.h's
@@ -32,18 +33,36 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
   app.get("/device_config", async (c) => {
     const macHeader = c.req.header("X-Device-MAC");
     const batteryHeader = c.req.header("X-Battery-Voltage");
-    const battery = batteryHeader ? Number.parseFloat(batteryHeader) : NaN;
-    const reportedFirmwareVersion = c.req.header("X-Firmware-Version") ?? null;
+    // Sane LiPo/USB range (CLAUDE.md: 3.0V empty - 4.2V full, USB can read
+    // higher) — bounds what a misbehaving sender can write into the column
+    // /admin's device table renders.
+    const parsedBattery = batteryHeader ? Number.parseFloat(batteryHeader) : NaN;
+    const battery = Number.isFinite(parsedBattery) && parsedBattery > 0 && parsedBattery < 100 ? parsedBattery : NaN;
+    const reportedFirmwareVersionRaw = c.req.header("X-Firmware-Version") ?? null;
+    // Same bound as firmware_releases.version (lib/validate.ts) — bounded string
+    // into devices.running_firmware_version, echoed nowhere except /admin.
+    const reportedFirmwareVersion =
+      reportedFirmwareVersionRaw && isValidFirmwareVersion(reportedFirmwareVersionRaw) ? reportedFirmwareVersionRaw : null;
     const reportedBoard = c.req.header("X-Device-Board") ?? null;
     // Base64, raw uncompressed P-256 point — generated on-device on first boot
     // (see device_app.h's ensureSharingKeyPair()) and self-reported the same
     // way as X-Device-Board, not pushed through a separate provisioning flow.
-    const reportedSharingPublicKey = c.req.header("X-Device-Sharing-Public-Key") ?? null;
+    // Validated against the wire format before it can land in
+    // devices.sharing_public_key — the whole bucket-key-wrap flow keyranges off
+    // this column, so junk must never be persisted from a stray header.
+    const reportedSharingPublicKeyRaw = c.req.header("X-Device-Sharing-Public-Key") ?? null;
+    const reportedSharingPublicKey =
+      reportedSharingPublicKeyRaw && isValidP256PublicKeyB64(reportedSharingPublicKeyRaw) ? reportedSharingPublicKeyRaw : null;
     const ip = c.req.header("CF-Connecting-IP") ?? null;
 
     let deviceKey: string = DEFAULT_DEVICE_KEY;
     if (macHeader) {
       const mac = normalizeMac(macHeader);
+      // Real firmware always sends its 6-byte MAC (12 hex chars after
+      // normalizeMac); anything else can't be a device, so don't even look it
+      // up — much less render it into the registration QR like an unregistered
+      // MAC would get.
+      if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
       const lookup = await resolveDeviceKey(c.env, mac);
       deviceKey = lookup.deviceKey;
 

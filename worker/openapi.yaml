@@ -67,6 +67,7 @@ components:
           nullable: true
         label:
           type: string
+          maxLength: 80
         created_at:
           type: integer
         is_owner:
@@ -115,6 +116,8 @@ components:
           type: string
         filename:
           type: string
+          maxLength: 255
+          description: No control characters (it's echoed in the X-Image-Name response header).
         dither_algorithm:
           type: string
           enum: [floyd_steinberg, atkinson, ordered, none]
@@ -157,8 +160,10 @@ components:
       properties:
         mac:
           type: string
+          pattern: '^[0-9a-f]{12}$'
         label:
           type: string
+          maxLength: 80
           nullable: true
         created_at:
           type: integer
@@ -431,8 +436,8 @@ paths:
             schema:
               type: object
               properties:
-                mac: { type: string }
-                label: { type: string }
+                mac: { type: string, pattern: '^[0-9a-fA-F: -]{12,17}$' }
+                label: { type: string, maxLength: 80 }
                 secret:
                   type: string
                   description: >-
@@ -459,7 +464,7 @@ paths:
             schema:
               type: object
               properties:
-                label: { type: string }
+                label: { type: string, maxLength: 80 }
       responses:
         '200': { description: OK }
         '403': { description: Forbidden }
@@ -544,7 +549,7 @@ paths:
             schema:
               type: object
               properties:
-                label: { type: string }
+                label: { type: string, maxLength: 80 }
                 key:
                   allOf: [{ $ref: '#/components/schemas/WrappedKey' }]
                   description: The caller's wrap of the newly-generated bucket key for their own sharing_public_key.
@@ -585,11 +590,11 @@ paths:
             schema:
               type: object
               properties:
-                label: { type: string }
+                label: { type: string, maxLength: 80 }
                 is_public: { type: boolean }
                 public_key_raw:
                   type: string
-                  description: The bucket's raw key, base64. Required when setting is_public to true.
+                  description: The bucket's raw key, base64 (44 chars — 32 bytes). Required when setting is_public to true.
       responses:
         '200': { description: OK }
         '400': { description: Neither label nor is_public was given, or public_key_raw was missing while setting is_public true }

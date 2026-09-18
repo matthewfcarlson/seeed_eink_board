@@ -7,6 +7,7 @@ import { getThumbnailCiphertextB64 } from "../../lib/image-store";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketReadAccess } from "../../lib/bucket-access";
 import { deleteBucketKey, parseWrappedBucketKey, upsertBucketKey } from "../../lib/bucket-keys";
+import { MAX_DEVICE_LABEL, isValidMac, isValidP256PublicKeyB64, validateLabel } from "../../lib/validate";
 
 // The device's self-generated HMAC key (hex), scanned off its own display via the
 // registration QR — see lib/device-signature.ts. Loose length bound since the
@@ -51,8 +52,23 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     if (body.secret !== undefined && !SECRET_PATTERN.test(body.secret)) {
       return c.json({ error: "secret must be a hex string" }, 400);
     }
-
     const mac = normalizeMac(body.mac);
+    if (!isValidMac(mac)) {
+      return c.json({ error: "mac must normalize to exactly 12 hex characters" }, 400);
+    }
+    // sharing_public_key comes from the device (surfaced during provisioning/claim) or
+    // the provisioning page's manual-entry form — validate the wire format so a typo
+    // can't poison the column the whole bucket-key-wrap flow depends on.
+    if (body.sharing_public_key !== undefined && !isValidP256PublicKeyB64(body.sharing_public_key)) {
+      return c.json({ error: "sharing_public_key must be base64 of the device's raw 65-byte P-256 public point" }, 400);
+    }
+    // Label is optional; when present it must fit the column's display role.
+    // Empty string is normalized to null so "no label" has one representation.
+    let label: string | null = null;
+    if (body.label !== undefined && body.label !== "") {
+      label = validateLabel(body.label, MAX_DEVICE_LABEL);
+      if (!label) return c.json({ error: `label must be at most ${MAX_DEVICE_LABEL} characters` }, 400);
+    }
     const user = c.var.user;
 
     const existing = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
@@ -98,11 +114,11 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
          last_nonce = CASE WHEN excluded.secret IS NOT NULL THEN 0 ELSE devices.last_nonce END,
          sharing_public_key = COALESCE(devices.sharing_public_key, excluded.sharing_public_key)`
     )
-      .bind(mac, user.id, body.label ?? null, body.secret ?? null, now, body.sharing_public_key ?? null)
+      .bind(mac, user.id, label, body.secret ?? null, now, body.sharing_public_key ?? null)
       .run();
 
     await invalidateDeviceCache(c.env, mac);
-    return c.json({ mac, label: body.label ?? null }, 201);
+    return c.json({ mac, label }, 201);
   });
 
   app.get("/admin/devices", requireAdmin, async (c) => {
@@ -142,7 +158,15 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     const macParam = c.req.param("mac");
     if (!macParam) return c.json({ error: "mac is required" }, 400);
     const mac = normalizeMac(macParam);
+    if (!isValidMac(mac)) return c.json({ error: "mac must normalize to exactly 12 hex characters" }, 400);
     const body = await c.req.json<{ label?: string }>().catch(() => ({}) as never);
+    if (body.label !== undefined && body.label !== null && typeof body.label !== "string") {
+      return c.json({ error: "label must be a string" }, 400);
+    }
+    // Empty/null clears the label; a value must be within the display limit.
+    if (body.label && body.label.length > MAX_DEVICE_LABEL) {
+      return c.json({ error: `label must be at most ${MAX_DEVICE_LABEL} characters` }, 400);
+    }
 
     const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
       .bind(mac)
@@ -175,6 +199,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     const macParam = c.req.param("mac");
     if (!macParam) return c.json({ error: "mac is required" }, 400);
     const mac = normalizeMac(macParam);
+    if (!isValidMac(mac)) return c.json({ error: "mac must normalize to exactly 12 hex characters" }, 400);
     const body = await c.req
       .json<{ bucket_ids?: string[]; keys?: Record<string, unknown> }>()
       .catch(() => ({}) as never);
@@ -234,6 +259,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     const macParam = c.req.param("mac");
     if (!macParam) return c.json({ error: "mac is required" }, 400);
     const mac = normalizeMac(macParam);
+    if (!isValidMac(mac)) return c.json({ error: "mac must normalize to exactly 12 hex characters" }, 400);
     const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
       .bind(mac)
       .first<{ user_id: string | null }>();

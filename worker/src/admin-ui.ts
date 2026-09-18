@@ -110,11 +110,11 @@ export function renderAdminPage(): string {
       <p class="hint hint-block">Scan the "scan to register" QR code on an unclaimed device's screen to claim it &mdash; a MAC address alone isn't enough (every board shares the same vendor prefix, so it's guessable). Already own this device? Enter its MAC below to just update its label. Setting up a brand-new device? Use <a href="/provision">Device Setup</a> instead.</p>
       <div class="row">
         <label>MAC address</label>
-        <input type="text" id="new-device-mac" placeholder="aabbccddeeff">
+        <input type="text" id="new-device-mac" placeholder="aabbccddeeff" maxlength="17" autocomplete="off" spellcheck="false">
       </div>
       <div class="row">
         <label>Label</label>
-        <input type="text" id="new-device-label" placeholder="Kitchen frame">
+        <input type="text" id="new-device-label" placeholder="Kitchen frame" maxlength="80">
       </div>
       <button id="register-device-btn">Register device</button>
     </div>
@@ -126,7 +126,7 @@ export function renderAdminPage(): string {
     <div class="inline-form">
       <div class="row">
         <label>New bucket name</label>
-        <input type="text" id="new-bucket-label" placeholder="Living room rotation">
+        <input type="text" id="new-bucket-label" placeholder="Living room rotation" maxlength="80">
       </div>
       <button id="create-bucket-btn">Create bucket</button>
     </div>

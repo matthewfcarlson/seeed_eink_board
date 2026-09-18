@@ -13,13 +13,28 @@ export interface WrappedBucketKey {
 
 export type PrincipalType = "user" | "device";
 
+// The sizes below are protocol-fixed, not arbitrary limits: wrapKeyFor()
+// (client/crypto.ts) always wraps a 32-byte AES-256 bucket key, so every
+// field's length is known exactly — a 65-byte ephemeral P-256 point is 88
+// base64 chars, a 12-byte GCM nonce is 16, and 32 plaintext bytes + 16-byte
+// GCM tag = 48 bytes = 64 chars. Accepting anything else stored junk that
+// no unwrap could ever succeed on.
+const WRAPPED_KEY_B64_LENGTHS = { ephemeralPub: 88, nonce: 16, ciphertext: 64 } as const;
+
 function isWrappedBucketKey(value: unknown): value is WrappedBucketKey {
   const v = value as Partial<WrappedBucketKey> | null | undefined;
-  return !!v && typeof v.ephemeralPub === "string" && typeof v.nonce === "string" && typeof v.ciphertext === "string";
+  if (!v) return false;
+  return (
+    (typeof v.ephemeralPub === "string" && v.ephemeralPub.length === WRAPPED_KEY_B64_LENGTHS.ephemeralPub) &&
+    (typeof v.nonce === "string" && v.nonce.length === WRAPPED_KEY_B64_LENGTHS.nonce) &&
+    (typeof v.ciphertext === "string" && v.ciphertext.length === WRAPPED_KEY_B64_LENGTHS.ciphertext)
+  );
 }
 
-/** Validates a client-supplied wrapped-key payload shape (not its crypto
- *  content — the Worker has no way to check that without the private key). */
+/** Validates a client-supplied wrapped-key payload: exact base64 lengths for
+ *  each field (see WRAPPED_KEY_B64_LENGTHS — these are fixed by the wrap
+ *  format, not a policy choice) but not its crypto content — the Worker has
+ *  no way to check that without the private key. */
 export function parseWrappedBucketKey(value: unknown): WrappedBucketKey | null {
   return isWrappedBucketKey(value) ? value : null;
 }

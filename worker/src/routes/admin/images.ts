@@ -12,6 +12,7 @@ import {
   putThumbnail,
 } from "../../lib/image-store";
 import { readCiphertextUploadBytes, validateCiphertextUploadFields } from "../../lib/image-upload";
+import { validateFilename } from "../../lib/validate";
 
 function isValidDitherAlgorithm(value: string): value is DitherAlgorithm {
   return (DITHER_ALGORITHMS as string[]).includes(value);
@@ -46,6 +47,13 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
 
     if (!deviceKey || !filename) {
       return c.json({ error: "device_key and filename query params are required" }, 400);
+    }
+    // The filename is both half of the UNIQUE(device_key, filename) catalog key and
+    // the X-Image-Name response header /image_packed and /hash send back — a control
+    // character (or CR/LF) in it would make the Workers runtime reject that header
+    // and break every device fetch of this image, so it's rejected at the door.
+    if (!validateFilename(filename)) {
+      return c.json({ error: "filename must be 1-255 characters with no control characters" }, 400);
     }
     if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
       return c.json({ error: "Forbidden" }, 403);
