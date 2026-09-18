@@ -769,8 +769,20 @@ inline bool syncRemoteConfigAndTime(ConfigManager& configManager, RunState& run)
     if (httpCode != HTTP_CODE_OK) {
         Serial.printf("Device config fetch failed, HTTP code: %d\n", httpCode);
         http.end();
+        // 401 means the server explicitly rejected our signature - the secret
+        // it has on file for this MAC doesn't match ours (e.g. NVS was wiped
+        // and regenerated a new one after the device was already claimed).
+        // Any other failure (network error, timeout, 5xx) says nothing about
+        // whether the signature itself is right, so leave the counter alone -
+        // see AUTH_FAILURE_CONFIG_MODE_THRESHOLD's comment in config_manager.h.
+        if (httpCode == 401) {
+            configManager.recordAuthFailure();
+        }
         return false;
     }
+
+    // A successful authenticated round trip proves the signature is fine.
+    configManager.clearAuthFailures();
 
     String payload = http.getString();
     http.end();
@@ -1210,14 +1222,21 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     // header did.
     String responsePackedEncoding = http.header("X-Packed-Encoding");
     bool useDeflate = responsePackedEncoding == "deflate-raw";
-    // The unregistered-device "scan to register" QR screen (qr-registration.ts)
-    // is plaintext, exact-buffer-size bytes - there's no bucket key to encrypt
-    // it under for a device nobody has claimed yet. X-Device-ID: default is
-    // the same sentinel resolveDeviceKey()/DEFAULT_DEVICE_KEY use server-side
-    // for this exact case, so it's what distinguishes "no GCM envelope, skip
-    // the bucket-key requirement entirely" from every other (encrypted)
-    // response below.
+    // Both the unregistered-device "scan to register" QR screen AND the
+    // registered-but-no-bucket-assigned "no images yet" QR screen
+    // (qr-registration.ts's renderRegistrationBuffer()/renderNoBucketBuffer(),
+    // both built on the same plaintext renderQrScreenBuffer()) are plaintext,
+    // exact-buffer-size bytes - there's no bucket key to encrypt either one
+    // under (no claimed device yet, or no bucket to source a key from at
+    // all). X-Device-ID: default is the sentinel resolveDeviceKey()/
+    // DEFAULT_DEVICE_KEY use server-side for the first case; the second case
+    // sends the device's real X-Device-ID but omits X-Bucket-Id entirely
+    // (there's no bucket to name), which is what distinguishes it here.
+    // Together these flag "no GCM envelope, skip the bucket-key requirement
+    // entirely" for every other (encrypted) response below.
     bool isRegistrationImage = responseDeviceId == "default";
+    bool isNoBucketImage = !isRegistrationImage && responseBucketId.length() == 0;
+    bool isPlaintextImage = isRegistrationImage || isNoBucketImage;
     if (responseImageName.length() > 0 || responseImageHash.length() > 0 || responseDeviceId.length() > 0) {
         Serial.printf("Response headers: X-Image-Name=%s, X-Image-Hash=%s, X-Device-ID=%s, X-Bucket-Id=%s, X-Bucket-Key-Version=%d, X-Packed-Encoding=%s\n",
                       responseImageName.length() > 0 ? responseImageName.c_str() : "(none)",
@@ -1229,7 +1248,7 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     }
 
     const uint8_t* bucketKey = nullptr;
-    if (!isRegistrationImage) {
+    if (!isPlaintextImage) {
         for (int i = 0; i < run.bucketKeyCount; i++) {
             if (responseBucketId == run.bucketKeys[i].bucketId && responseKeyVersion == run.bucketKeys[i].keyVersion) {
                 bucketKey = run.bucketKeys[i].key;
@@ -1247,7 +1266,7 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     int contentLength = http.getSize();
     int cipherLen = contentLength - 12 /* nonce */ - 16 /* tag */;
     bool contentLengthOk;
-    if (isRegistrationImage) {
+    if (isPlaintextImage) {
         // No nonce/tag envelope on this one - the body is the raw packed
         // buffer, exactly bufferSize bytes.
         contentLengthOk = contentLength == (int)display.getBufferSize();
@@ -1291,24 +1310,24 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     uint32_t startTime = millis();
 
     uint8_t nonce[12];
-    // The registration screen has no nonce/tag envelope at all (see
-    // isRegistrationImage above) - nothing to read or set up a GCM key for.
-    bool ok = isRegistrationImage || readExactlyFromStream(stream, http, nonce, sizeof(nonce), IMAGE_STALL_TIMEOUT_MS);
+    // Plaintext responses (see isPlaintextImage above) have no nonce/tag
+    // envelope at all - nothing to read or set up a GCM key for.
+    bool ok = isPlaintextImage || readExactlyFromStream(stream, http, nonce, sizeof(nonce), IMAGE_STALL_TIMEOUT_MS);
 
     mbedtls_gcm_context gcmCtx;
     mbedtls_gcm_init(&gcmCtx);
     int gcmRc = 0;
-    if (!isRegistrationImage) {
+    if (!isPlaintextImage) {
         gcmRc = ok ? mbedtls_gcm_setkey(&gcmCtx, MBEDTLS_CIPHER_ID_AES, bucketKey, 256) : -1;
         ok = ok && gcmRc == 0;
     }
 
-    size_t bodyBytesRead = 0;   // "identity"/registration: raw bytes read into imageBuffer
+    size_t bodyBytesRead = 0;   // "identity"/plaintext: raw bytes read into imageBuffer
     size_t plaintextWritten = 0;  // "deflate-raw": plaintext bytes decryptChunksInflate() produced
-    if (ok && (isRegistrationImage || !useDeflate)) {
+    if (ok && (isPlaintextImage || !useDeflate)) {
         // Unchanged from before this feature existed: read exactly bufferSize
         // bytes straight into imageBuffer - ciphertext to be decrypted in
-        // place below, or (isRegistrationImage) already-plaintext bytes.
+        // place below, or (isPlaintextImage) already-plaintext bytes.
         uint32_t lastDataTime = millis();
         while (bodyBytesRead < bufferSize && http.connected()) {
             size_t available = stream->available();
@@ -1345,12 +1364,12 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     }
 
     uint8_t tag[16];
-    if (ok && !isRegistrationImage) ok = readExactlyFromStream(stream, http, tag, sizeof(tag), IMAGE_STALL_TIMEOUT_MS);
+    if (ok && !isPlaintextImage) ok = readExactlyFromStream(stream, http, tag, sizeof(tag), IMAGE_STALL_TIMEOUT_MS);
 
     http.end();
 
     Serial.printf("Downloaded %d bytes in %lu ms\n",
-                  isRegistrationImage ? (int)bodyBytesRead
+                  isPlaintextImage ? (int)bodyBytesRead
                                       : (int)(sizeof(nonce) + (useDeflate ? (size_t)cipherLen : bodyBytesRead) + sizeof(tag)),
                   millis() - startTime);
 
@@ -1366,7 +1385,7 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
         return ImageFetchResult::FAILED;
     }
 
-    if (isRegistrationImage) {
+    if (isPlaintextImage) {
         // Already plaintext - imageBuffer holds the real bytes as downloaded,
         // nothing to authenticate or decrypt.
     } else if (!useDeflate) {
@@ -1428,6 +1447,14 @@ inline void enterDeepSleep(uint32_t sleepSeconds) {
     esp_deep_sleep_start();
 }
 
+// runNormalMode()'s outcome: SLEEPING covers every path that already put the
+// device into deep sleep (or, for a firmware OTA, already rebooted) - the
+// normal case on real hardware, which never returns from either. NEEDS_
+// PROVISIONING is the one path that deliberately skips deep sleep: the caller
+// (each board's own main.cpp) must call its own runConfigMode() instead - see
+// that function's own "never returns" comment.
+enum class NormalModeResult { SLEEPING, NEEDS_PROVISIONING };
+
 /**
  * The full normal-operation wake cycle: WiFi, device_config/time sync, OTA
  * check, quiet-hours check, image fetch/display, sleep. Each board's own
@@ -1436,7 +1463,7 @@ inline void enterDeepSleep(uint32_t sleepSeconds) {
  * showConfigModeScreen() in each board's main.cpp).
  */
 template <typename DisplayT>
-void runNormalMode(DisplayT& display, ConfigManager& configManager, OtaHealth& otaHealth, RtcState& rtc, RunState& run) {
+NormalModeResult runNormalMode(DisplayT& display, ConfigManager& configManager, OtaHealth& otaHealth, RtcState& rtc, RunState& run) {
     Serial.println("\n========================================");
     Serial.println("NORMAL OPERATION MODE");
     Serial.println("========================================\n");
@@ -1448,11 +1475,33 @@ void runNormalMode(DisplayT& display, ConfigManager& configManager, OtaHealth& o
         Serial.println("WiFi connection failed!");
         disconnectWiFi();
         enterDeepSleep(calculateSleepSeconds(configManager));
-        return;
+        return NormalModeResult::SLEEPING;
     }
 
     bool remoteConfigSynced = syncRemoteConfigAndTime(configManager, run);
     printClockStatus(configManager);
+
+    if (configManager.getConsecutiveAuthFailures() >= AUTH_FAILURE_CONFIG_MODE_THRESHOLD) {
+        // The server has explicitly rejected our signature AUTH_FAILURE_CONFIG_MODE_THRESHOLD
+        // times in a row - it has a different secret on file for this MAC than we
+        // do (e.g. NVS was wiped/regenerated after this device was already
+        // claimed). Retrying on a timer forever would just keep 401ing with the
+        // display frozen on whatever it last showed - fall back into config mode
+        // instead so this is visible and actionable.
+        Serial.printf("Server rejected our device signature %lu times in a row - "
+                       "falling back to config mode for re-registration.\n",
+                       static_cast<unsigned long>(configManager.getConsecutiveAuthFailures()));
+        configManager.clearAuthFailures();
+        // Clearing this makes BLEProvisioning::refreshInfoCharacteristic() include
+        // our current secret again (it's normally withheld once "registered" - see
+        // ConfigManager::getDeviceRegistered()'s doc comment) so /provision's
+        // "Register device" button re-sends it and the server updates its
+        // stale copy - without this, re-registering over BLE would silently
+        // succeed without actually fixing the mismatch.
+        configManager.setDeviceRegistered(false);
+        disconnectWiFi();
+        return NormalModeResult::NEEDS_PROVISIONING;
+    }
 
     if (remoteConfigSynced) {
         // A successful authenticated round trip is our proof this firmware actually
@@ -1487,7 +1536,7 @@ void runNormalMode(DisplayT& display, ConfigManager& configManager, OtaHealth& o
         Serial.println("Currently in quiet hours - skipping image fetch");
         disconnectWiFi();
         enterDeepSleep(calculateSleepSeconds(configManager));
-        return;
+        return NormalModeResult::SLEEPING;
     }
 
     switch (fetchAndDisplayImage(display, configManager, rtc, run)) {
@@ -1503,6 +1552,7 @@ void runNormalMode(DisplayT& display, ConfigManager& configManager, OtaHealth& o
 
     disconnectWiFi();
     enterDeepSleep(calculateSleepSeconds(configManager));
+    return NormalModeResult::SLEEPING;
 }
 
 } // namespace DeviceApp

@@ -161,7 +161,11 @@ void setup() {
         // runConfigMode never returns
     }
 
-    DeviceApp::runNormalMode(display, configManager, otaHealth, rtcState, runState);
+    if (DeviceApp::runNormalMode(display, configManager, otaHealth, rtcState, runState) ==
+        DeviceApp::NormalModeResult::NEEDS_PROVISIONING) {
+        runConfigMode();
+        // runConfigMode never returns
+    }
 }
 
 void loop() {

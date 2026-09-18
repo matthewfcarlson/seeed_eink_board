@@ -182,11 +182,15 @@ function readPrfOutput(credential: any): ArrayBuffer | undefined {
 }
 
 /** Called once, right after a successful registration ceremony: generates
- *  this account's sharing keypair and, if this ceremony's authenticator
- *  supports PRF, wraps the private key for upload alongside the registration
- *  verify call. Otherwise the keypair is stashed in this browser's IndexedDB
- *  only (see keystore.ts) — sharing_public_key stays null server-side until a
- *  later login backfills it (see completeLoginSharingKey below), so this
+ *  this account's sharing keypair and always caches it in this browser's
+ *  IndexedDB (see keystore.ts) so a later plain page reload — resumed via
+ *  the cached API key alone, with no fresh WebAuthn ceremony — can restore it
+ *  (see tryLogin()) instead of leaving the user locked out of their own
+ *  buckets until they re-run a full passkey prompt. If this ceremony's
+ *  authenticator also supports PRF, the key is additionally wrapped for
+ *  upload alongside the registration verify call, so OTHER browsers can
+ *  recover it too; otherwise sharing_public_key stays null server-side until
+ *  a later login backfills it (see completeLoginSharingKey below), so this
  *  account can't yet be shared *into* buckets by others from this state.
  *  Populates the module-level sharingPrivateKey/sharingPublicKeyRaw either way. */
 async function completeRegistrationSharingKey(
@@ -196,12 +200,10 @@ async function completeRegistrationSharingKey(
   sharingPrivateKey = keyPair.privateKey;
   sharingPublicKeyRaw = await exportPublicKeyRaw(keyPair.publicKey);
   const privateKeyPkcs8 = await exportPrivateKeyPkcs8(keyPair.privateKey);
+  await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
 
   const prfOutput = readPrfOutput(credential);
-  if (!prfOutput) {
-    await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
-    return {};
-  }
+  if (!prfOutput) return {};
   const kek = await deriveKekFromPrf(prfOutput);
   const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, privateKeyPkcs8);
   return { sharing_public_key: toBase64(sharingPublicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce };
@@ -213,7 +215,16 @@ async function completeRegistrationSharingKey(
  *  keypair from whichever source is available, and returns fields to
  *  backfill server-side only when that's newly possible this time (see
  *  routes/auth-passkey.ts's IS NULL guards — sending these when a wrap
- *  already exists is harmless, just redundant). */
+ *  already exists is harmless, just redundant).
+ *
+ *  Every recovery path here also caches the raw key in this browser's
+ *  IndexedDB (see keystore.ts), even the PRF-success one below — previously
+ *  that path left it purely in memory, which meant a plain page reload
+ *  (tryLogin resuming from the cached API key, no fresh WebAuthn ceremony)
+ *  had nothing to restore and re-locked every bucket until the user ran a
+ *  full passkey prompt again, EVERY reload. Caching it here means that only
+ *  has to happen once per browser (or after this browser's site data is
+ *  cleared), matching ordinary "stay logged in" expectations. */
 async function completeLoginSharingKey(
   credential: any,
   loginResult: any
@@ -225,6 +236,7 @@ async function completeLoginSharingKey(
     const privateKeyPkcs8 = await aesGcmDecryptFromStrings(kek, loginResult.wrap_nonce, loginResult.wrapped_sharing_key);
     sharingPrivateKey = await importPrivateKeyPkcs8(privateKeyPkcs8);
     sharingPublicKeyRaw = fromBase64(loginResult.sharing_public_key);
+    await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
     return {};
   }
 
@@ -272,12 +284,12 @@ async function completeLoginSharingKey(
   sharingPrivateKey = keyPair.privateKey;
   sharingPublicKeyRaw = await exportPublicKeyRaw(keyPair.publicKey);
   const privateKeyPkcs8 = await exportPrivateKeyPkcs8(keyPair.privateKey);
+  await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
   if (prfOutput) {
     const kek = await deriveKekFromPrf(prfOutput);
     const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, privateKeyPkcs8);
     return { sharing_public_key: toBase64(sharingPublicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce };
   }
-  await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
   return {};
 }
 

@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include "stubs/Arduino.h"
 #include "stubs/RebootSignal.h"
@@ -164,6 +165,20 @@ int main(int argc, char **argv) {
     printf("  Talking to: %s\n", serverUrl.c_str());
     printf("  Provision:  %s/provision?sim=http://localhost:%d\n", serverUrl.c_str(), SIM_GATT_PORT);
     printf("  Space in the display window wakes early; closing it quits.\n\n");
+
+    if (!DisplayRender::isExportMode()) {
+        // Open the window right away, blank/white, rather than leaving the
+        // user staring at nothing until the first setup() cycle (WiFi
+        // connect, provisioning/config sync, image fetch) finishes -
+        // display.getBuffer() is null until display.begin() runs inside that
+        // cycle, so paint a synthesized all-white buffer instead of the real
+        // one. getBufferSize() is a compile-time constant per board, safe to
+        // call before begin(). Skipped in export mode, which expects exactly
+        // one frame written per boot cycle - an extra blank frame here would
+        // shift that numbering.
+        std::vector<uint8_t> blank(display.getBufferSize(), 0x11);  // 0x11 = two white pixels
+        DisplayRender::present(blank.data(), blank.size(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    }
 
     while (true) {
         g_sleep_us = 0;

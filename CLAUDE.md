@@ -277,6 +277,22 @@ normally-authenticated call — not a field on `/auth/login/verify` itself,
 because that ceremony's challenge is single-use and already consumed by the
 time the client can decide a backfill is needed.
 
+**This same IndexedDB cache is now also written on every successful PRF-based
+recovery, not just the no-PRF fallback path.** `/admin/me` sessions resume
+from a plain cached API key (`tryLogin()`) with no fresh WebAuthn ceremony,
+and a passkey biometric prompt only fires as part of that ceremony — so
+before this, a PRF-capable account's sharing key lived in JS memory only and
+was lost on every page reload, forcing a fresh passkey prompt each time
+(`admin.ts`'s `completeLoginSharingKey()`/`completeRegistrationSharingKey()`
+now call `localKeystoreSet()` unconditionally on every successful recovery,
+not only when `!prfOutput`). The tradeoff this accepts: the raw sharing
+private key now sits in IndexedDB for every account, not just no-PRF ones —
+anyone with read access to that browser's local storage (not just its live,
+unlocked session) can now derive every bucket key this account holds,
+without ever touching the passkey again. Same per-browser, best-effort
+storage caveats as before (private browsing, cleared site data, blocked
+storage all just mean "no local key, ceremony required again").
+
 **A synced passkey (iCloud Keychain, Google Password Manager, etc.) used from
 a second browser recovers the same sharing key there too**, since PRF output
 is deterministic from the credential's own key material — the same thing

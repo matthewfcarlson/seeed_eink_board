@@ -35,6 +35,14 @@
 #define MAX_HOST_LENGTH 128
 #define MAX_ENDPOINT_LENGTH 64
 
+// After this many consecutive HTTP 401s from /device_config (the server
+// explicitly rejecting our signature - a stale/regenerated secret, not a
+// network hiccup), runNormalMode() gives up on normal operation for this
+// wake cycle and falls back into config mode instead - see device_app.h's
+// use of getConsecutiveAuthFailures(). Same shape as ota_health.h's
+// OTA_MAX_UNCONFIRMED_BOOT_ATTEMPTS.
+#define AUTH_FAILURE_CONFIG_MODE_THRESHOLD 3
+
 class ConfigManager {
 public:
     ConfigManager();
@@ -109,6 +117,13 @@ public:
     bool getDeviceRegistered();
     void setDeviceRegistered(bool registered);
 
+    // Consecutive HTTP 401s from /device_config - see AUTH_FAILURE_CONFIG_MODE_THRESHOLD
+    // above. NVS-persisted (not RTC memory) so a genuinely wrong secret keeps
+    // being noticed across a full power cycle, not just deep sleep.
+    uint32_t getConsecutiveAuthFailures();
+    void recordAuthFailure();
+    void clearAuthFailures();
+
     // This device's own P-256 keypair for encrypted-bucket key-wrapping (see
     // root CLAUDE.md's encrypted-buckets plan and device_app.h's
     // ensureSharingKeyPair()/unwrapBucketKey()). Generated once and never
@@ -140,6 +155,7 @@ private:
     int16_t timezoneOffsetMinutes_;
     String deviceSecret_;
     bool deviceRegistered_;
+    uint32_t authFailureCount_;
     uint32_t requestNonce_;
     String sharingPrivateKeyHex_;
     String sharingPublicKeyBase64_;

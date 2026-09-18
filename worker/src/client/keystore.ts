@@ -1,16 +1,18 @@
 /**
- * Browser-local (IndexedDB) fallback storage for a user's sharing keypair,
- * used only when this authenticator never returns a usable WebAuthn PRF
- * result — see admin.ts's login/register handlers and root CLAUDE.md's
- * encrypted-buckets plan. When PRF *is* available, the sharing key is instead
- * recovered fresh on every login from the server's PRF-wrapped copy and never
- * needs to touch local storage at all.
+ * Browser-local (IndexedDB) cache of a user's recovered sharing keypair — see
+ * admin.ts's login/register handlers and root CLAUDE.md's encrypted-buckets
+ * plan. Written every time the key is successfully recovered by any means
+ * (a fresh PRF-based login, a first registration, or a prior read of this
+ * same cache), so a later plain page reload — tryLogin() resuming from the
+ * cached API key alone, with no fresh WebAuthn ceremony — has something to
+ * restore from without re-prompting for a passkey every single time. Without
+ * this, only the no-PRF-authenticator case had anything to restore, and
+ * every other reload silently re-locked every bucket.
  *
  * This is deliberately per-browser, best-effort storage: it can come back
  * empty (private browsing, cleared site data) or throw (blocked storage), and
  * every caller here degrades to "no local key" rather than surfacing that as
- * an error — losing it just means falling back to generating a fresh keypair,
- * same as a brand-new browser would.
+ * an error.
  */
 
 const DB_NAME = "eink-sharing-key";

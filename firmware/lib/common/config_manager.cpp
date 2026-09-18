@@ -15,6 +15,7 @@ static const char* KEY_ACTIVE_END = "active_end";
 static const char* KEY_TZ_OFFSET = "tz_offset";
 static const char* KEY_DEVICE_SECRET = "dev_secret";
 static const char* KEY_DEVICE_REGISTERED = "dev_reg";
+static const char* KEY_AUTH_FAILURES = "auth_fails";
 static const char* KEY_REQUEST_NONCE = "req_nonce";
 static const char* KEY_SHARING_PRIV = "share_priv";
 static const char* KEY_SHARING_PUB = "share_pub";
@@ -32,6 +33,7 @@ ConfigManager::ConfigManager()
       timezoneOffsetMinutes_(DEFAULT_TIMEZONE_OFFSET_MINUTES),
       deviceSecret_(""),
       deviceRegistered_(false),
+      authFailureCount_(0),
       requestNonce_(0),
       sharingPrivateKeyHex_(""),
       sharingPublicKeyBase64_("") {
@@ -59,6 +61,7 @@ void ConfigManager::loadFromNVS() {
     timezoneOffsetMinutes_ = prefs_.getShort(KEY_TZ_OFFSET, DEFAULT_TIMEZONE_OFFSET_MINUTES);
     deviceSecret_ = prefs_.getString(KEY_DEVICE_SECRET, "");
     deviceRegistered_ = prefs_.getBool(KEY_DEVICE_REGISTERED, false);
+    authFailureCount_ = prefs_.getUInt(KEY_AUTH_FAILURES, 0);
     requestNonce_ = prefs_.getUInt(KEY_REQUEST_NONCE, 0);
     sharingPrivateKeyHex_ = prefs_.getString(KEY_SHARING_PRIV, "");
     sharingPublicKeyBase64_ = prefs_.getString(KEY_SHARING_PUB, "");
@@ -299,6 +302,25 @@ void ConfigManager::setDeviceRegistered(bool registered) {
     prefs_.putBool(KEY_DEVICE_REGISTERED, registered);
     prefs_.end();
     Serial.printf("ConfigManager: Device registered = %s\n", registered ? "true" : "false");
+}
+
+uint32_t ConfigManager::getConsecutiveAuthFailures() {
+    return authFailureCount_;
+}
+
+void ConfigManager::recordAuthFailure() {
+    authFailureCount_++;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putUInt(KEY_AUTH_FAILURES, authFailureCount_);
+    prefs_.end();
+}
+
+void ConfigManager::clearAuthFailures() {
+    if (authFailureCount_ == 0) return;
+    authFailureCount_ = 0;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putUInt(KEY_AUTH_FAILURES, 0);
+    prefs_.end();
 }
 
 uint32_t ConfigManager::nextNonce() {
