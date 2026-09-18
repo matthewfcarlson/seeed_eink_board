@@ -6,7 +6,7 @@
     "build:client": "node scripts/build-client.mjs",
     "predev": "wrangler d1 migrations apply eink-local --local --env local && npm run build:client",
     "dev": "wrangler dev --env local",
-    "predeploy": "npm run build:client",
+    "predeploy": "npm run build:client && node scripts/record-dist-hashes.mjs",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p src/client/tsconfig.json",
     "test": "vitest run",

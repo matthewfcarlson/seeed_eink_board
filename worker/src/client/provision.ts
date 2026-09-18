@@ -113,7 +113,23 @@ function applyInfo(info: any) {
   el("register-card").style.display = currentDeviceMac ? "block" : "none";
   renderRegisterSection();
 
-  el<HTMLInputElement>("wifi-ssid").value = info.wifi_ssid || "";
+  // The simulator's WiFi stub ignores whatever credentials are stored and
+  // always reports connected (see firmware/simulator/stubs/WiFi.h) - these
+  // fields don't do anything there, so grey them out and stand in a fixed,
+  // self-documenting value rather than showing a real-looking empty/blank
+  // network name that suggests filling one in is necessary. Re-applied every
+  // time (not just on first connect) since applyInfo() re-fires on every
+  // INFO notification, e.g. right after a save.
+  const wifiSsidInput = el<HTMLInputElement>("wifi-ssid");
+  const wifiPasswordInput = el<HTMLInputElement>("wifi-password");
+  const wifiSelect = el<HTMLSelectElement>("wifi-ssid-select");
+  const scanBtn = el<HTMLButtonElement>("scan-btn");
+  el("wifi-sim-hint").style.display = simOrigin ? "block" : "none";
+  wifiSsidInput.disabled = !!simOrigin;
+  wifiPasswordInput.disabled = !!simOrigin;
+  wifiSelect.disabled = !!simOrigin;
+  scanBtn.disabled = !!simOrigin;
+  wifiSsidInput.value = simOrigin ? "simulator" : (info.wifi_ssid || "");
   el<HTMLInputElement>("host").value = info.host || "";
   el<HTMLInputElement>("port").value = info.port || "";
   el<HTMLInputElement>("use_https").checked = !!info.use_https;

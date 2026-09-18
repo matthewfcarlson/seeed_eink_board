@@ -12,6 +12,19 @@
 #define SIM_STATE_DIR "default"
 #endif
 
+// The directory name actually used on disk (".state/<this>/<namespace>.txt")
+// - set once by main_native.cpp's boardStateDir(), before any Preferences
+// use, to SIM_STATE_DIR plus a suffix unique to this build (its own Mach-O
+// UUID - see stubs/WiFi.h's SimMac::buildIdentityHex()). That's what keeps
+// two instances of the same board from ever sharing a directory: every
+// `make run-<board>` relinks first, and a relink gets a new UUID even for
+// unchanged source, so a rebuild naturally lands on a brand new, empty
+// directory instead of reusing (and colliding with, if an earlier instance
+// is still running) the previous one. Defaults to the bare per-board literal
+// so anything that (implausibly) touches Preferences before main() sets this
+// still lands somewhere sane rather than an empty path.
+inline std::string g_simStateDir = SIM_STATE_DIR;
+
 // Real ESP32 NVS survives both deep sleep AND a full power cycle. Unlike
 // epaper_clock's Preferences stub (memory-only - fine there, since its one
 // pre-seeded config line costs nothing to redo), ours needs the same
@@ -20,8 +33,7 @@
 // Worker) if you had to reprovision on every single `./sim-<board>` run. So
 // each namespace ("eink_config", "ota_health" - see config_manager.cpp /
 // ota_health.cpp) is backed by a small text file under
-// .state/<SIM_STATE_DIR>/<namespace>.txt (SIM_STATE_DIR is a per-board
-// Makefile define, so ee02 and ee04 runs never share state). Not real JSON -
+// .state/<g_simStateDir>/<namespace>.txt. Not real JSON -
 // just "key\tvalue" lines - this is internal-only state, not a wire format.
 // config_manager.cpp's ConfigManager holds one Preferences instance for its
 // whole lifetime, reused across begin()/end() pairs. In the simulator that
@@ -105,7 +117,7 @@ private:
     }
 
     std::string filePath() const {
-        return std::string(".state/") + SIM_STATE_DIR + "/" + ns_ + ".txt";
+        return std::string(".state/") + g_simStateDir + "/" + ns_ + ".txt";
     }
 
     void load() {
@@ -125,7 +137,7 @@ private:
 
     void save() const {
         mkdir(".state", 0755);
-        mkdir((std::string(".state/") + SIM_STATE_DIR).c_str(), 0755);
+        mkdir((std::string(".state/") + g_simStateDir).c_str(), 0755);
         FILE *f = fopen(filePath().c_str(), "w");
         if (!f) return;
         for (auto &kv : store_) fprintf(f, "%s\t%s\n", kv.first.c_str(), kv.second.c_str());

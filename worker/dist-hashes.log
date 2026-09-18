@@ -1,0 +1,20 @@
+# Code-integrity transparency log. For a real deploy (Cloudflare Workers
+# Builds, git-connected — pushing to the connected branch triggers a build in
+# Cloudflare's own ephemeral container), Cloudflare's retained per-deployment
+# build log is the actual record of truth: this script prints a clearly
+# labeled "INTEGRITY-RECORD ..." line to stdout during that build, which
+# Cloudflare keeps immutably tied to the commit that triggered it. This file
+# only accumulates entries from a local/manual `npm run deploy` (e.g. testing
+# against a personal account) — see scripts/record-dist-hashes.mjs for why an
+# entry written here inside Workers Builds' own ephemeral container wouldn't
+# survive it anyway. See root CLAUDE.md's "Encrypted Image Buckets" section
+# for what this whole mechanism does and doesn't defend against: it doesn't
+# prevent a maliciously modified deploy, only makes one provable after the
+# fact — a served bundle whose hash doesn't match what a clean checkout of
+# its claimed commit rebuilds to is a contradiction anyone can catch.
+#
+# To audit an entry: `git checkout <commit>`, `npm run build:client` inside
+# worker/, then compare the resulting public/static/*.js hashes against the
+# entry's. A `-dirty` suffix on the commit means the working tree had
+# uncommitted changes at record time — unreproducible from any single
+# commit, so treat that entry as unverifiable, not trusted.

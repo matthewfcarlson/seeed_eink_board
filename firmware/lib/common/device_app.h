@@ -904,8 +904,15 @@ inline bool syncRemoteConfigAndTime(ConfigManager& configManager, RunState& run)
     return true;
 }
 
-inline void printWakeupReason() {
+// A plain timer wakeup is the routine case on every normal-mode cycle - not
+// worth a line every few minutes forever. Only prints it when firstBoot is
+// true, or the cause is something other than the routine timer (cold boot,
+// external/button signal) - both already-notable, non-routine situations.
+inline void printWakeupReason(bool firstBoot) {
     esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
+    if (!firstBoot && wakeupReason == ESP_SLEEP_WAKEUP_TIMER) {
+        return;
+    }
     switch (wakeupReason) {
         case ESP_SLEEP_WAKEUP_TIMER:
             Serial.println("Wakeup caused by timer");

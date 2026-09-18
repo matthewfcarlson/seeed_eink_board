@@ -17,6 +17,7 @@ SDL_Renderer *g_renderer = nullptr;
 SDL_Texture *g_texture = nullptr;
 int g_texW = 0;
 int g_texH = 0;
+std::string g_windowTitle = "E-Ink Device Simulator";
 
 // Export mode (see setExportPath()) - numbered-JPEG scheme ported from
 // ~/git/epaper_clock/simulator/EPaperSim.h.
@@ -54,7 +55,7 @@ void ensureWindow(int width, int height) {
         // Resizable: SDL_RenderSetLogicalSize below locks the content to the
         // buffer's own aspect ratio and letterboxes to fit whatever size the
         // user drags the window to, rather than stretching it.
-        g_window = SDL_CreateWindow("E-Ink Device Simulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        g_window = SDL_CreateWindow(g_windowTitle.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                      width, height, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
         g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
     } else {
@@ -91,6 +92,11 @@ void setExportPath(const char *path) {
 }
 
 bool isExportMode() { return !g_exportStem.empty(); }
+
+void setWindowTitle(const char *title) {
+    g_windowTitle = title;
+    if (g_window) SDL_SetWindowTitle(g_window, g_windowTitle.c_str());
+}
 
 void present(const uint8_t *buffer, size_t bufferSize, int width, int height) {
     if (!buffer || width <= 0 || height <= 0) return;

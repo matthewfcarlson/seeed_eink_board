@@ -86,6 +86,8 @@ npm run deploy
 
 `npm run deploy` prints your Worker's URL (`https://<name>.<subdomain>.workers.dev`, or your own custom domain if you've attached one). Note it — you'll need it during device provisioning.
 
+`npm run deploy` also prints a code-integrity record (an `INTEGRITY-RECORD ...` line: this deploy's git commit and the SHA-256 of the client bundles it just built — see root `CLAUDE.md`'s "Encrypted Image Buckets" section) and appends it to `worker/dist-hashes.log`. If you're deploying manually like this, **commit and push that file afterward** — an uncommitted log entry isn't part of the record it exists to provide. If instead you've connected this repo to Cloudflare Workers Builds for git-triggered deploys, that manual step doesn't apply: Cloudflare's own retained build log for each deployment (which prints this same line) is the actual record, immutably tied to the commit that triggered it — nothing to remember to commit.
+
 **Note:** `/admin/images/upload` does server-side image decoding and dithering, which is CPU-heavy enough that it needs the higher `cpu_ms` limit set in `wrangler.toml` — that only works on a paid Workers plan, not the free tier.
 
 **Optional:** for automatic OTA firmware cataloging from GitHub releases, set a `GITHUB_TOKEN` secret:

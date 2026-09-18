@@ -51,9 +51,15 @@ else
 endif
 
 # BOARD_MAIN_CPP: which real board main.cpp main_native.cpp #includes.
-# SIM_STATE_DIR: per-board subdirectory under .state/ (stubs/Preferences.h) -
-# keeps ee02 and ee04 runs from sharing WiFi/secret/registration state.
-# SIM_DEVICE_MAC_HEX: this simulated device's fixed MAC (stubs/WiFi.h).
+# SIM_STATE_DIR: per-board prefix for the actual on-disk state directory,
+# .state/<SIM_STATE_DIR>-<build-uuid>/ (main_native.cpp's boardStateDir(),
+# stubs/Preferences.h) - keeps ee02 and ee04 runs from ever sharing WiFi/
+# secret/registration state, and (via the build-uuid suffix) keeps two
+# instances of the SAME board from colliding either - see main_native.cpp's
+# boardStateDir() doc comment.
+# SIM_DEVICE_MAC_HEX: last-resort fallback MAC if stubs/WiFi.h's normal
+# Mach-O-UUID-derived MAC (SimMac::buildMacAddress(), recomputed fresh each
+# run - not persisted to disk) can't be computed for some reason.
 BOARD_DEFINES = -DBOARD_MAIN_CPP='"$(BOARD_MAIN)"' \
                 -DSIM_STATE_DIR='"$(BOARD)"' \
                 -DSIM_DEVICE_MAC_HEX='"$(SIM_MAC)"'

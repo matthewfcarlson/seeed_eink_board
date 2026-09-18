@@ -52,7 +52,20 @@ inline unsigned long micros() {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (unsigned long)(ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
 }
-inline void delay(unsigned long ms)      { usleep((useconds_t)(ms * 1000)); }
+// Defined in main_native.cpp, once the board's `display` global (and
+// DISPLAY_WIDTH/HEIGHT) exist there - called on every delay() so the SDL
+// preview window stays live even from deep inside a loop that never returns
+// to main()'s own render call, e.g. runConfigMode()'s BLE loop (see that
+// function's own "never returns" comment). Without this, a freshly-booted
+// device sitting in config mode leaves the window frozen on whatever was
+// last presented (main()'s one-shot "BOOTING..." placeholder) forever,
+// instead of showing the real config-mode banner and MAC address.
+extern void simPumpDisplay();
+
+inline void delay(unsigned long ms) {
+    usleep((useconds_t)(ms * 1000));
+    simPumpDisplay();
+}
 inline void delayMicroseconds(unsigned int us) { usleep(us); }
 inline void yield() {}
 

@@ -80,6 +80,7 @@ export function renderProvisionPage(): string {
 </div>
 
 <div class="card" id="form">
+  <div id="wifi-sim-hint" class="hint hint-block" style="display:none;">This is a simulated device &mdash; WiFi is stubbed out and always reports connected, so these fields are disabled and ignored.</div>
   <div class="row">
     <label>WiFi Network</label>
     <div class="inline-form">

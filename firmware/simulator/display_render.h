@@ -27,6 +27,13 @@ namespace DisplayRender {
 void setExportPath(const char *path);
 bool isExportMode();
 
+// Sets the SDL window's title - call before the first present() (which
+// creates the window on its first call). Lets main_native.cpp identify which
+// simulated device a given window belongs to (board + MAC) when more than
+// one is running at once, since they're otherwise indistinguishable windows.
+// No effect in export mode (no window exists there).
+void setWindowTitle(const char *title);
+
 // Buffer packing matches worker/src/lib/dither.ts's packToNibbles() / each
 // board's display.cpp setPixel(): row-major, high nibble = even pixel index,
 // low nibble = odd pixel index. Opens the window on first call (skipped

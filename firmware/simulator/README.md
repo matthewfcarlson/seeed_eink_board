@@ -48,9 +48,22 @@ These don't take extra arguments — for `--server`/`--reset`/`--export` (see
 "Flags" below), build once via `npm run build:ee02` then run the binary
 directly: `./sim-ee02 --export snapshot.jpg`.
 
-Each board has its own binary, its own persisted state (`.state/ee02/` /
-`.state/ee04/`), and its own fixed simulated MAC, so both can run against
-the same local Worker simultaneously without colliding.
+Each board has its own binary, its own persisted state, and its own
+simulated MAC, so both can run against the same local Worker simultaneously
+without colliding. Both the MAC and the state directory are derived from
+the running binary's own Mach-O LC_UUID (locally-administered MAC,
+`02:...`; state directory `.state/<board>-<uuid>/`) — a fresh value on
+every rebuild, even of unchanged source, standing in for swapping in a
+distinct physical unit rather than reflashing the same one. That's also
+what keeps two instances of the *same* board from colliding: every
+`make run-<board>` relinks first, so rebuilding-and-rerunning while an
+earlier instance of that board is still alive lands the new one on its own
+fresh, empty directory instead of the live one's. As a second layer against
+the one case that can't rule out on its own — two instances of the exact
+same already-built binary launched at once, with no rebuild in between —
+each instance takes an exclusive lock on its state directory at startup;
+a second one that can't get the lock refuses to start with an explanatory
+message instead of racing the first over the same NVS files.
 
 On first run (or after `--reset`) there's no WiFi configured, so it boots
 straight into config mode — same as real hardware — and prints a
@@ -79,8 +92,9 @@ code with.
            (a local wrangler dev instance). Applied every run, overriding
            whatever was previously saved — config_manager.h's own compiled-in
            default points at production, which this must never hit by accident.
---reset    Wipe this board's persisted state (.state/<board>/) - like a
-           fresh, unprovisioned flash.
+--reset    Wipe this build's persisted state (.state/<board>-<uuid>/) - like
+           a fresh, unprovisioned flash. Only ever this exact binary's own
+           directory, never a sibling instance's (see above).
 --export   Headless mode: run exactly one boot cycle, save whatever the
            display buffer holds afterward as a numbered JPEG
            (<path-without-ext>_01.jpg, matching
@@ -102,8 +116,8 @@ code with.
 ```
 
 `make BOARD=ee04` builds the other board the same way; each has its own
-persisted state and fixed simulated MAC, so `./sim-ee02` and `./sim-ee04` can
-run at once against the same local wrangler instance.
+persisted state and simulated MAC (see above), so `./sim-ee02` and
+`./sim-ee04` can run at once against the same local wrangler instance.
 
 ## Native pipeline tests
 

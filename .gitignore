@@ -18,6 +18,10 @@ worker/.dev.vars
 worker/public/static/*.js
 worker/public/static/*.js.map
 
+# Generated at deploy time (see worker/scripts/record-dist-hashes.mjs) —
+# the durable, auditable record is worker/dist-hashes.log, which IS tracked.
+worker/public/static/build-info.json
+
 # IDE/editor files
 .vscode/
 .idea/

@@ -158,6 +158,16 @@ void BLEProvisioning::loop() {
     }
     if (rebootPending_ && millis() >= rebootAtMs_) {
         Serial.println("BLEProvisioning: Rebooting into normal mode...");
+        // Tear BLE down before restarting rather than leaving it to the
+        // reboot itself: on real hardware ESP.restart() is a full reset that
+        // takes the radio with it regardless, but the simulator's "reboot"
+        // (see firmware/simulator/stubs/RebootSignal.h) just unwinds back to
+        // setup() in the same long-lived process - so without this, its
+        // NimBLE/GattBridge stub stays initialized and reachable at
+        // localhost:8790 for the rest of the run, letting a still-open
+        // /provision browser tab keep sending it writes long after the
+        // device has moved on to normal operation.
+        stop();
         ESP.restart();
     }
 }

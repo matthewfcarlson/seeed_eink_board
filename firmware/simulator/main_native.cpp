@@ -9,14 +9,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <pthread.h>
 #include <string>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
-#include <vector>
 
 #include "stubs/Arduino.h"
 #include "stubs/RebootSignal.h"
+#include "stubs/WiFi.h"
 #include "stubs/esp_sleep.h"
 #include "display_render.h"
 #include "gatt_bridge.h"
@@ -78,6 +81,53 @@ static void renderCurrentBuffer() {
     DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
 
+// stubs/Arduino.h's delay() calls this on every invocation - the only way a
+// long-running loop that never returns to main()'s own renderCurrentBuffer()
+// call (chiefly runConfigMode()'s BLE loop, but this also just generally
+// keeps the window responsive during any other multi-second stretch, like a
+// WiFi retry) still shows what's actually in the buffer instead of leaving
+// the window frozen on whatever was last presented. Throttled to ~10Hz since
+// present() repacks the whole buffer to RGB every call - cheap for the
+// common case (a single millis() comparison) even though delay() itself is
+// called very frequently (e.g. every 10ms inside the BLE loop, or a handful
+// of times per waitUntilIdle() spin during a real display refresh).
+void simPumpDisplay() {
+    // No SDL window/event queue exists in export mode - present() would just
+    // write a new numbered JPEG on every throttled tick for as long as the
+    // device sits in a loop like config mode, and pollWakeOrQuit() explicitly
+    // isn't safe to call at all then (see its own doc comment). Export mode
+    // already gets one clean frame from main()'s own renderCurrentBuffer()
+    // call after the first setup() cycle returns (or, for a device that
+    // boots into config mode, none at all yet - a separate, narrower gap
+    // than this fix, since export mode's whole point is one boot then exit).
+    if (DisplayRender::isExportMode()) return;
+
+    static unsigned long lastPumpMs = 0;
+    unsigned long now = millis();
+    if (now - lastPumpMs < 100) return;
+    lastPumpMs = now;
+
+    if (display.getBuffer() != nullptr) {
+        DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    }
+
+    // Also keeps the window responsive (macOS otherwise flags an SDL window
+    // that never pumps events as "not responding") during any stretch this
+    // long. Discards the "wake" return value deliberately - "Space wakes
+    // early" is only meaningful against the actual sleep-pause loop below,
+    // which does its own pollWakeOrQuit() call; a Space press consumed from
+    // here (e.g. during config mode, or mid-WiFi-connect) has no real-hardware
+    // analogue to wake early from, same as how real hardware has no input at
+    // all at those points.
+    bool quit = false;
+    DisplayRender::pollWakeOrQuit(&quit);
+    if (quit) {
+        printf("Window closed - exiting.\n");
+        GattBridge::stop();
+        exit(0);
+    }
+}
+
 // Builds the same claim URL worker/src/lib/registration-url.ts constructs
 // server-side (origin + "/admin?claim=<mac>&secret=<hex>") - the simulator
 // has no camera to scan its own QR code with, so print it directly instead.
@@ -87,6 +137,61 @@ static void printRegistrationUrlIfUnclaimed() {
     printf("Not yet registered - claim this device: %s%s:%d/admin?claim=%s&secret=%s\n",
            scheme, configManager.getServerHost().c_str(), configManager.getServerPort(),
            DeviceApp::getMACAddressClean().c_str(), configManager.getDeviceSecret().c_str());
+}
+
+// This board's simulated MAC (stubs/WiFi.h's SimMac::buildMacAddress()) and
+// its persisted-state directory are both derived from the running binary's
+// own Mach-O UUID, which changes on every rebuild - standing in for swapping
+// in a distinct physical unit rather than reflashing the same one. Every
+// `make run-<board>` relinks first (a fresh UUID even for unchanged source
+// - see SimMac::buildIdentityHex()), so basing the state directory's name on
+// that UUID means a rebuild naturally lands on its own brand-new, empty
+// directory instead of reusing - and potentially colliding with, if an
+// earlier instance for this same board is still running - the previous
+// one. (An earlier version of this used one shared `.state/<board>/`
+// directory plus a stamped marker file, wiping the whole thing whenever the
+// identity didn't match - which let a second `make run-<board>` invocation
+// silently delete a still-running first instance's state mid-run, with no
+// log line in the first instance's own terminal to explain why. Observed in
+// practice, not hypothetical.)
+static std::string boardStateDir() {
+    return std::string(SIM_STATE_DIR) + "-" + SimMac::buildIdentityHex().substr(0, 12);
+}
+
+// Belt-and-suspenders against the one collision boardStateDir() can't rule
+// out on its own: two instances of this exact already-built binary (no
+// rebuild in between, so identical UUID/state dir) launched at once. An
+// exclusive flock on a lockfile *sibling to*, not inside, the state
+// directory - so a --reset's rm -rf of the directory never touches the fd
+// this holds open - makes the second one refuse to start instead of racing
+// the first over the same NVS files.
+static void acquireBoardLockOrExit(const std::string &stateDir) {
+    mkdir(".state", 0755);
+    std::string lockPath = std::string(".state/") + stateDir + ".lock";
+    int fd = open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+    if (fd < 0) return;  // unwritable .state/ - not fatal, just no safety net
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        fprintf(stderr,
+                "Another simulator instance is already using .state/%s/ "
+                "(same board, same build) - stop it first.\n",
+                stateDir.c_str());
+        exit(1);
+    }
+    // Leak the fd deliberately: the lock must live for the whole process
+    // lifetime, and it's released automatically on exit (normal or crash).
+}
+
+// "026f5bca3072" -> "02:6f:5b:ca:30:72", matching the colon-separated form
+// everything else (System Settings, `arp`, real hardware labels) shows a
+// MAC in - getMACAddressClean() itself stays separator-free since that's
+// the form the HMAC signing / X-Device-MAC header need.
+static std::string formatMacWithColons(const std::string &clean) {
+    std::string out;
+    for (size_t i = 0; i < clean.size(); i += 2) {
+        if (i) out += ':';
+        out += clean.substr(i, 2);
+    }
+    return out;
 }
 
 // Applies --server (default: local wrangler dev) every run, overriding
@@ -137,13 +242,19 @@ int main(int argc, char **argv) {
         DisplayRender::setExportPath(exportPath.c_str());
     }
 
+    // Every build of this binary gets its own state directory (see
+    // boardStateDir() above) - set it before anything touches Preferences,
+    // and refuse to start if another live instance already owns it.
+    std::string stateDir = boardStateDir();
+    g_simStateDir = stateDir;
+    acquireBoardLockOrExit(stateDir);
+
     if (doReset) {
-        // .state/<SIM_STATE_DIR>/ is this board's whole persisted state (see
-        // stubs/Preferences.h) - a per-board literal baked in by the
-        // Makefile, safe to shell out against directly.
-        std::string cmd = std::string("rm -rf .state/") + SIM_STATE_DIR;
+        // This build's own state directory only (see boardStateDir() above)
+        // - never a sibling instance's, even one for the same board.
+        std::string cmd = std::string("rm -rf .state/") + stateDir;
         system(cmd.c_str());
-        printf("Reset: wiped persisted state for board %s\n", SIM_STATE_DIR);
+        printf("Reset: wiped persisted state (.state/%s/)\n", stateDir.c_str());
     }
 
     configManager.begin();
@@ -162,22 +273,41 @@ int main(int argc, char **argv) {
     printf("\nE-Ink device simulator (native) running.\n");
     printf("  Board:      %s\n", BOARD_ID);
     printf("  MAC:        %s\n", DeviceApp::getMACAddressClean().c_str());
+    printf("  State dir:  .state/%s/ (unique to this build - rebuilding starts a fresh one)\n", stateDir.c_str());
     printf("  Talking to: %s\n", serverUrl.c_str());
     printf("  Provision:  %s/provision?sim=http://localhost:%d\n", serverUrl.c_str(), SIM_GATT_PORT);
     printf("  Space in the display window wakes early; closing it quits.\n\n");
 
+    // Board + MAC in the window title so it's obvious which simulated device
+    // a given window belongs to once more than one is running at once (see
+    // boardStateDir() above for how that's now possible without colliding).
+    std::string windowTitle = std::string(BOARD_ID) + " - " +
+                               formatMacWithColons(std::string(DeviceApp::getMACAddressClean().c_str()));
+    DisplayRender::setWindowTitle(windowTitle.c_str());
+
     if (!DisplayRender::isExportMode()) {
-        // Open the window right away, blank/white, rather than leaving the
-        // user staring at nothing until the first setup() cycle (WiFi
-        // connect, provisioning/config sync, image fetch) finishes -
-        // display.getBuffer() is null until display.begin() runs inside that
-        // cycle, so paint a synthesized all-white buffer instead of the real
-        // one. getBufferSize() is a compile-time constant per board, safe to
-        // call before begin(). Skipped in export mode, which expects exactly
-        // one frame written per boot cycle - an extra blank frame here would
-        // shift that numbering.
-        std::vector<uint8_t> blank(display.getBufferSize(), 0x11);  // 0x11 = two white pixels
-        DisplayRender::present(blank.data(), blank.size(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        // Open the window right away with a "BOOTING..." placeholder rather
+        // than leaving the user staring at nothing until the first setup()
+        // cycle (WiFi connect, provisioning/config sync, image fetch)
+        // finishes. Drawn through the board's own Display object (same
+        // drawStringPortrait() the config-mode banner in src/<board>/main.cpp
+        // uses) rather than a hand-synthesized buffer, so this reuses the
+        // real font-rendering code instead of duplicating it here or in
+        // display_render.cpp (deliberately buffer-only, no font logic - see
+        // its header comment). Colors are the literal nibble values from
+        // CLAUDE.md's palette table (0x00 black, 0x01 white), not
+        // <board>Color::WHITE/BLACK, since those enum types differ per board
+        // and this file is compiled once per board via BOARD_MAIN_CPP.
+        // display.begin() runs again inside the first setup() cycle below
+        // (and again on every simulated wake after that) - reallocating,
+        // and leaking, the previous buffer is already an accepted cost of
+        // running many simulated "boots" in one long-lived process; this
+        // adds one more instance of that same cost, not a new one.
+        if (display.begin()) {
+            display.clear(0x01);
+            display.drawStringPortrait(20, 20, "BOOTING...", 0x00, 4);
+            DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        }
     }
 
     while (true) {

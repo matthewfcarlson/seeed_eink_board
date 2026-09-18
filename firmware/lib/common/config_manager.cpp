@@ -41,8 +41,6 @@ ConfigManager::ConfigManager()
 
 void ConfigManager::begin() {
     loadFromNVS();
-    Serial.println("ConfigManager: Initialized");
-    printConfig();
 }
 
 void ConfigManager::loadFromNVS() {

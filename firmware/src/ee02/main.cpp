@@ -53,6 +53,7 @@ void runConfigMode() {
     Serial.println("\n========================================");
     Serial.println("CONFIGURATION MODE (Bluetooth)");
     Serial.println("========================================\n");
+    configManager.printConfig();
 
     showConfigModeScreen();
 
@@ -76,14 +77,20 @@ void setup() {
 
     setCpuFrequencyMhz(ACTIVE_CPU_FREQ_MHZ);
 
-    Serial.println("\n========================================");
-    Serial.println("Seeed EE02 E-Ink Display Firmware");
-    Serial.printf("Version: %s\n", FIRMWARE_VERSION);
-    Serial.println("========================================");
-
     rtcState.bootCount++;
-    Serial.printf("Boot count: %d\n", rtcState.bootCount);
-    DeviceApp::printWakeupReason();
+    bool firstBoot = (rtcState.bootCount == 1);
+
+    // Full banner/version/boot-count only once per device lifetime - every
+    // other wake reprints just what's relevant to whatever mode it ends up
+    // in (see runConfigMode() and DeviceApp::runNormalMode()'s own headers).
+    if (firstBoot) {
+        Serial.println("\n========================================");
+        Serial.println("Seeed EE02 E-Ink Display Firmware");
+        Serial.printf("Version: %s\n", FIRMWARE_VERSION);
+        Serial.println("========================================");
+        Serial.printf("Boot count: %d\n", rtcState.bootCount);
+    }
+    DeviceApp::printWakeupReason(firstBoot);
 
     configManager.begin();
     configManager.ensureDeviceSecret();
