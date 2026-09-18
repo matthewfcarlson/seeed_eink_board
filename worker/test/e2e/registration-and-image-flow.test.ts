@@ -16,7 +16,7 @@ import {
 import { AdminClient } from "./lib/admin-client";
 import { averageColorInRow, countMagentaPixels, decodeJpeg } from "./lib/jpeg-utils";
 import { buildSimulator, runSimulatorOnce } from "./lib/simulator";
-import { buildDummyBlob, buildTestPackedImage, EE02_HEIGHT } from "./lib/test-image";
+import { buildDummyBlob, buildTestPackedImage } from "./lib/test-image";
 import { registerTestAccount } from "./lib/virtual-authenticator";
 import { startWranglerDev, type WranglerDevHandle } from "./lib/wrangler-dev";
 
@@ -128,13 +128,17 @@ describe("simulator e2e: registration + encrypted image display", () => {
     const thirdBoot = runSimulatorOnce({ server: wrangler.baseUrl, exportPath: path.join(workDir, "boot3-image.jpg") });
     expect(thirdBoot.exportedJpegPaths).toHaveLength(1);
 
+    // Note: the exported JPEG is the simulator's undo-rotated *portrait* view
+    // (see display_render.cpp's present()) - its height is the landscape
+    // buffer's WIDTH (1600), not EE02_HEIGHT (1200), so the row fractions
+    // below are computed off the actual decoded image, not that constant.
     const displayed = await decodeJpeg(thirdBoot.exportedJpegPaths[0]!);
-    const top = averageColorInRow(displayed, Math.floor(EE02_HEIGHT * 0.25));
+    const top = averageColorInRow(displayed, Math.floor(displayed.height * 0.25));
     expect(top.r).toBeLessThan(30);
     expect(top.g).toBeLessThan(30);
     expect(top.b).toBeLessThan(30);
 
-    const bottom = averageColorInRow(displayed, Math.floor(EE02_HEIGHT * 0.75));
+    const bottom = averageColorInRow(displayed, Math.floor(displayed.height * 0.75));
     expect(bottom.r).toBeGreaterThan(200);
     expect(bottom.g).toBeLessThan(60);
     expect(bottom.b).toBeLessThan(60);
@@ -155,7 +159,7 @@ describe("simulator e2e: registration + encrypted image display", () => {
     const fourthBoot = runSimulatorOnce({ server: wrangler.baseUrl, exportPath: path.join(workDir, "boot4-still-image.jpg") });
     expect(fourthBoot.stdout).toContain(`X-Image-Hash=${packedHash}`);
     const displayedAgain = await decodeJpeg(fourthBoot.exportedJpegPaths[0]!);
-    expect(averageColorInRow(displayedAgain, Math.floor(EE02_HEIGHT * 0.25)).r).toBeLessThan(30);
-    expect(averageColorInRow(displayedAgain, Math.floor(EE02_HEIGHT * 0.75)).r).toBeGreaterThan(200);
+    expect(averageColorInRow(displayedAgain, Math.floor(displayedAgain.height * 0.25)).r).toBeLessThan(30);
+    expect(averageColorInRow(displayedAgain, Math.floor(displayedAgain.height * 0.75)).r).toBeGreaterThan(200);
   });
 });

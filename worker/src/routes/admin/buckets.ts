@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { PACKED_ENCODINGS, isValidPackedEncoding, type Env } from "../../types";
+import { PACKED_ENCODINGS, isValidPackedEncoding, isValidBoardId, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { deleteImageBlobs, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
@@ -49,12 +49,20 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
   // anyone else gets 403 rather than the flag silently being dropped.
   app.post("/admin/buckets", requireAdmin, async (c) => {
     const body = await c.req
-      .json<{ label?: string; key?: unknown; is_public?: boolean; public_key_raw?: string }>()
+      .json<{ label?: string; key?: unknown; is_public?: boolean; public_key_raw?: string; target_board?: string }>()
       .catch(() => ({}) as never);
     const label = body.label?.trim();
     if (!label) return c.json({ error: "label is required" }, 400);
     const key = parseWrappedBucketKey(body.key);
     if (!key) return c.json({ error: "key (wrapped bucket key for the caller) is required" }, 400);
+    // Required, not defaulted — see migrations/0019_bucket_target_board.sql.
+    // A bucket's images are packed once, client-side, for exactly one board's
+    // geometry; forcing an explicit choice here avoids anyone accidentally
+    // packing a bucket for the wrong screen.
+    if (!body.target_board || !isValidBoardId(body.target_board)) {
+      return c.json({ error: "target_board (which device screen this bucket's images are packed for) is required" }, 400);
+    }
+    const targetBoard = body.target_board;
 
     let isPublic = false;
     let publicKeyRaw: string | null = null;
@@ -74,17 +82,17 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     // that gap open to any interruption between them.
     await c.env.DB.batch([
       c.env.DB.prepare(
-        "INSERT INTO buckets (id, owner_id, label, created_at, is_public, public_key_raw) VALUES (?, ?, ?, ?, ?, ?)"
-      ).bind(id, c.var.user.id, label, now, isPublic ? 1 : 0, publicKeyRaw),
+        "INSERT INTO buckets (id, owner_id, label, created_at, is_public, public_key_raw, target_board) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).bind(id, c.var.user.id, label, now, isPublic ? 1 : 0, publicKeyRaw, targetBoard),
       bucketKeyUpsertStatement(c.env, id, "user", c.var.user.id, key, 1),
     ]);
 
-    return c.json({ id, label, owner_id: c.var.user.id, is_owner: true, is_public: isPublic }, 201);
+    return c.json({ id, label, owner_id: c.var.user.id, is_owner: true, is_public: isPublic, target_board: targetBoard }, 201);
   });
 
   app.get("/admin/buckets", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      `SELECT id, owner_id, label, created_at, key_version, is_public, public_key_raw FROM buckets
+      `SELECT id, owner_id, label, created_at, key_version, is_public, public_key_raw, target_board FROM buckets
        WHERE owner_id = ?1 OR id IN (SELECT bucket_id FROM bucket_shares WHERE user_id = ?1)
           OR is_public = 1
        ORDER BY created_at ASC`
@@ -98,6 +106,7 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
         key_version: number;
         is_public: number;
         public_key_raw: string | null;
+        target_board: string;
       }>();
 
     // Each bucket's caller-specific wrapped key AT THE BUCKET'S CURRENT
@@ -126,6 +135,7 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
           is_public: row.is_public === 1,
           key,
           public_key_raw: !key && row.is_public === 1 ? row.public_key_raw : null,
+          target_board: row.target_board,
         };
       })
     );

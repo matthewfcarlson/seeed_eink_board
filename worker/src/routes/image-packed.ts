@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { DEFAULT_DEVICE_KEY, type Env } from "../types";
+import { DEFAULT_DEVICE_KEY, DEFAULT_BOARD_ID, isValidBoardId, type Env } from "../types";
 import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
@@ -32,6 +32,12 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     const lookup = await resolveDeviceKey(c.env, mac);
     const deviceKey = lookup.deviceKey;
 
+    // Read straight off this request rather than any devices.board read-back
+    // — same bootstrap-safe pattern device-config.ts uses (an unregistered
+    // device has no devices row yet for that column to live in at all).
+    const reportedBoard = c.req.header("X-Device-Board");
+    const board = reportedBoard && isValidBoardId(reportedBoard) ? reportedBoard : DEFAULT_BOARD_ID;
+
     // A registered device's mac isn't enough on its own — see lib/device-signature.ts.
     // Without this, anyone who knows/guesses a registered mac could impersonate that
     // device just by sending X-Device-MAC.
@@ -53,7 +59,8 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     if (deviceKey === DEFAULT_DEVICE_KEY) {
       const { packed, hash } = await renderRegistrationBuffer(
         mac,
-        registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret"))
+        registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret")),
+        board
       );
       return new Response(packed, {
         status: 200,
@@ -70,14 +77,31 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
 
     const snapshot = await getRotationSnapshot(c.env, deviceKey);
     const pending = peekPendingImage(snapshot);
+
+    // Even with a pending image, it may have been packed for a different
+    // board than this device (a bucket's target_board — see migrations/
+    // 0019_bucket_target_board.sql — should never mismatch an assigned
+    // device's board; PATCH /admin/devices/:mac/buckets guards against it at
+    // assignment time). This is a last-resort check: if it ever does
+    // mismatch, serving those bytes would fail the firmware's content-length
+    // check (or worse, render garbage) rather than gracefully degrade like
+    // every other "nothing to show" case here.
+    const pendingBucket = pending
+      ? await c.env.DB.prepare("SELECT target_board FROM buckets WHERE id = ?")
+          .bind(pending.image.sourceDeviceKey)
+          .first<{ target_board: string }>()
+      : null;
+    const boardMismatch = !!pending && !!pendingBucket && pendingBucket.target_board !== board;
+
     // Registered but nothing to show — no bucket assigned, every assigned
-    // bucket has zero images, or removed from every bucket it had. Same
-    // "never leave the screen on a bare error" reasoning as the
+    // bucket has zero images, removed from every bucket it had, or (see
+    // boardMismatch above) its one pending image is wrong-sized for this
+    // device. Same "never leave the screen on a bare error" reasoning as the
     // unregistered-device QR branch above, just one step later in the
     // device's lifecycle. Unencrypted, like that branch: there may be no
     // bucket (and so no key) to encrypt under here at all.
-    if (!pending) {
-      const { packed, hash } = await renderNoBucketBuffer(mac, assignBucketUrl(c.req.url, mac));
+    if (!pending || boardMismatch) {
+      const { packed, hash } = await renderNoBucketBuffer(mac, assignBucketUrl(c.req.url, mac), board);
       return new Response(packed, {
         status: 200,
         headers: {

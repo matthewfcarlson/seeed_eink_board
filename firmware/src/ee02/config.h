@@ -51,6 +51,15 @@
 #define DISPLAY_HEIGHT  1200
 #define BUFFER_SIZE     960000  // (1600 * 1200) / 2 bytes (4bpp)
 
+// This panel is mounted physically rotated 90° so the buffer's landscape
+// scan order reads right-side-up - every content producer (worker/src/
+// client/decode.ts, lib/qr-registration.ts, display.cpp's own drawString())
+// draws portrait and rotates 90°CW to get here. The simulator's
+// display_render.cpp undoes that rotation for on-screen/export display -
+// see main_native.cpp's DisplayRender::present() calls. Matches worker/src/
+// lib/media-constants.ts's BoardGeometry.needsRotation for this board.
+#define DISPLAY_MOUNTED_ROTATED 1
+
 // HTTP timeout for control requests like /hash and /device_config (in milliseconds)
 #define HTTP_TIMEOUT_MS 30000
 

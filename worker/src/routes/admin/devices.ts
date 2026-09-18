@@ -174,9 +174,9 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       .catch(() => ({}) as never);
     if (!Array.isArray(body.bucket_ids)) return c.json({ error: "bucket_ids must be an array" }, 400);
 
-    const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
+    const row = await c.env.DB.prepare("SELECT user_id, board FROM devices WHERE mac = ?")
       .bind(mac)
-      .first<{ user_id: string | null }>();
+      .first<{ user_id: string | null; board: string | null }>();
     if (!row) return c.json({ error: "Not found" }, 404);
     if (row.user_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
 
@@ -198,10 +198,23 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       // bumps buckets.key_version, which is correct: a newly-assigned device
       // needs whatever version the bucket's images are actually encrypted
       // under right now.
-      const bucket = await c.env.DB.prepare("SELECT key_version FROM buckets WHERE id = ?")
+      const bucket = await c.env.DB.prepare("SELECT key_version, target_board FROM buckets WHERE id = ?")
         .bind(bucketId)
-        .first<{ key_version: number }>();
+        .first<{ key_version: number; target_board: string }>();
       bucketKeyVersions.set(bucketId, bucket?.key_version ?? 1);
+      // A bucket's images are packed once, client-side, for exactly one
+      // board's geometry (migrations/0019_bucket_target_board.sql) — a
+      // mismatched device would otherwise fail /image_packed's content-length
+      // check on every wake. Only checked when this device's board is
+      // already known (self-reported via X-Device-Board on its first
+      // /device_config call) — a never-yet-connected device has nothing to
+      // check against, and image-packed.ts guards it defensively regardless.
+      if (row.board && bucket && bucket.target_board !== row.board) {
+        return c.json(
+          { error: `Bucket ${bucketId} is packed for ${bucket.target_board}, but this device is ${row.board}` },
+          400
+        );
+      }
     }
 
     const previousBucketIds = await c.env.DB.prepare("SELECT bucket_id FROM device_buckets WHERE device_mac = ?")

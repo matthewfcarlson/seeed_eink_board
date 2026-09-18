@@ -86,7 +86,12 @@ CREATE TABLE buckets (
   -- other bucket's - the whole rest of the pipeline (client encrypt-before-
   -- upload, GCM tamper-detection, firmware decrypt) needs zero changes.
   is_public      INTEGER NOT NULL DEFAULT 0,
-  public_key_raw TEXT
+  public_key_raw TEXT,
+  -- Which board this bucket's images are packed for (migrations/
+  -- 0019_bucket_target_board.sql) - see lib/media-constants.ts's BoardId.
+  -- Immutable after creation; every image in this bucket was dithered/packed
+  -- at this board's geometry.
+  target_board TEXT NOT NULL DEFAULT 'ee02-13in3'
 );
 
 CREATE TABLE device_buckets (

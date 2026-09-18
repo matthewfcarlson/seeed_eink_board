@@ -144,13 +144,24 @@ target/image variant), and `X-Device-Sharing-Public-Key` (P-256, base64).
 ## Multi-Device / Buckets
 
 Devices are identified by MAC and assigned to **buckets** (named image
-collections; `worker/src/lib/rotation.ts`, `buckets`/`bucket_subscriptions`
+collections; `worker/src/lib/rotation.ts`, `buckets`/`device_buckets`
 tables). An unregistered MAC gets a "scan to register" QR code
 (`worker/src/lib/qr-registration.ts`) — never a shared/default fallback. Claim
 via `/admin?claim=<mac>`; each device tracks its own rotation cursor. Buckets
 can be shared across accounts via invite link
 (`POST /admin/buckets/{id}/invite`). MAC and admin device list both show a
 device's MAC for registration.
+
+Every bucket has a `target_board` (`ee02-13in3`/`ee04-7in3`,
+`migrations/0019_bucket_target_board.sql`), chosen once at creation and
+immutable after: a bucket's images are dithered/packed client-side for one
+board's screen geometry (see `lib/media-constants.ts`'s `BoardGeometry`), and
+the Worker never sees plaintext to re-derive them for a different board
+later. `PATCH /admin/devices/:mac/buckets` rejects assigning a device to a
+bucket packed for a different board (once that device's board is
+self-reported); `/image_packed` also guards this defensively at serve time
+(falls back to the "no images assigned" QR rather than streaming a
+wrong-sized buffer) in case that assignment-time check is ever bypassed.
 
 ## Encrypted Image Buckets
 

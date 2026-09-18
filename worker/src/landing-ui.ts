@@ -39,7 +39,7 @@ export function renderLandingPage(): string {
 
   .feature-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 16px;
     margin: 8px 0 36px;
   }
@@ -165,6 +165,7 @@ export function renderLandingPage(): string {
 
   @media (max-width: 800px) {
     .hero { flex-direction: column-reverse; text-align: center; padding-top: 8px; }
+    .hero-art { flex-basis: auto; max-width: 280px; margin: 0 auto; }
     .hero-brand { justify-content: center; }
     .hero-sub { max-width: none; }
     .hero-actions { justify-content: center; }
@@ -261,13 +262,18 @@ export function renderLandingPage(): string {
   </div>
   <div class="feature-card">
     <div class="feature-dot" style="background: var(--yellow);"></div>
-    <h3>Runs for weeks</h3>
+    <h3>Runs for six months</h3>
     <p>It sleeps between updates and sips battery, so you're not constantly hunting for a charger.</p>
   </div>
   <div class="feature-card">
     <div class="feature-dot" style="background: var(--green);"></div>
     <h3>Looks like paper</h3>
     <p>Real ink colors, not a backlit screen &mdash; readable in any light, with no glow at night.</p>
+  </div>
+  <div class="feature-card">
+    <div class="feature-dot" style="background: var(--red);"></div>
+    <h3>Private by design</h3>
+    <p>Every photo is end-to-end encrypted before it leaves your browser &mdash; we can't see your pictures, even on our own servers.</p>
   </div>
 </div>
 
@@ -299,11 +305,18 @@ export function renderLandingPage(): string {
     <p>Per account, this worker handles:</p>
     <ul>
       <li>Registering devices by MAC address</li>
-      <li>Storing and rotating images per-device (dithered to the panel's 6-color palette, encrypted end-to-end)</li>
+      <li>Storing and rotating images per-device (dithered to the panel's 6-color palette)</li>
       <li>Per-device or global refresh schedules and quiet hours</li>
       <li>Battery voltage reporting from each device</li>
       <li>Over-the-air firmware updates</li>
     </ul>
+    <p>
+      Every image is AES-256-GCM encrypted in your browser before upload,
+      using a key that's never sent to this server in the clear &mdash; the
+      worker stores and serves ciphertext it cannot itself decrypt, even with
+      full access to its own database. Only your account and the devices you
+      grant access to hold a copy of that key, wrapped for them individually.
+    </p>
     <div class="diagram">
 <pre><code>[EE02 board, deep sleep]  --wake-->  GET /device_config, /hash, /image_packed
         ^                                        |

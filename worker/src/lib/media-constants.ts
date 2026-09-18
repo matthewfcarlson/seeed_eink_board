@@ -4,14 +4,46 @@
 // don't exist — and shouldn't be assumed to — in a browser TS program. Plain
 // re-exported from types.ts for every existing Worker-side import.
 
-export const PACKED_BYTES = 960000;
+// Every board the encrypted image pipeline knows how to pack for. Kept in
+// sync with each board's firmware/src/<board>/config.h DISPLAY_WIDTH/HEIGHT
+// and the same vocabulary used by devices.board/firmware_releases.board
+// (see lib/github-release.ts's FIRMWARE_ASSET_NAMES).
+export type BoardId = "ee02-13in3" | "ee04-7in3";
 
-// Buffer is 1600x1200 landscape to match firmware; source images are fit to
-// 1200x1600 portrait first, then rotated 90° CW.
-export const BUFFER_WIDTH = 1600;
-export const BUFFER_HEIGHT = 1200;
-export const PORTRAIT_WIDTH = 1200;
-export const PORTRAIT_HEIGHT = 1600;
+/**
+ * `displayWidth`/`displayHeight`: the final packed-buffer geometry the
+ * firmware expects, exactly matching that board's DISPLAY_WIDTH/HEIGHT.
+ * `needsRotation`: true means the source photo is cropped to an upright
+ * (portrait) `displayHeight`x`displayWidth` canvas and then rotated 90°CW —
+ * EE02's dual-UC8179 driver expects landscape 1600x1200 with no on-device
+ * rotation, so the server/client pipeline does it once, ahead of time.
+ * false means the board's own driver does no rotation at all (see
+ * firmware/src/ee04/display.h's "no buffer transpose... driven natively
+ * 800x480 row-major" comment) — the source photo is cropped directly to
+ * `displayWidth`x`displayHeight`, no rotation step at all.
+ */
+export interface BoardGeometry {
+  displayWidth: number;
+  displayHeight: number;
+  needsRotation: boolean;
+}
+
+export const BOARD_GEOMETRY: Record<BoardId, BoardGeometry> = {
+  "ee02-13in3": { displayWidth: 1600, displayHeight: 1200, needsRotation: true },
+  "ee04-7in3": { displayWidth: 800, displayHeight: 480, needsRotation: false },
+};
+
+export const BOARD_IDS = Object.keys(BOARD_GEOMETRY) as BoardId[];
+
+export function isValidBoardId(value: string): value is BoardId {
+  return (BOARD_IDS as string[]).includes(value);
+}
+
+// The only board the image pipeline supported before per-board geometry
+// existed — every bucket created before migrations/0019_bucket_target_board.sql
+// defaults to this, and it's the fallback for a request that omits/mis-sends
+// X-Device-Board (e.g. an old firmware build).
+export const DEFAULT_BOARD_ID: BoardId = "ee02-13in3";
 
 export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";
 export const DITHER_ALGORITHMS: DitherAlgorithm[] = ["floyd_steinberg", "atkinson", "ordered"];

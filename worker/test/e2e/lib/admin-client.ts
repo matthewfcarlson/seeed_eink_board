@@ -1,4 +1,5 @@
 import type { WrappedKey } from "../../../src/client/crypto";
+import { DEFAULT_BOARD_ID, type BoardId } from "../../../src/lib/media-constants";
 
 /**
  * Thin fetch wrapper over the /admin API this e2e suite exercises - not a
@@ -202,12 +203,14 @@ export class AdminClient {
   async createBucket(
     label: string,
     wrappedKeyForSelf: WrappedKey,
-    opts?: { is_public?: boolean; public_key_raw?: string }
-  ): Promise<{ id: string; is_public?: boolean }> {
+    opts?: { is_public?: boolean; public_key_raw?: string; target_board?: BoardId }
+  ): Promise<{ id: string; is_public?: boolean; target_board?: BoardId }> {
+    // Defaults to EE02 - every existing e2e fixture (buildTestPackedImage,
+    // the simulator flow) is built against that board's 1600x1200 geometry.
     return this.json("/admin/buckets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label, key: wrappedKeyForSelf, ...opts }),
+      body: JSON.stringify({ label, key: wrappedKeyForSelf, target_board: DEFAULT_BOARD_ID, ...opts }),
     });
   }
 

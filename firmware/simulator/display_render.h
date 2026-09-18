@@ -39,7 +39,15 @@ void setWindowTitle(const char *title);
 // low nibble = odd pixel index. Opens the window on first call (skipped
 // entirely in export mode - see setExportPath()); safe to call repeatedly
 // with the same size (typical - only one board per process).
-void present(const uint8_t *buffer, size_t bufferSize, int width, int height);
+//
+// `undoMountRotation`: true (EE02) undoes the 90° rotation every content
+// producer applies before a physically-rotated-mounted panel, so the window/
+// export shows the same portrait orientation a real mounted device would -
+// see config.h's DISPLAY_MOUNTED_ROTATED, which main_native.cpp reads to
+// pass this. false (EE04) renders the buffer straight through at width x
+// height, no rotation - that board is mounted flat with no on-device
+// rotation at all.
+void present(const uint8_t *buffer, size_t bufferSize, int width, int height, bool undoMountRotation);
 
 // Pumps the SDL event queue. Returns true if Space was pressed since the
 // last call (manual "wake now", standing in for a real deep-sleep timer

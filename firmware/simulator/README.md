@@ -188,12 +188,6 @@ calls `setup()` again — the closest native equivalent to a real reset.
   a chance to run and just hangs. Provision the device normally first (or
   reuse an already-provisioned `.state/`), then use `--export` for
   normal-mode/registration-screen snapshots.
-- **EE04 image geometry.** The Worker's `/image_packed` always returns an
-  EE02-sized (1600×1200) buffer regardless of `X-Device-Board` — a
-  pre-existing, not-yet-started effort (see root `CLAUDE.md`). `--board ee04`
-  faithfully reproduces the resulting "content length exceeds buffer size"
-  failure real EE04 hardware hits today, through the real firmware code path
-  — this isn't a simulator bug to fix here.
 - **No OTA / crash-report exercise.** `stubs/Update.h`'s `begin()` always
   returns false, so an OTA download never actually runs (device_app.h treats
   that as "continue with current firmware," same as a real failed download).

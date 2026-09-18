@@ -98,46 +98,53 @@ void setWindowTitle(const char *title) {
     if (g_window) SDL_SetWindowTitle(g_window, g_windowTitle.c_str());
 }
 
-void present(const uint8_t *buffer, size_t bufferSize, int width, int height) {
+void present(const uint8_t *buffer, size_t bufferSize, int width, int height, bool undoMountRotation) {
     if (!buffer || width <= 0 || height <= 0) return;
 
-    // `buffer` is in the hardware's native landscape scan order (width x
-    // height, e.g. 1600x1200 - see config.h's DISPLAY_WIDTH/HEIGHT). Every
-    // producer of content (worker/src/client/decode.ts for photos,
-    // lib/qr-registration.ts for the "scan to register" screen,
-    // display.cpp's own drawString() for the config-mode banner) draws in
-    // portrait and calls rotate90CW to get here, because the panel is then
-    // mounted physically rotated so it reads right-side-up. Undo that
-    // rotation - a 90-degree counterclockwise turn - so this window shows
-    // the same portrait orientation a real mounted device would.
-    int portraitW = height;
-    int portraitH = width;
-    std::vector<uint8_t> rgb((size_t)portraitW * (size_t)portraitH * 3);
-    for (int py = 0; py < portraitH; py++) {
-        int landscapeCol = width - 1 - py;
-        for (int px = 0; px < portraitW; px++) {
-            int landscapeRow = px;
-            size_t i = (size_t)landscapeRow * width + landscapeCol;
+    // `buffer` is in the hardware's native scan order (width x height, e.g.
+    // 1600x1200 for EE02, 800x480 for EE04 - see config.h's DISPLAY_WIDTH/
+    // HEIGHT). When undoMountRotation is set (EE02), every producer of
+    // content (worker/src/client/decode.ts for photos, lib/qr-registration.ts
+    // for the "scan to register" screen, display.cpp's own drawString() for
+    // the config-mode banner) draws in portrait and calls rotate90CW before
+    // it ever reaches here, because that panel is mounted physically rotated
+    // so it reads right-side-up. Undo that rotation - a 90-degree
+    // counterclockwise turn - so this window shows the same portrait
+    // orientation a real mounted device would. When it's clear (EE04),
+    // content is already produced in the panel's native landscape
+    // orientation with no rotation at all, so render it straight through.
+    int outW = undoMountRotation ? height : width;
+    int outH = undoMountRotation ? width : height;
+    std::vector<uint8_t> rgb((size_t)outW * (size_t)outH * 3);
+    for (int py = 0; py < outH; py++) {
+        for (int px = 0; px < outW; px++) {
+            size_t i;
+            if (undoMountRotation) {
+                int landscapeCol = width - 1 - py;
+                int landscapeRow = px;
+                i = (size_t)landscapeRow * width + landscapeCol;
+            } else {
+                i = (size_t)py * width + px;
+            }
             size_t byteIdx = i / 2;
             uint8_t byteVal = byteIdx < bufferSize ? buffer[byteIdx] : 0x11;  // 0x11 = two white pixels
             uint8_t nibble = (i % 2 == 0) ? (byteVal >> 4) : (byteVal & 0x0F);
             Rgb c = nibbleToRgb(nibble);
-            size_t outIdx = (size_t)py * portraitW + px;
+            size_t outIdx = (size_t)py * outW + px;
             rgb[outIdx * 3 + 0] = c.r;
             rgb[outIdx * 3 + 1] = c.g;
             rgb[outIdx * 3 + 2] = c.b;
         }
     }
-
     if (isExportMode()) {
         // No SDL window/renderer needed at all - the RGB buffer above is
         // already exactly what a window would show, so just write it.
-        writeJpeg(rgb, portraitW, portraitH);
+        writeJpeg(rgb, outW, outH);
         return;
     }
 
-    ensureWindow(portraitW, portraitH);
-    SDL_UpdateTexture(g_texture, nullptr, rgb.data(), portraitW * 3);
+    ensureWindow(outW, outH);
+    SDL_UpdateTexture(g_texture, nullptr, rgb.data(), outW * 3);
     SDL_RenderClear(g_renderer);
     SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
     SDL_RenderPresent(g_renderer);

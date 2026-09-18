@@ -8,24 +8,66 @@ const EE02_WIDTH = 1600;
 const EE02_HEIGHT = 1200;
 export const EE02_PACKED_BYTES = (EE02_WIDTH * EE02_HEIGHT) / 2;
 
+// EE04: 800x480 4bpp, no on-device rotation (firmware/src/ee04/display.h -
+// native row-major push) - see lib/media-constants.ts's BoardGeometry.
+const EE04_WIDTH = 800;
+const EE04_HEIGHT = 480;
+export const EE04_PACKED_BYTES = (EE04_WIDTH * EE04_HEIGHT) / 2;
+export { EE04_HEIGHT };
+
 const BLACK_NIBBLE = 0x0;
 const RED_NIBBLE = 0x3;
 
-/** A plaintext EE02 packed buffer that's solid black on top, solid red on the
- *  bottom half - two easily-distinguished bands so the e2e test can decode
- *  the simulator's exported JPEG and confirm the *actual pixels* the device
- *  displayed came from this specific image, not just that some request
- *  succeeded. */
-export function buildTestPackedImage(): { packed: Uint8Array; packedHash: string } {
-  const packed = new Uint8Array(EE02_PACKED_BYTES);
-  const halfwayByte = (EE02_WIDTH / 2) * (EE02_HEIGHT / 2);
-  packed.fill(BLACK_NIBBLE << 4 | BLACK_NIBBLE, 0, halfwayByte);
-  packed.fill((RED_NIBBLE << 4) | RED_NIBBLE, halfwayByte);
+function packRowMajor(width: number, height: number, colorAt: (row: number, col: number) => number): Uint8Array {
+  const packed = new Uint8Array((width * height) / 2);
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col += 2) {
+      const even = colorAt(row, col);
+      const odd = colorAt(row, col + 1);
+      packed[(row * width + col) / 2] = (even << 4) | odd;
+    }
+  }
+  return packed;
+}
 
+function hashPacked(packed: Uint8Array): string {
   // Opaque change-detection metadata as far as the Worker is concerned (see
   // admin/images.ts's doc comment) - any stable 16-char hex string works.
-  const packedHash = createHash("sha256").update(packed).digest("hex").slice(0, 16);
-  return { packed, packedHash };
+  return createHash("sha256").update(packed).digest("hex").slice(0, 16);
+}
+
+/** A plaintext packed buffer that appears solid black on top, solid red on
+ *  the bottom half ONCE DISPLAYED - two easily-distinguished bands so an e2e
+ *  test can decode the simulator's exported JPEG and confirm the *actual
+ *  pixels* the device displayed came from this specific image, not just that
+ *  some request succeeded.
+ *
+ *  EE02 is mounted physically rotated (see display_render.cpp's present()
+ *  and config.h's DISPLAY_MOUNTED_ROTATED) - every real content producer
+ *  (worker/src/client/decode.ts, lib/qr-registration.ts) crops in portrait
+ *  and rotates 90°CW before it ever reaches the wire, and present() undoes
+ *  that same rotation to show what a viewer actually sees. Uploading this
+ *  test image directly (bypassing that encode step) means it has to already
+ *  be shaped like rotate90CW's OUTPUT: a horizontal top/bottom split in the
+ *  eventual viewed (portrait) orientation lands along this buffer's COLUMN
+ *  axis, not its row axis - a row-based split here would appear as a
+ *  left/right split once rotated back for viewing, not top/bottom (that
+ *  exact mismatch previously made this suite's pixel-content assertions
+ *  fail against a genuinely-correct fetch/decrypt/display). */
+export function buildTestPackedImage(): { packed: Uint8Array; packedHash: string } {
+  const colThreshold = EE02_WIDTH / 2;
+  const packed = packRowMajor(EE02_WIDTH, EE02_HEIGHT, (_row, col) => (col >= colThreshold ? BLACK_NIBBLE : RED_NIBBLE));
+  return { packed, packedHash: hashPacked(packed) };
+}
+
+/** Same idea as buildTestPackedImage(), but for EE04, which does no on-device
+ *  or simulator-side rotation at all (config.h's DISPLAY_MOUNTED_ROTATED is
+ *  0) - a straightforward row-based top/bottom split already appears exactly
+ *  that way once displayed. */
+export function buildEe04TestPackedImage(): { packed: Uint8Array; packedHash: string } {
+  const rowThreshold = EE04_HEIGHT / 2;
+  const packed = packRowMajor(EE04_WIDTH, EE04_HEIGHT, (row, _col) => (row < rowThreshold ? BLACK_NIBBLE : RED_NIBBLE));
+  return { packed, packedHash: hashPacked(packed) };
 }
 
 /** Content doesn't matter for raw/thumb - nothing in this suite's flow

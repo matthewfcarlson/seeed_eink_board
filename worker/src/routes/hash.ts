@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { DEFAULT_DEVICE_KEY, type Env } from "../types";
+import { DEFAULT_DEVICE_KEY, DEFAULT_BOARD_ID, isValidBoardId, type Env } from "../types";
 import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
@@ -40,9 +40,12 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     // A real but unregistered MAC gets a "scan to register" QR instead of any
     // bucket's rotation — see plan §QR registration.
     if (deviceKey === DEFAULT_DEVICE_KEY) {
+      const reportedBoard = c.req.header("X-Device-Board");
+      const board = reportedBoard && isValidBoardId(reportedBoard) ? reportedBoard : DEFAULT_BOARD_ID;
       const { hash } = await renderRegistrationBuffer(
         mac,
-        registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret"))
+        registrationUrl(c.req.url, mac, c.req.header("X-Device-Secret")),
+        board
       );
       return c.text(hash, 200, { "Content-Type": "text/plain" });
     }

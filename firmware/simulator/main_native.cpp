@@ -78,7 +78,7 @@ static void installSignalWatcher() {
 // functions defined by the #include above.
 
 static void renderCurrentBuffer() {
-    DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MOUNTED_ROTATED);
 }
 
 // stubs/Arduino.h's delay() calls this on every invocation - the only way a
@@ -108,7 +108,7 @@ void simPumpDisplay() {
     lastPumpMs = now;
 
     if (display.getBuffer() != nullptr) {
-        DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MOUNTED_ROTATED);
     }
 
     // Also keeps the window responsive (macOS otherwise flags an SDL window
@@ -306,7 +306,7 @@ int main(int argc, char **argv) {
         if (display.begin()) {
             display.clear(0x01);
             display.drawStringPortrait(20, 20, "BOOTING...", 0x00, 4);
-            DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+            DisplayRender::present(display.getBuffer(), display.getBufferSize(), DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MOUNTED_ROTATED);
         }
     }
 
