@@ -58,6 +58,11 @@ public:
     int getSize() const { return (int)body_.size(); }
     String getString() const { return String(std::string(body_.begin(), body_.end()).c_str()); }
 
+    // No-op: this stub (unlike the real ESP32 core) always returns every
+    // response header from header(), so there's nothing to filter. Kept so
+    // device_app.h's collectHeaders() call compiles on both targets.
+    void collectHeaders(const char * /*keys*/[], size_t /*count*/) {}
+
     String header(const char *name) const {
         auto it = responseHeaders_.find(lower(name));
         return it == responseHeaders_.end() ? String("") : String(it->second.c_str());

@@ -1199,6 +1199,19 @@ ImageFetchResult fetchAndDisplayImage(DisplayT& display, ConfigManager& configMa
     http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
     addCommonHeaders(http, configManager.getImageEndpoint(), configManager, run.batteryVoltage);
 
+    // ESP32's HTTPClient only surfaces header(name) values for names
+    // registered here - unregistered headers read back as "". (The
+    // simulator's HTTPClient stub returns every response header, so this
+    // real-core behavior never showed up in simulator testing.) Without
+    // this, X-Packed-Encoding read as empty and a compressed image body was
+    // misidentified as identity encoding; X-Bucket-Id/X-Device-ID similarly
+    // broke plaintext-image detection, and known_hash/304 never worked.
+    const char* responseHeaderKeys[] = {
+        "X-Image-Hash", "X-Image-Name", "X-Device-ID",
+        "X-Bucket-Id", "X-Bucket-Key-Version", "X-Packed-Encoding",
+    };
+    http.collectHeaders(responseHeaderKeys, sizeof(responseHeaderKeys) / sizeof(responseHeaderKeys[0]));
+
     int httpCode = http.GET();
 
     if (httpCode == 304) {

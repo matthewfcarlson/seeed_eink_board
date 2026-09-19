@@ -100,6 +100,9 @@ interface Options {
   panY: number;
   zoom: number;
   isPublic: boolean;
+  allowUpscale: boolean;
+  checkOnly: boolean;
+  paths: string[];
 }
 
 function usage(): never {
@@ -107,7 +110,8 @@ function usage(): never {
   node scripts/upload-images.mjs --url <worker-url> --api-key <eink_...> --bucket <label> \\
     <files-or-directories...> [--dither floyd_steinberg|atkinson|ordered]
     [--bucket-key <base64 32-byte key | invite #key= fragment | invite URL>]
-    [--pan-x 0..1] [--pan-y 0..1] [--zoom >=1] [--public]
+    [--pan-x 0..1] [--pan-y 0..1] [--zoom >=1] [--public] [--allow-upscale]
+    [--check-only <files-or-dirs>]  — just run the resolution gate, no upload
 
 Env fallbacks: EINK_WORKER_URL, EINK_API_KEY.`);
   process.exit(2);
@@ -124,6 +128,8 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
     panY: 0,
     zoom: 1,
     isPublic: false,
+    allowUpscale: false,
+    checkOnly: false,
     paths: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -143,13 +149,16 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
       case "--pan-y": opts.panY = Number(next()); break;
       case "--zoom": opts.zoom = Number(next()); break;
       case "--public": opts.isPublic = true; break;
+      case "--allow-upscale": opts.allowUpscale = true; break;
+      case "--check-only": opts.checkOnly = true; break;
       case "--help": case "-h": usage();
       default:
         if (arg.startsWith("--")) usage();
         opts.paths.push(arg);
     }
   }
-  if (!opts.url || !opts.apiKey || !opts.bucket || opts.paths.length === 0) usage();
+  if (opts.paths.length === 0) usage();
+  if (!opts.checkOnly && (!opts.url || !opts.apiKey || !opts.bucket)) usage();
   if (!DITHER_ALGORITHMS.includes(opts.dither)) {
     console.error(`--dither must be one of: ${DITHER_ALGORITHMS.join(", ")}`);
     process.exit(2);
@@ -419,6 +428,44 @@ async function buildUploadForm(
   return form;
 }
 
+/**
+ * Resolution gate: one source image feeds every board's packed variant, and
+ * decodeUpright() cover-fits (never letterboxes) — a source smaller than a
+ * board's upright canvas gets upscaled, which reads as blur on the display.
+ * Fail fast listing offenders (per board, since a source can be fine for the
+ * small board and too small for the big one) unless --allow-upscale.
+ * Post-orientation dimensions, same swap rule as decodeUpright().
+ */
+async function checkResolution(files: string[], allowUpscale: boolean): Promise<void> {
+  if (files.length === 0) return;
+  const problems: string[] = [];
+  for (const file of files) {
+    const meta = await sharp(file).metadata();
+    if (!meta.width || !meta.height) throw new Error(`${file}: cannot read image dimensions`);
+    const swap = meta.orientation !== undefined && meta.orientation >= 5 && meta.orientation <= 8;
+    const width = swap ? meta.height : meta.width;
+    const height = swap ? meta.width : meta.height;
+    for (const board of BOARD_IDS) {
+      const g = BOARD_GEOMETRY[board];
+      const uprightW = g.needsRotation ? g.displayHeight : g.displayWidth;
+      const uprightH = g.needsRotation ? g.displayWidth : g.displayHeight;
+      if (width < uprightW || height < uprightH) {
+        const scale = Math.max(uprightW / width, uprightH / height);
+        problems.push(
+          `  ${basename(file)}: ${width}x${height} is smaller than ${board}'s ${uprightW}x${uprightH} canvas (would upscale x${scale.toFixed(2)})`
+        );
+      }
+    }
+  }
+  if (problems.length === 0) return;
+  console.error(
+    `${problems.length} resolution problem(s) — sources smaller than a board's upright canvas get upscaled (soft on the display):\n` +
+      problems.join("\n") +
+      (allowUpscale ? "\n--allow-upscale set; continuing anyway." : "\nReplace the file(s) with higher-resolution versions, or pass --allow-upscale to upload anyway.")
+  );
+  if (!allowUpscale) process.exit(1);
+}
+
 function defaultFilename(path: string): string {
   const name = basename(path);
   if (!name || name.length > 255 || CONTROL_CHARS.test(name)) {
@@ -429,10 +476,20 @@ function defaultFilename(path: string): string {
 
 export async function main(argv: string[]): Promise<void> {
   const opts = parseArgs(argv);
+  if (opts.checkOnly) {
+    const files = await expandPaths(opts.paths);
+    await checkResolution(files, opts.allowUpscale);
+    console.log(`${files.length} file(s): resolution check passed.`);
+    return;
+  }
   const { bucketId, key } = await resolveBucketAndKey(opts.url, opts.apiKey, opts);
 
   const existing = await listExistingFilenames(opts.url, opts.apiKey, bucketId);
   const files = await expandPaths(opts.paths);
+  const pending = files.filter((f) => !existing.has(defaultFilename(f)));
+  // Gate resolution only for files that will actually be uploaded — a
+  // small source already in the bucket shouldn't block the rest.
+  await checkResolution(pending, opts.allowUpscale);
   console.log(`${files.length} image file(s) found, ${existing.size} already in bucket.`);
 
   let uploaded = 0;
