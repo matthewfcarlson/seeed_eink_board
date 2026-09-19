@@ -102,6 +102,7 @@ interface Options {
   isPublic: boolean;
   allowUpscale: boolean;
   checkOnly: boolean;
+  fit: "cover" | "contain";
   paths: string[];
 }
 
@@ -111,6 +112,8 @@ function usage(): never {
     <files-or-directories...> [--dither floyd_steinberg|atkinson|ordered]
     [--bucket-key <base64 32-byte key | invite #key= fragment | invite URL>]
     [--pan-x 0..1] [--pan-y 0..1] [--zoom >=1] [--public] [--allow-upscale]
+    [--fit cover|contain]  — cover fills the canvas (crops edges, default);
+      contain letterboxes the whole image onto a white canvas
     [--check-only <files-or-dirs>]  — just run the resolution gate, no upload
 
 Env fallbacks: EINK_WORKER_URL, EINK_API_KEY.`);
@@ -130,6 +133,7 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
     isPublic: false,
     allowUpscale: false,
     checkOnly: false,
+    fit: "cover",
     paths: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -151,6 +155,15 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
       case "--public": opts.isPublic = true; break;
       case "--allow-upscale": opts.allowUpscale = true; break;
       case "--check-only": opts.checkOnly = true; break;
+      case "--fit": {
+        const v = next();
+        if (v !== "cover" && v !== "contain") {
+          console.error(`--fit must be "cover" or "contain" (got "${v}")`);
+          process.exit(2);
+        }
+        opts.fit = v;
+        break;
+      }
       case "--help": case "-h": usage();
       default:
         if (arg.startsWith("--")) usage();
@@ -164,6 +177,10 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
     process.exit(2);
   }
   opts.url = opts.url.replace(/\/+$/, "");
+  // Center contain-fits vertically unless the caller says otherwise — the
+  // cover default of panY=0 (top-align, keeps heads in portrait crops) would
+  // pin a letterboxed landscape painting to the top of the screen.
+  if (!argv.includes("--pan-y")) opts.panY = opts.fit === "contain" ? 0.5 : 0;
   return opts;
 }
 
@@ -321,15 +338,18 @@ async function expandPaths(paths: string[]): Promise<string[]> {
 
 /**
  * sharp twin of client/decode.ts's decodeToUprightBuffer(): EXIF-correct,
- * cover-fit to uprightW x uprightH, crop window placed per CropParams
- * (panX/panY in [0,1], zoom >= 1). Same math, same defaults — a 1px-level
- * difference from canvas vs lanczos resampling is immaterial.
+ * fit to uprightW x uprightH with a crop window placed per CropParams
+ * (panX/panY in [0,1], zoom >= 1). "cover" (the browser pipeline's only
+ * mode) scales to fill and crops the overflow; "contain" scales to fit and
+ * letterboxes the remainder in white — the whole work stays visible, at the
+ * cost of white bands on whichever axis doesn't fill.
  */
 async function decodeUpright(
   file: string,
   uprightW: number,
   uprightH: number,
-  crop: { panX: number; panY: number; zoom: number }
+  crop: { panX: number; panY: number; zoom: number },
+  fit: "cover" | "contain"
 ): Promise<{ rgba: Uint8ClampedArray; width: number; height: number }> {
   const img = sharp(file).rotate(); // no-arg rotate() = auto-orient from EXIF
   const meta = await img.metadata();
@@ -340,17 +360,52 @@ async function decodeUpright(
   const width = swap ? meta.height : meta.width;
   const height = swap ? meta.width : meta.height;
 
-  const scale = Math.max(uprightW / width, uprightH / height) * Math.max(1, crop.zoom);
-  const scaledW = Math.max(uprightW, Math.round(width * scale));
-  const scaledH = Math.max(uprightH, Math.round(height * scale));
+  const scale =
+    (fit === "contain"
+      ? Math.min(uprightW / width, uprightH / height)
+      : Math.max(uprightW / width, uprightH / height)) * Math.max(1, crop.zoom);
+  const scaledW = Math.round(width * scale);
+  const scaledH = Math.round(height * scale);
   const clampedPanX = Math.min(1, Math.max(0, crop.panX));
   const clampedPanY = Math.min(1, Math.max(0, crop.panY));
-  const x1 = Math.round((scaledW - uprightW) * clampedPanX);
-  const y1 = Math.round((scaledH - uprightH) * clampedPanY);
 
+  if (fit === "cover") {
+    const x1 = Math.round((scaledW - uprightW) * clampedPanX);
+    const y1 = Math.round((scaledH - uprightH) * clampedPanY);
+    const { data, info } = await img
+      .resize(scaledW, scaledH, { fit: "fill" })
+      .extract({ left: x1, top: y1, width: uprightW, height: uprightH })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return {
+      rgba: new Uint8ClampedArray(data.buffer, data.byteOffset, info.width * info.height * 4),
+      width: info.width,
+      height: info.height,
+    };
+  }
+
+  // contain: place the scaled image on the canvas per pan, crop if zoom
+  // pushed it past the edge, then pad the remaining slack with white (the
+  // dither palette maps 255 to the e-ink white nibble).
+  const left = Math.round((uprightW - scaledW) * clampedPanX);
+  const top = Math.round((uprightH - scaledH) * clampedPanY);
+  const cropX = Math.max(0, -left);
+  const cropY = Math.max(0, -top);
+  const fittedW = Math.min(scaledW - cropX, uprightW);
+  const fittedH = Math.min(scaledH - cropY, uprightH);
+  const padL = Math.min(Math.round((uprightW - fittedW) * clampedPanX), uprightW - fittedW);
+  const padT = Math.min(Math.round((uprightH - fittedH) * clampedPanY), uprightH - fittedH);
   const { data, info } = await img
     .resize(scaledW, scaledH, { fit: "fill" })
-    .extract({ left: x1, top: y1, width: uprightW, height: uprightH })
+    .extract({ left: cropX, top: cropY, width: fittedW, height: fittedH })
+    .extend({
+      left: padL,
+      top: padT,
+      right: uprightW - fittedW - padL,
+      bottom: uprightH - fittedH - padT,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -383,7 +438,8 @@ async function buildUploadForm(
   filename: string,
   key: Uint8Array,
   dither: DitherAlgorithm,
-  crop: { panX: number; panY: number; zoom: number }
+  crop: { panX: number; panY: number; zoom: number },
+  fit: "cover" | "contain"
 ): Promise<FormData> {
   const aesKey = await importAesKeyRaw(key);
   const rawBytes = new Uint8Array(await readFile(file));
@@ -398,7 +454,7 @@ async function buildUploadForm(
     const uprightW = geometry.needsRotation ? geometry.displayHeight : geometry.displayWidth;
     const uprightH = geometry.needsRotation ? geometry.displayWidth : geometry.displayHeight;
 
-    const upright = await decodeUpright(file, uprightW, uprightH, crop);
+    const upright = await decodeUpright(file, uprightW, uprightH, crop, fit);
     // rotate90CW() copies, so enhance()ing the landscape copy leaves the
     // (pre-enhance) upright pristine for the thumbnail — same as the browser.
     const oriented = geometry.needsRotation
@@ -434,9 +490,11 @@ async function buildUploadForm(
  * board's upright canvas gets upscaled, which reads as blur on the display.
  * Fail fast listing offenders (per board, since a source can be fine for the
  * small board and too small for the big one) unless --allow-upscale.
- * Post-orientation dimensions, same swap rule as decodeUpright().
+ * Post-orientation dimensions, same swap rule as decodeUpright(). Cover needs
+ * both dimensions at least as large as the canvas; contain only needs one
+ * (it scales to the smaller ratio and letterboxes).
  */
-async function checkResolution(files: string[], allowUpscale: boolean): Promise<void> {
+async function checkResolution(files: string[], allowUpscale: boolean, fit: "cover" | "contain"): Promise<void> {
   if (files.length === 0) return;
   const problems: string[] = [];
   for (const file of files) {
@@ -449,8 +507,15 @@ async function checkResolution(files: string[], allowUpscale: boolean): Promise<
       const g = BOARD_GEOMETRY[board];
       const uprightW = g.needsRotation ? g.displayHeight : g.displayWidth;
       const uprightH = g.needsRotation ? g.displayWidth : g.displayHeight;
-      if (width < uprightW || height < uprightH) {
-        const scale = Math.max(uprightW / width, uprightH / height);
+      const fits =
+        fit === "cover"
+          ? width >= uprightW && height >= uprightH
+          : width >= uprightW || height >= uprightH;
+      if (!fits) {
+        const scale =
+          fit === "cover"
+            ? Math.max(uprightW / width, uprightH / height)
+            : Math.min(uprightW / width, uprightH / height);
         problems.push(
           `  ${basename(file)}: ${width}x${height} is smaller than ${board}'s ${uprightW}x${uprightH} canvas (would upscale x${scale.toFixed(2)})`
         );
@@ -478,7 +543,7 @@ export async function main(argv: string[]): Promise<void> {
   const opts = parseArgs(argv);
   if (opts.checkOnly) {
     const files = await expandPaths(opts.paths);
-    await checkResolution(files, opts.allowUpscale);
+    await checkResolution(files, opts.allowUpscale, opts.fit);
     console.log(`${files.length} file(s): resolution check passed.`);
     return;
   }
@@ -489,7 +554,7 @@ export async function main(argv: string[]): Promise<void> {
   const pending = files.filter((f) => !existing.has(defaultFilename(f)));
   // Gate resolution only for files that will actually be uploaded — a
   // small source already in the bucket shouldn't block the rest.
-  await checkResolution(pending, opts.allowUpscale);
+  await checkResolution(pending, opts.allowUpscale, opts.fit);
   console.log(`${files.length} image file(s) found, ${existing.size} already in bucket.`);
 
   let uploaded = 0;
@@ -503,7 +568,7 @@ export async function main(argv: string[]): Promise<void> {
     }
     process.stdout.write(`  upload ${filename} … `);
     try {
-      const form = await buildUploadForm(file, filename, key, opts.dither, { panX: opts.panX, panY: opts.panY, zoom: opts.zoom });
+      const form = await buildUploadForm(file, filename, key, opts.dither, { panX: opts.panX, panY: opts.panY, zoom: opts.zoom }, opts.fit);
       await api(
         opts.url,
         opts.apiKey,

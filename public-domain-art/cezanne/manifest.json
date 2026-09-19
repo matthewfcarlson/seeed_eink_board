@@ -1,0 +1,61 @@
+{
+  "bucket": "cezanne",
+  "artist": "Paul Cézanne (1839-1906)",
+  "category_basis": "Died 1906; all works more than 100 years old, past both the life+70 and pre-1929 US thresholds. Every file is tagged Public domain (PD-Art) on Wikimedia Commons.",
+  "images": [
+    {
+      "filename": "mont_sainte_victoire.jpg",
+      "title": "Mont Sainte-Victoire",
+      "year": "1886-1887",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Paul_Cézanne_-_Mont_Sainte-Victoire_-_Google_Art_Project_(27768167).jpg",
+      "institution": "Google Art Project scan (1886-87 version; see Commons file page)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan)."
+    },
+    {
+      "filename": "card_players.jpg",
+      "title": "The Card Players (Les joueurs de cartes)",
+      "year": "1892-1895",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Paul_Cézanne,_Les_joueurs_de_carte_(1892-95).jpg",
+      "institution": "Courtauld Institute of Art, London",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; source cezannecatalogue.com entry 691."
+    },
+    {
+      "filename": "still_life_with_apples.jpg",
+      "title": "Still Life with Apples",
+      "year": "c. 1890",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Paul_Cézanne_-_Still_Life_with_Apples_-_Google_Art_Project.jpg",
+      "institution": "J. Paul Getty Museum, Los Angeles",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan); Getty open content."
+    },
+    {
+      "filename": "the_large_bathers.jpg",
+      "title": "The Large Bathers (Les Grandes Baigneuses)",
+      "year": "c. 1900-1906",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Paul_Cézanne,_French_-_The_Large_Bathers_-_Google_Art_Project.jpg",
+      "institution": "National Gallery of Art, Washington DC",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan; NGA naming convention)."
+    },
+    {
+      "filename": "madame_cezanne.jpg",
+      "title": "Portrait of Madame Cézanne with Loosened Hair (Madame Cézanne aux cheveux dénoués)",
+      "year": "c. 1886",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Madame_Cézanne_aux_cheveux_dénoués,_par_Paul_Cézanne,_Yorck.jpg",
+      "institution": "Yorck Project scan (see Commons file page)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Yorck Project)."
+    },
+    {
+      "filename": "gulf_of_marseille.jpg",
+      "title": "The Gulf of Marseille Seen from L'Estaque (Le Golfe de Marseille vu de l'Estaque)",
+      "year": "c. 1878-1879",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Le_Golfe_de_Marseille_vu_de_l'Estaque,_par_Paul_Cézanne,_FWN_119.jpg",
+      "institution": "See Commons source page (cezannecatalogue.com entry 386)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; catalog FWN 119."
+    }
+  ]
+}

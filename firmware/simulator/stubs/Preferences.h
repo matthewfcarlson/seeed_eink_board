@@ -43,11 +43,21 @@ inline std::string g_simStateDir = SIM_STATE_DIR;
 // here takes a mutex.
 class Preferences {
 public:
-    void begin(const char *ns, bool readOnly = false) {
+    // Matches the real ESP32 Preferences::begin() signature (bool return:
+    // false when opening read-only and the namespace doesn't exist yet -
+    // e.g. fresh .state dir - so firmware's loadFromNVS() early-return path
+    // is exercised the same way it is on hardware).
+    bool begin(const char *ns, bool readOnly = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         ns_ = ns ? ns : "";
         readOnly_ = readOnly;
         load();
+        if (readOnly) {
+            FILE *f = fopen(filePath().c_str(), "r");
+            if (!f) return false;
+            fclose(f);
+        }
+        return true;
     }
     void end() {}  // every mutator below saves immediately - see putRaw()/remove()
 

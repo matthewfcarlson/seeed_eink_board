@@ -33,6 +33,12 @@ export const RATE_LIMITS = {
    *  render — 300 per 5 min per user is far above human usage but bounds
    *  scripted abuse of a leaked key. */
   admin: { limit: 300, windowSeconds: 300 },
+  /** /admin/me session endpoints (whoami, display name, sharing-key
+   *  backfill) — deliberately NOT in the `admin` bucket. The login flow calls
+   *  these right after a passkey ceremony and on every page load, so a burst
+   *  of heavy dashboard calls must never be able to lock an account out of
+   *  checking its own session or logging in. */
+  adminMe: { limit: 60, windowSeconds: 300 },
 } as const;
 
 /** True when the request is within `limit` for this window; false once the

@@ -1,0 +1,70 @@
+{
+  "bucket": "caravaggio",
+  "artist": "Caravaggio / Michelangelo Merisi da Caravaggio (1571-1610)",
+  "category_basis": "Died 1610; every work is more than 400 years old, unambiguously public domain worldwide. Every file is tagged Public domain (PD-Art) on Wikimedia Commons.",
+  "images": [
+    {
+      "filename": "calling.jpg",
+      "title": "The Calling of Saint Matthew",
+      "year": "1599-1600",
+      "source_url": "https://commons.wikimedia.org/wiki/File:The_Calling_of_Saint_Matthew-Caravaggo_(1599-1600).jpg",
+      "institution": "Contarelli Chapel, San Luigi dei Francesi, Rome",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; work created 1599-1600."
+    },
+    {
+      "filename": "bacchus.jpg",
+      "title": "Young Sick Bacchus (Bacco adolescente)",
+      "year": "c. 1593-1594",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Caravaggio_-_Bacco_adolescente_-_Google_Art_Project.jpg",
+      "institution": "Galleria Borghese, Rome",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan)."
+    },
+    {
+      "filename": "cardsharps.jpg",
+      "title": "The Cardsharps (I bari)",
+      "year": "c. 1594",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Caravaggio_(Michelangelo_Merisi)_-_The_Cardsharps_-_Google_Art_Project.jpg",
+      "institution": "Kimbell Art Museum, Fort Worth",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan)."
+    },
+    {
+      "filename": "basket.jpg",
+      "title": "Boy with a Basket of Fruit",
+      "year": "c. 1593",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Boy_with_a_Basket_of_Fruit_by_Caravaggio.jpg",
+      "institution": "Galleria Borghese, Rome",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art."
+    },
+    {
+      "filename": "narcissus.jpg",
+      "title": "Narcissus",
+      "year": "c. 1594-1596",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Narcissus-Caravaggio_(1594-96)_edited.jpg",
+      "institution": "Palazzo Barberini, Rome",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art."
+    },
+    {
+      "filename": "lute.jpg",
+      "title": "The Lute Player",
+      "year": "c. 1596",
+      "source_url": "https://commons.wikimedia.org/wiki/File:The_Lute_Player-Caravaggio_(Hermitage).jpg",
+      "institution": "Hermitage Museum, Saint Petersburg",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; Hermitage Museum source."
+    },
+    {
+      "filename": "emmaus.jpg",
+      "title": "Supper at Emmaus",
+      "year": "1601",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Supper_at_Emmaus-Caravaggio_(1601).jpg",
+      "institution": "Pinacoteca di Brera, Milan",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art."
+    }
+  ]
+}

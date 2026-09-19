@@ -83,14 +83,41 @@ for (const folder of folders) {
     continue;
   }
 
-  const files = manifest.images.map((i) => path.join(folder, i.filename));
-  console.log(`==> ${name}: uploading ${files.length} image(s) to bucket "${manifest.bucket}"`);
-  const res = spawnSync(process.execPath, [uploader, "--bucket", manifest.bucket, ...passThrough, ...files], {
-    stdio: "inherit",
-  });
-  if (res.status !== 0) {
-    console.error(`==> ${name}: upload failed (exit ${res.status})`);
-    failed++;
+  // Per-image crop params (with the manifest's folder-level default):
+  //   fit: "cover" (default) fills the canvas and crops the overflow;
+  //   "contain" letterboxes the whole image on white. panX/panY place the
+  //   crop (cover) or the image within the padding (contain) — 0.5 centers;
+  //   cover's panY defaults to 0 (top-align, keeps heads in portrait crops)
+  //   while contain's defaults to 0.5 (center). zoom >= 1 crops in further.
+  // Images with identical effective params upload in one invocation; others
+  // get their own, so a folder can mix portrait cover-crops and letterboxed
+  // landscapes without one global flag flattening the choice.
+  const folderFit = manifest.fit ?? "cover";
+  const groups = new Map();
+  for (const img of manifest.images) {
+    const fit = img.fit ?? folderFit;
+    const panX = img.panX ?? 0.5;
+    const panY = img.panY ?? (fit === "contain" ? 0.5 : 0);
+    const zoom = img.zoom ?? 1;
+    const key = JSON.stringify([fit, panX, panY, zoom]);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        flags: ["--fit", fit, "--pan-x", String(panX), "--pan-y", String(panY), "--zoom", String(zoom)],
+        files: [],
+      });
+    }
+    groups.get(key).files.push(path.join(folder, img.filename));
+  }
+
+  for (const [key, { flags, files }] of groups) {
+    console.log(`==> ${name}: uploading ${files.length} image(s) to bucket "${manifest.bucket}" (${flags.join(" ")})`);
+    const res = spawnSync(process.execPath, [uploader, "--bucket", manifest.bucket, ...passThrough, ...flags, ...files], {
+      stdio: "inherit",
+    });
+    if (res.status !== 0) {
+      console.error(`==> ${name}: upload failed (exit ${res.status})`);
+      failed++;
+    }
   }
 }
 if (failed > 0) {

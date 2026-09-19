@@ -17,6 +17,6 @@
  *      roll it out — there's no shared "every device" tier, see CLAUDE.md's
  *      OTA section.
  */
-#define FIRMWARE_VERSION "0.5.2"
+#define FIRMWARE_VERSION "0.5.3"
 
 #endif // FIRMWARE_VERSION_H

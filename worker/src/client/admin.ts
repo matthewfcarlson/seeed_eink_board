@@ -132,6 +132,14 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
       body = await res.json();
       if (body && body.error) message = body.error;
     } catch {}
+    // 429 responses are plain text (rateLimitedResponse) with a Retry-After
+    // header — show that instead of a bare status code, so "rate limited,
+    // retry in Ns" isn't indistinguishable from an auth failure.
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("Retry-After");
+      message = "rate limited" + (retryAfter ? ` — retry in ${retryAfter}s` : "");
+      body = null;
+    }
     // Structured extras for callers that branch on a specific failure (e.g.
     // confirmUpload's 409 duplicate flow) — every existing catch site only
     // reads err.message, so this is purely additive.
@@ -155,7 +163,17 @@ async function publicFetch(path: string, body: any): Promise<any> {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));
+  if (!res.ok) {
+    let message = data.error || (res.status + " " + res.statusText);
+    // Same as apiFetch: surface Retry-After on rate limits (plain-text body,
+    // no JSON error field) so a burned passkey-ceremony budget reads as what
+    // it is, not as a vague failure.
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("Retry-After");
+      message = "rate limited" + (retryAfter ? ` — retry in ${retryAfter}s` : "");
+    }
+    throw new Error(message);
+  }
   return data;
 }
 
@@ -442,8 +460,18 @@ async function tryLogin(showError: boolean): Promise<boolean> {
     await renderApp();
     return true;
   } catch (err: any) {
-    if (showError) showMessage("login-message", "Invalid API key: " + err.message, "error");
-    clearApiKey();
+    // 429 is NOT an invalid key — the saved API key is still valid, so keep
+    // it. Clearing here turned a transient rate limit into a forced logout,
+    // and the next attempt would then burn another passkey ceremony on an
+    // already-exhausted budget.
+    if (err.status === 429) {
+      if (showError) {
+        showMessage("login-message", "Rate limited — wait a few minutes and retry. Your saved login is still valid.", "error");
+      }
+    } else {
+      if (showError) showMessage("login-message", "Invalid API key: " + err.message, "error");
+      clearApiKey();
+    }
     return false;
   }
 }
@@ -653,10 +681,12 @@ el("schedule-modal-close-btn").addEventListener("click", () => {
   el("schedule-modal-overlay").classList.remove("open");
 });
 
-// "Uptime" here means wall-clock time since the device's row was first created
+// "Registered" means wall-clock time since the device's row was first created
 // (its initial registration/provisioning), not continuous runtime — the board
 // deep-sleeps between wake cycles, so there's no meaningful "time since last boot".
-function formatUptime(createdAtSeconds: number): string {
+// Resetting or re-provisioning the hardware only updates the existing row
+// (ON CONFLICT ... DO UPDATE preserves created_at), so this counter never restarts.
+function formatRegisteredAge(createdAtSeconds: number): string {
   const seconds = Math.max(0, Math.floor(Date.now() / 1000) - createdAtSeconds);
   const days = Math.floor(seconds / 86400);
   if (days > 0) {
@@ -717,8 +747,8 @@ function renderDevicesTable(devices: any[]) {
     const board = d.board
       ? '<span class="pill" title="MAC ' + escapeHtml(d.mac) + '">' + escapeHtml(d.board) + "</span>"
       : '<span class="hint" title="MAC ' + escapeHtml(d.mac) + '">unknown</span>';
-    const uptime = d.created_at
-      ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatUptime(d.created_at) + "</span>"
+    const registered = d.created_at
+      ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatRegisteredAge(d.created_at) + "</span>"
       : '<span class="hint">n/a</span>';
     const currentImageThumbUrl = d.current_image && d.current_image.id ? thumbnailUrlCache[d.current_image.id] : null;
     const currentImage = !d.current_image
@@ -731,7 +761,7 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + board + "</td>" +
       "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
-      "<td>" + uptime + "</td>" +
+      "<td>" + registered + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
       '<td><button class="ghost sm" onclick="openBucketModal(' + jsArg(d.mac) + ')">Manage</button></td>' +

@@ -278,6 +278,19 @@ ciphertext. Rotation order is upload order, tracked per-device
 (`worker/src/lib/rotation.ts`); uploading/deleting takes effect on the
 device's next `/image_packed` request, which also advances the cursor.
 
+**Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
+may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default
+board's *plaintext* packed buffer, computed client-side before
+compression/encryption (`worker/src/client/crypto.ts`'s
+`computeContentHash`; the existing `packed_hash` hashes ciphertext, whose
+random GCM nonce makes it useless for this). The Worker rejects a duplicate
+rendition with 409 naming the existing filename; the UI offers "upload
+anyway" (retries with `?allow_duplicate=1`). Keying with the bucket key
+means the Worker can only compare hashes within one bucket — no cross-bucket
+correlation of identical photos. Bucket-key rotation recomputes every image's
+hash under the new key via the reencrypt path. Trusted client metadata (the
+Worker can't verify it) — a courtesy check, not a security boundary.
+
 ## OTA Firmware Updates
 
 Channel-based (`stable`/`beta`), not admin-picked versions

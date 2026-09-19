@@ -39,7 +39,13 @@ void OtaHealth::begin() {
 }
 
 void OtaHealth::loadFromNVS() {
-    prefs_.begin(NVS_NAMESPACE, true);  // read-only
+    // Read-only. NOT_FOUND on a fresh flash (namespace doesn't exist until
+    // the first write) is expected, not an error - the getX calls would
+    // return their defaults on the unopened object anyway, so return early
+    // rather than letting the core log an [E] Preferences line.
+    if (!prefs_.begin(NVS_NAMESPACE, true)) {
+        return;
+    }
     pendingVersion_ = prefs_.getString(KEY_PEND_VER, "");
     previousVersion_ = prefs_.getString(KEY_PREV_VER, "");
     bootAttempts_ = prefs_.getUInt(KEY_ATTEMPTS, 0);

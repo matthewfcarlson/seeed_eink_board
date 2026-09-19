@@ -1,0 +1,61 @@
+{
+  "bucket": "james-ensor",
+  "artist": "James Ensor (1860-1949)",
+  "category_basis": "Ensor died 19 November 1949; the Belgian term (life+70) expired in 2020. Every work shown predates 1930, so each is public domain in both Belgium (life+70) and the US (pre-1930 publication). One file (skeletons_herring.jpg) is a museum photograph under CC BY-SA 4.0 of a public-domain painting — fine for personal use with attribution.",
+  "images": [
+    {
+      "filename": "scandalized_masks.jpg",
+      "title": "The Scandalized Masks (Les masques scandalisés)",
+      "year": "1883",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor,_Scandalized_Mask_(1883)_oil_on_canvas,_135_x_112_cm.,_Royal_Museums_of_Fine_Arts_of_Belgium,_Brussels.jpg",
+      "institution": "Royal Museums of Fine Arts of Belgium, Brussels",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; painted 1883."
+    },
+    {
+      "filename": "self_portrait_flowered_hat.jpg",
+      "title": "Self-Portrait with Flowered Hat",
+      "year": "1883-1888",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor_-_Self-portrait_with_flower_hat.jpg",
+      "institution": "Mu.ZEE, Ostend",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art (Mu.ZEE source); dated 1883-1888 on Commons."
+    },
+    {
+      "filename": "masks_confronting_death.jpg",
+      "title": "Masks Confronting Death (Masques raillant la mort)",
+      "year": "1888",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Masks_Confronting_Death_(1888),_James_Ensor.jpg",
+      "institution": "Museum of Modern Art, New York",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; painted 1888."
+    },
+    {
+      "filename": "christs_entry.jpg",
+      "title": "Christ's Entry into Brussels in 1889",
+      "year": "1888",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Christ's_Entry_into_Brussels_in_1889.jpg",
+      "institution": "J. Paul Getty Museum, Los Angeles",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; Getty open content (getty.edu source)."
+    },
+    {
+      "filename": "skeletons_herring.jpg",
+      "title": "Skeletons Fighting over a Pickled Herring",
+      "year": "1891",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Skeletons_Fighting_over_a_Pickled_Herring_by_James_Ensor.jpg",
+      "institution": "Royal Museum of Fine Arts Antwerp (KMSKA)",
+      "pd_status": "Painting public domain; photo CC BY-SA 4.0 (photographer 1Veertje)",
+      "pd_basis": "Underlying work 1891 (PD); museum photograph licensed CC BY-SA 4.0 — attribution required, share-alike. Fine for personal display."
+    },
+    {
+      "filename": "death_and_the_masks.jpg",
+      "title": "Death and the Masks (Le mort et les masques)",
+      "year": "c. 1897",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor_-_Death_and_the_Masks.jpg",
+      "institution": "See Commons source page (pubhist.com)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; painted c. 1897."
+    }
+  ]
+}

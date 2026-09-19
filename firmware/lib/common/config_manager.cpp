@@ -44,7 +44,16 @@ void ConfigManager::begin() {
 }
 
 void ConfigManager::loadFromNVS() {
-    prefs_.begin(NVS_NAMESPACE, true);  // Read-only mode
+    // Read-only. nvs_open fails with NOT_FOUND on a fresh flash - the
+    // namespace doesn't exist until the first write creates it (see
+    // ensureDeviceSecret()/saveToNVS()). That's not an error: every getX
+    // below would return its default on the unopened object anyway (empty
+    // SSID -> auto config mode), so return early with a friendly message
+    // instead of letting the core log a scary [E] Preferences line.
+    if (!prefs_.begin(NVS_NAMESPACE, true)) {
+        Serial.println("ConfigManager: fresh NVS - no saved config yet, using defaults");
+        return;
+    }
 
     // Load with defaults if not present
     wifiSsid_ = prefs_.getString(KEY_WIFI_SSID, "");
