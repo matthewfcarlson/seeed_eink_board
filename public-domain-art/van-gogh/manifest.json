@@ -1,0 +1,61 @@
+{
+  "bucket": "Vincent van Gogh (1853-1890)",
+  "artist": "Vincent van Gogh (1853-1890)",
+  "category_basis": "Van Gogh died in 1890; all works are more than 130 years old, well past both the life+70 and pre-1929 thresholds. Every file is tagged PD-old-100-expired on Wikimedia Commons.",
+  "images": [
+    {
+      "filename": "starry_night.jpg",
+      "title": "The Starry Night",
+      "year": "1889",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Vincent_van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg",
+      "institution": "Museum of Modern Art (MoMA), New York",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired; artist died 1890."
+    },
+    {
+      "filename": "sunflowers.jpg",
+      "title": "Sunflowers (F458)",
+      "year": "1889",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Vincent_van_Gogh_-_Sunflowers_-_VGM_F458.jpg",
+      "institution": "Van Gogh Museum, Amsterdam",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons, Van Gogh Museum public domain release."
+    },
+    {
+      "filename": "cafe_terrace_at_night.jpg",
+      "title": "Café Terrace at Night",
+      "year": "1888",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Vincent_Willem_van_Gogh_-_Cafe_Terrace_at_Night_(Yorck).jpg",
+      "institution": "Kröller-Müller Museum, Otterlo",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired / PD-Art (Yorck Project)."
+    },
+    {
+      "filename": "wheatfield_with_crows.jpg",
+      "title": "Wheatfield with Crows",
+      "year": "1890",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Vincent_van_Gogh_-_Wheatfield_with_crows_-_Google_Art_Project.jpg",
+      "institution": "Van Gogh Museum, Amsterdam",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired."
+    },
+    {
+      "filename": "irises.jpg",
+      "title": "Irises",
+      "year": "1889",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Irises-Vincent_van_Gogh.jpg",
+      "institution": "J. Paul Getty Museum, Los Angeles",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired; Getty Open Content Program."
+    },
+    {
+      "filename": "almond_blossom.jpg",
+      "title": "Almond Blossom",
+      "year": "1890",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Vincent_van_Gogh_-_Almond_blossom_-_Google_Art_Project.jpg",
+      "institution": "Van Gogh Museum, Amsterdam",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired."
+    }
+  ]
+}

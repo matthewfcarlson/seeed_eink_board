@@ -318,6 +318,16 @@ components:
       description: >-
         A device MAC owned by the caller. There is no shared `default`/`global`
         tier — every schedule override and firmware target is per-device.
+  responses:
+    RateLimited:
+      description: Rate limit exceeded (see lib/rate-limit.ts — generous fixed windows per IP/MAC/user; failing open on limiter errors)
+      content:
+        text/plain:
+          schema: { type: string }
+      headers:
+        Retry-After:
+          description: Seconds until the current window resets
+          schema: { type: integer }
 paths:
   /current:
     get:
@@ -377,6 +387,17 @@ paths:
                       whether this account may mark a bucket it owns
                       is_public; the client uses it to decide whether to show
                       the "Make this public" checkbox at all.
+                  sharing_public_key:
+                    type: string
+                    nullable: true
+                    description: >-
+                      The account's P-256 sharing public key (base64, raw
+                      point), null until its first passkey login. Public by
+                      design — it's the wrap target for every bucket key
+                      shared with this account. Surfaced so a caller holding
+                      only the API key (scripts/upload-images.mjs) can wrap a
+                      new bucket's content key for this account exactly like
+                      the dashboard's browser does.
     patch:
       summary: Set your display name
       requestBody:
@@ -786,7 +807,11 @@ paths:
       description: >-
         Same shape as /admin/images/upload (one raw blob plus every board's
         packed+thumb ciphertext and a client-computed packed_hash), minus
-        filename/device_key/dither_algorithm, which don't change. Overwrites
+        filename/device_key/dither_algorithm, which don't change. May also
+        carry an optional `content_hash` (migrations/
+        0020_image_content_hash.sql) — the rotation re-derives the packed
+        pixels from scratch, so the refreshed hash (keyed under the NEW
+        bucket key) replaces the stored one. Overwrites
         the image's raw blob and every board's packed/thumb KV blobs, and
         bumps its key_version to the rotation's new_key_version. Idempotent —
         calling it again for an image already on the new version is a safe
@@ -825,6 +850,7 @@ paths:
                 thumb__ee04-7in3: { type: string, format: binary }
                 packed_hash__ee04-7in3: { type: string }
                 packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
+                content_hash: { type: string, description: Optional refreshed 16-char hex content hash under the NEW bucket key (see /admin/images/upload); recomputed because the rotation re-derives the packed pixels. }
       responses:
         '200':
           description: OK
@@ -954,6 +980,13 @@ paths:
           in: query
           required: true
           schema: { type: string }
+        - name: allow_duplicate
+          in: query
+          required: false
+          description: >-
+            Set to 1 to bypass the 409 duplicate rejection below (the client
+            sets this when the user confirms "upload anyway").
+          schema: { type: string, enum: ['1'] }
       requestBody:
         required: true
         content:
@@ -982,9 +1015,28 @@ paths:
                 thumb__ee04-7in3: { type: string, format: binary, description: AES-256-GCM ciphertext of EE04's dashboard preview JPEG }
                 packed_hash__ee04-7in3: { type: string, description: 16-char hex content hash over EE04's packed ciphertext. }
                 packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
+                content_hash:
+                  type: string
+                  description: >-
+                    Optional 16-char hex duplicate-detection hash (migrations/
+                    0020_image_content_hash.sql): HMAC-SHA256 keyed with a
+                    bucket-key-derived hash key (client/crypto.ts's
+                    computeContentHash) over the DEFAULT board's plaintext
+                    packed buffer, computed before compression/encryption so
+                    identical renditions collide regardless of source-file
+                    format or filename. Keyed so the Worker can only compare
+                    within one bucket — no cross-bucket correlation. Trusted
+                    client metadata, never verified; absent = no dedupe for
+                    this upload.
       responses:
         '201': { description: Uploaded }
         '400': { description: Missing or malformed field }
+        '409':
+          description: >-
+            Duplicate rendition — the bucket already contains an image with
+            this content_hash under a different filename. Body includes
+            `duplicate_of` (the existing filename). Retry with
+            `?allow_duplicate=1` to force the upload through.
         '403':
           description: >-
             No WRITE access to this bucket — unlike GET /admin/images, being
@@ -1120,6 +1172,8 @@ paths:
       security: []
       responses:
         '200': { description: OK }
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /auth/register/verify:
     post:
@@ -1154,6 +1208,8 @@ paths:
                 type: object
                 properties:
                   api_key: { type: string }
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /auth/login/options:
     post:
@@ -1161,6 +1217,8 @@ paths:
       security: []
       responses:
         '200': { description: OK }
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /auth/login/verify:
     post:

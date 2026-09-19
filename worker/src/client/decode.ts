@@ -29,6 +29,50 @@ export interface CropParams {
 export const DEFAULT_CROP: CropParams = { panX: 0.5, panY: 0, zoom: 1 };
 
 /**
+ * Cap for the "storage original" — the re-encoded copy we persist in place of
+ * the as-uploaded file. Must comfortably exceed the largest board's packed
+ * geometry (EE02: 1600x1200) × the crop UI's max zoom (3x) so a rotation's
+ * re-derive (admin.ts's reencryptOneImage, which re-crops from this blob with
+ * DEFAULT_CROP) still has pixels to work with at max zoom-in, while bounding
+ * the stored blob (and any upload) to a few hundred KB of JPEG instead of a
+ * multi-megabyte camera original.
+ */
+export const STORAGE_MAX_DIMENSION = 2560;
+const STORAGE_JPEG_QUALITY = 0.85;
+
+/**
+ * Decode -> EXIF-correct -> downscale (never upscale) to at most
+ * STORAGE_MAX_DIMENSION on the long side -> re-encode as JPEG. Replaces the
+ * as-uploaded file in the storage-original slot: the Worker never sees (or
+ * stores) the original bytes, KV usage stays bounded, and the lightbox still
+ * gets a high-quality preview. Re-encoded on white — JPEG has no alpha, and a
+ * transparent PNG uploaded as a photo should read as white on the e-ink panel
+ * (the display's resting color), not black.
+ */
+export async function resizeForStorage(file: Blob): Promise<Uint8Array> {
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  try {
+    const scale = Math.min(1, STORAGE_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("2D canvas context unavailable");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bitmap, 0, 0, width, height);
+
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: STORAGE_JPEG_QUALITY });
+    return new Uint8Array(await blob.arrayBuffer());
+  } finally {
+    bitmap.close();
+  }
+}
+
+/**
  * Decode -> EXIF-correct -> cover-fit to `targetWidth`x`targetHeight`,
  * cropped per `crop` (see CropParams). Exported on its own so the upload
  * flow can generate the dashboard thumbnail from this exact crop, in

@@ -7,6 +7,7 @@ import { getRotationSnapshot, markServed, peekPendingImage } from "../lib/rotati
 import { getImageVariant, getPackedImage } from "../lib/image-store";
 import { renderNoBucketBuffer, renderRegistrationBuffer } from "../lib/qr-registration";
 import { assignBucketUrl, registrationUrl } from "../lib/registration-url";
+import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 import { isValidMac } from "../lib/validate";
 
 /**
@@ -34,6 +35,9 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     // normalizeMac) — anything else can't come from a device, so reject it
     // before it can be rendered into the registration QR path below.
     if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
+    if (!(await checkRateLimit(c.env, "device", mac, RATE_LIMITS.device.limit, RATE_LIMITS.device.windowSeconds))) {
+      return rateLimitedResponse(RATE_LIMITS.device.windowSeconds);
+    }
     const lookup = await resolveDeviceKey(c.env, mac);
     const deviceKey = lookup.deviceKey;
 

@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import type { Env } from "../types";
 import { getFirmwareBinary } from "../lib/firmware-store";
+import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 import { isValidFirmwareVersion } from "../lib/validate";
 
 /**
@@ -19,6 +20,13 @@ import { isValidFirmwareVersion } from "../lib/validate";
  */
 export function registerFirmwareBinRoute(app: Hono<{ Bindings: Env }>) {
   app.get("/firmware_bin", async (c) => {
+    // No MAC on this endpoint (board comes from X-Device-Board) — rate limit
+    // per client IP. The binaries are public GitHub release assets anyway;
+    // the limit just stops bulk scraping through our KV.
+    const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+    if (!(await checkRateLimit(c.env, "firmware", ip, RATE_LIMITS.device.limit, RATE_LIMITS.device.windowSeconds))) {
+      return rateLimitedResponse(RATE_LIMITS.device.windowSeconds);
+    }
     const version = c.req.query("version");
     if (!version) return c.text("version query param is required", 400);
     // Echoed back as the X-Firmware-Version response header below — bound the

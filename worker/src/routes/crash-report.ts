@@ -3,6 +3,7 @@ import { DEFAULT_DEVICE_KEY, type Env } from "../types";
 import { normalizeMac } from "../lib/mac";
 import { resolveDeviceKey } from "../lib/auth-device";
 import { verifyDeviceSignature } from "../lib/device-signature";
+import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 import { isValidMac } from "../lib/validate";
 
 const MAX_BACKTRACE_ENTRIES = 16;
@@ -62,6 +63,9 @@ export function registerCrashReportRoute(app: Hono<{ Bindings: Env }>) {
     const mac = normalizeMac(macHeader);
     // Same validity gate as the other device-facing routes — see image-packed.ts.
     if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
+    if (!(await checkRateLimit(c.env, "crash", mac, RATE_LIMITS.crashReport.limit, RATE_LIMITS.crashReport.windowSeconds))) {
+      return rateLimitedResponse(RATE_LIMITS.crashReport.windowSeconds);
+    }
 
     const lookup = await resolveDeviceKey(c.env, mac);
     if (lookup.deviceKey !== DEFAULT_DEVICE_KEY) {

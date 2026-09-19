@@ -1,0 +1,61 @@
+{
+  "bucket": "Claude Monet (1840-1926)",
+  "artist": "Claude Monet (1840-1926)",
+  "category_basis": "All works date 1872-1919, published/created well before the 1929 US fixed-term cutoff. Monet died in 1926 (life+70 expired 1996). Every file is tagged PD-old-auto-expired / PD-old-100-expired on Wikimedia Commons.",
+  "images": [
+    {
+      "filename": "impression_sunrise.jpg",
+      "title": "Impression, Sunrise (Impression, soleil levant)",
+      "year": "1872",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Claude_Monet,_Impression,_soleil_levant.jpg",
+      "institution": "Musée Marmottan Monet, Paris",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons, CC-PD-Mark tag; published 1872."
+    },
+    {
+      "filename": "blue_water_lilies.jpg",
+      "title": "Blue Water Lilies (Nymphéas bleus)",
+      "year": "1916-1919",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Claude_Monet_-_Blue_Water_Lilies_-_Google_Art_Project.jpg",
+      "institution": "Musée d'Orsay, Paris",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-Art (PD-old-auto-expired)."
+    },
+    {
+      "filename": "woman_with_a_parasol.jpg",
+      "title": "Woman with a Parasol - Madame Monet and Her Son",
+      "year": "1875",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Claude_Monet_-_Woman_with_a_Parasol_-_Madame_Monet_and_Her_Son_-_Google_Art_Project.jpg",
+      "institution": "National Gallery of Art, Washington DC",
+      "pd_status": "Public domain",
+      "pd_basis": "National Gallery of Art open access; published 1875, well past both PD thresholds."
+    },
+    {
+      "filename": "rouen_cathedral_sunlight.jpg",
+      "title": "Rouen Cathedral, West Façade, Sunlight",
+      "year": "1894",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Claude_Monet_-_Rouen_Cathedral,_West_Fa%C3%A7ade,_Sunlight_-_Google_Art_Project.jpg",
+      "institution": "National Gallery of Art, Washington DC",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-Art (PD-old-auto-expired)."
+    },
+    {
+      "filename": "haystacks_end_of_summer.jpg",
+      "title": "Haystacks, End of Summer",
+      "year": "1891",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Claude_Monet_-_Haystacks,_end_of_Summer_-_Google_Art_Project.jpg",
+      "institution": "Musée d'Orsay, Paris",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-Art (PD-old-auto-expired)."
+    },
+    {
+      "filename": "water_lilies_and_japanese_bridge.jpg",
+      "title": "Water Lilies and Japanese Bridge",
+      "year": "1897-1899",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Water-Lilies-and-Japanese-Bridge-(1897-1899)-Monet.jpg",
+      "institution": "Princeton University Art Museum",
+      "pd_status": "Public domain",
+      "pd_basis": "Published 1897-1899, well before 1929 cutoff; Wikimedia Commons public domain tag."
+    }
+  ]
+}

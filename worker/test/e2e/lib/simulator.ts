@@ -28,6 +28,12 @@ export interface SimRunOptions {
   wifi?: string;
   /** Wipes this board's persisted state (.state/<board>/) before booting. */
   reset?: boolean;
+  /** Overrides the test harness's default "always active" schedule pin
+   *  (--active-start/--active-end). Leave undefined for the default pin;
+   *  pass null to send NO active-window flags, so the device uses whatever
+   *  schedule the server's /device_config provides (or its compiled-in
+   *  default) — that's the path a real device's quiet-hours behavior takes. */
+  activeWindow?: { start: number; end: number } | null;
   /** Runs exactly one boot cycle headlessly and saves the resulting display
    *  buffer as a numbered JPEG (see display_render.cpp). Always pass this in
    *  a test - without it the process runs forever, simulating repeated
@@ -54,6 +60,16 @@ export function runSimulatorOnce(opts: SimRunOptions): SimRunResult {
   const args: string[] = ["--server", opts.server, "--export", opts.exportPath];
   if (opts.reset) args.push("--reset");
   if (opts.wifi) args.push("--wifi", opts.wifi);
+  // Default to a pinned 24-hour active window: without this the suite's
+  // outcome depends on the wall clock — the firmware's compiled-in default
+  // (8-20 device-local, tz default UTC-6) makes any run before 8am local a
+  // quiet-hours no-op ("skipping image fetch", no exported JPEG, test
+  // fails). Tests that want to exercise the real server-driven schedule
+  // path pass activeWindow: null to opt out of the pin. The schedule
+  // override path itself is exercised by the quiet-hours test.
+  if (opts.activeWindow !== null) {
+    args.push("--active-start", "0", "--active-end", "23");
+  }
 
   const result = spawnSync(binary, args, { cwd: SIMULATOR_DIR, encoding: "utf8", timeout: 30_000 });
   if (result.status !== 0) {

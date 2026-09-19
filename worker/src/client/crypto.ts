@@ -12,13 +12,14 @@
  * the recipient's public key, HKDF-SHA256 into an AES-256-GCM key, then
  * AES-GCM-encrypt the payload.
  *
- * HKDF `info` context strings provide domain separation between the two
- * things this module derives keys for — a shared ECDH secret must never be
- * reinterpretable as a key for the other purpose.
+ * HKDF `info` context strings provide domain separation between the things
+ * this module derives keys for — a shared ECDH secret (or a bucket key) must
+ * never be reinterpretable as a key for another purpose.
  */
 
 export const HKDF_INFO_BUCKET_WRAP = "eink-bucket-wrap-v1";
 export const HKDF_INFO_SHARING_KEY_WRAP = "eink-sharing-key-wrap-v1";
+export const HKDF_INFO_CONTENT_HASH = "eink-content-hash-v1";
 
 const ECDH_PARAMS: EcKeyImportParams & EcKeyGenParams = { name: "ECDH", namedCurve: "P-256" };
 const AES_GCM_KEY_LEN = 256;
@@ -106,6 +107,39 @@ export async function generateBucketKey(): Promise<CryptoKey> {
 
 export async function exportAesKeyRaw(key: CryptoKey): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.exportKey("raw", key));
+}
+
+/** 16-hex-char keyed content hash over a plaintext packed buffer — the upload
+ *  duplicate-detection value (migrations/0020_image_content_hash.sql).
+ *
+ *  Computed over the PLAINTEXT (packToNibbles output, before compress/encrypt),
+ *  so identical renditions of the same photo collide regardless of source-file
+ *  format or filename — unlike dither.ts's computeHash16, which hashes
+ *  ciphertext whose random GCM nonce makes every upload's hash differ.
+ *
+ *  Keyed (HKDF from the bucket key, HMAC-SHA256) rather than a plain SHA-256
+ *  so the Worker can only ever compare hashes WITHIN one bucket: it can't
+ *  correlate identical images across buckets or precompute a lookup table.
+ *  Bucket-key rotation recomputes these under the new key (admin.ts's
+ *  reencryptOneImage), so hashes stay comparable after a completed rotation.
+ *  Like packed_hash, the Worker can't verify it — trusted client metadata,
+ *  a courtesy check rather than a security boundary. */
+export async function computeContentHash(bucketKey: CryptoKey, packed: Uint8Array): Promise<string> {
+  // Rewrap through `new Uint8Array(...)` so the buffer is a plain ArrayBuffer
+  // (exportAesKeyRaw's Uint8Array<ArrayBufferLike> doesn't satisfy importKey's
+  // BufferSource under strict lib typings — same normalization computeHash16
+  // in dither.ts does).
+  const baseKey = await crypto.subtle.importKey("raw", new Uint8Array(await exportAesKeyRaw(bucketKey)), "HKDF", false, [
+    "deriveBits",
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode(HKDF_INFO_CONTENT_HASH) },
+    baseKey,
+    256
+  );
+  const hmacKey = await crypto.subtle.importKey("raw", bits, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", hmacKey, new Uint8Array(packed));
+  return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
 export async function importAesKeyRaw(raw: Uint8Array): Promise<CryptoKey> {

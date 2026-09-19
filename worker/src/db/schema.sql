@@ -5,7 +5,8 @@
 -- 0010_remove_shared_targets.sql, 0011_crash_reports.sql, 0012_device_board.sql,
 -- 0013_firmware_releases_board.sql, 0014_firmware_channel.sql,
 -- 0015_bucket_encryption.sql, 0016_bucket_key_rotation.sql,
--- 0017_packed_encoding.sql, and 0018_public_buckets.sql (wrangler d1
+-- 0017_packed_encoding.sql, 0018_public_buckets.sql,
+-- 0019_image_board_variants.sql, and 0021_rate_limits.sql (wrangler d1
 -- migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -179,9 +180,17 @@ CREATE TABLE images (
   -- buckets.key_version between a rotation's start and this image's
   -- reencrypt-image call; equal to it once migrated.
   key_version       INTEGER NOT NULL DEFAULT 1,
+  -- Optional 16-hex-char keyed content hash (migrations/
+  -- 0020_image_content_hash.sql): HMAC-SHA256 under a bucket-key-derived
+  -- hash key over the DEFAULT board's plaintext packed buffer, computed
+  -- client-side before encryption. Upload-time duplicate detection only —
+  -- trusted client metadata the Worker can't verify (see that migration for
+  -- the keying/rotation story). NULL = no dedupe for this image.
+  content_hash      TEXT,
   UNIQUE(device_key, filename)
 );
 CREATE INDEX idx_images_device_key_filename ON images(device_key, filename);
+CREATE INDEX idx_images_device_key_hash ON images(device_key, content_hash);
 
 -- One packed+thumbnail variant per (image, board) - migrations/
 -- 0019_image_board_variants.sql. See lib/media-constants.ts's BoardId; not a
@@ -288,3 +297,12 @@ CREATE TABLE crash_reports (
   received_at          INTEGER NOT NULL
 );
 CREATE INDEX idx_crash_reports_device_mac ON crash_reports(device_mac, received_at DESC);
+
+-- Fixed-window API rate limiting (see lib/rate-limit.ts and migrations/
+-- 0021_rate_limits.sql). One row per (limiter name, identity, window start);
+-- the window start is embedded in the key, so stale rows are garbage that
+-- cleanup deletes opportunistically.
+CREATE TABLE rate_limits (
+  key   TEXT PRIMARY KEY,
+  count INTEGER NOT NULL
+);

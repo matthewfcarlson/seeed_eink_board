@@ -220,6 +220,8 @@ int main(int argc, char **argv) {
     bool doReset = false;
     std::string exportPath;
     std::string wifiSsid;
+    int activeStart = -1;
+    int activeEnd = -1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
@@ -230,8 +232,12 @@ int main(int argc, char **argv) {
             exportPath = argv[++i];
         } else if (strcmp(argv[i], "--wifi") == 0 && i + 1 < argc) {
             wifiSsid = argv[++i];
+        } else if (strcmp(argv[i], "--active-start") == 0 && i + 1 < argc) {
+            activeStart = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--active-end") == 0 && i + 1 < argc) {
+            activeEnd = atoi(argv[++i]);
         } else {
-            fprintf(stderr, "Usage: %s [--server <url>] [--reset] [--export <path.jpg>] [--wifi <ssid>]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--server <url>] [--reset] [--export <path.jpg>] [--wifi <ssid>] [--active-start <0-23>] [--active-end <0-23>]\n", argv[0]);
             return 1;
         }
     }
@@ -259,6 +265,15 @@ int main(int argc, char **argv) {
 
     configManager.begin();
     applyServerFlag(serverUrl);
+    if (activeStart >= 0 && activeStart <= 23) {
+        // Test-automation-only schedule override (same spirit as --wifi):
+        // without it the suite's pass/fail depends on what time of day the
+        // run happens to hit — the compiled-in default active window (8-20
+        // device-local) turns the whole run into quiet hours before 8am
+        // local, and the firmware then skips the image fetch entirely.
+        configManager.setActiveStartHour((uint8_t)activeStart);
+        configManager.setActiveEndHour((uint8_t)activeEnd);
+    }
     if (!wifiSsid.empty()) {
         // Test-automation-only shortcut: real hardware only ever gets WiFi
         // credentials via BLE provisioning (see ble_provisioning.cpp /

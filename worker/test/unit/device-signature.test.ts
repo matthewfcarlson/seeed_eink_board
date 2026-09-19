@@ -105,14 +105,18 @@ describe("verifyDeviceSignature", () => {
     expect(getLastNonce()).toBe(11);
   });
 
-  it("KNOWN GAP: a captured (nonce, signature) pair can be replayed indefinitely as long as the nonce doesn't decrease — only a *decreasing* nonce is rejected, not a *repeated* one", async () => {
+  it("rejects an exact replay of a captured (nonce, signature) pair", async () => {
     const { db } = fakeDb(null);
     const env = { DB: db } as Env;
     const signature = await sign("mac", "/hash", 7);
     // First use: accepted, last_nonce becomes 7.
     expect(await verifyDeviceSignature(env, "mac", SECRET_HEX, "/hash", "7", signature)).toBe(true);
-    // Same exact (nonce, signature) replayed again: still accepted, since
-    // verifyDeviceSignature only checks `nonce < last_nonce`, never `nonce <= last_nonce`.
-    expect(await verifyDeviceSignature(env, "mac", SECRET_HEX, "/hash", "7", signature)).toBe(true);
+    // Same exact (nonce, signature) replayed again: rejected — last_nonce is a
+    // strictly-increasing high-water mark (the firmware's NVS counter never
+    // reuses a value), so an equal nonce is just as much a replay as a lower
+    // one. This used to be a documented KNOWN GAP (the check was only
+    // `nonce < last_nonce`, letting an equality replay through forever).
+    expect(await verifyDeviceSignature(env, "mac", SECRET_HEX, "/hash", "7", signature)).toBe(false);
+    expect(await verifyDeviceSignature(env, "mac", SECRET_HEX, "/hash", "6", signature)).toBe(false);
   });
 });

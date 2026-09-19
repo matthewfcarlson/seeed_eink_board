@@ -21,6 +21,7 @@ import {
   type PendingRegistration,
   type SharingKeyWrap,
 } from "../lib/webauthn";
+import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 
 interface CredentialRow {
   id: string;
@@ -44,8 +45,17 @@ interface CredentialRow {
  * Authorization: Bearer <api_key> model for the rest of /admin — a successful
  * ceremony is just another way to obtain one, same as the old bootstrap script.
  */
+/** Per-IP limit shared by all four passkey endpoints. Keyed by the edge-reported
+ *  client IP; "unknown" collapses anything header-less into one bucket, which is
+ *  the correct conservative default. */
+async function perIpLimit(c: { env: Env; req: { header(name: string): string | undefined } }): Promise<boolean> {
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  return checkRateLimit(c.env, "auth", ip, RATE_LIMITS.auth.limit, RATE_LIMITS.auth.windowSeconds);
+}
+
 export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/auth/register/options", async (c) => {
+    if (!(await perIpLimit(c))) return rateLimitedResponse(RATE_LIMITS.auth.windowSeconds);
     const { rpID } = rpIdAndOrigin(c.req.url);
     const userId = crypto.randomUUID();
 
@@ -69,6 +79,7 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
   });
 
   app.post("/auth/register/verify", async (c) => {
+    if (!(await perIpLimit(c))) return rateLimitedResponse(RATE_LIMITS.auth.windowSeconds);
     const body = await c.req
       .json<{ attemptId?: string; response?: RegistrationResponseJSON } & Partial<SharingKeyWrap>>()
       .catch(() => ({}) as never);
@@ -128,6 +139,7 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
   });
 
   app.post("/auth/login/options", async (c) => {
+    if (!(await perIpLimit(c))) return rateLimitedResponse(RATE_LIMITS.auth.windowSeconds);
     const { rpID } = rpIdAndOrigin(c.req.url);
 
     // No allowCredentials — the browser shows its own picker over every resident
@@ -148,6 +160,7 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
   });
 
   app.post("/auth/login/verify", async (c) => {
+    if (!(await perIpLimit(c))) return rateLimitedResponse(RATE_LIMITS.auth.windowSeconds);
     const body = await c.req
       .json<{ attemptId?: string; response?: AuthenticationResponseJSON }>()
       .catch(() => ({}) as never);

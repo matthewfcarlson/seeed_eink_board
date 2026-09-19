@@ -1,0 +1,90 @@
+{
+  "bucket": "Hermann Lungkwitz (1813-1891)",
+  "category": "Texas Hill Country historical sketches/landscapes",
+  "artist": "Hermann Lungkwitz (1813-1891) - German-Texan landscape painter, part of the community of German immigrant artists (with Richard Petri and Carl von Iwonski) who settled near Fredericksburg/New Braunfels/Austin in the 1850s and documented the Hill Country region in watercolor and drawing.",
+  "category_basis": "All works date 1848-1885 and depict Hill Country locations (Austin's Shoal Creek and Barton Creek, the Guadalupe and Colorado Rivers, Fredericksburg-area mills and ranches). Lungkwitz died in 1891; life+70 expired 1961, and most of these works also predate 1929 outright. Every file is tagged PD-old-100-expired / CC-PD-Mark on Wikimedia Commons.",
+  "note": "Searched Portal to Texas History (texashistory.unt.edu) and Library of Congress directly per instructions; did not find additional verifiably public-domain Hill Country sketches there distinct from what Wikimedia Commons already aggregates from the Witte Museum / Museum of Fine Arts Houston / Texas institutions holding Lungkwitz's work. All images below are sourced via Wikimedia Commons, which itself cites the originating Texas museums.",
+  "images": [
+    {
+      "filename": "lungkwitz_alameda.jpg",
+      "title": "Alameda",
+      "year": "Undated (1850s-1880s, per Athenaeum catalog)",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Alameda_(by_Hermann_Lungkwitz).jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1891."
+    },
+    {
+      "filename": "lungkwitz_hill_country_landscape_1862.jpg",
+      "title": "Hill Country Landscape",
+      "year": "1862",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Hermann_Lungkwitz_-_Hill_Country_Landscape_-_B.67.39_-_Museum_of_Fine_Arts.jpg",
+      "institution": "Museum of Fine Arts, Houston",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired; published 1862, artist died 1891."
+    },
+    {
+      "filename": "lungkwitz_kriebstein_1848.jpg",
+      "title": "Kriebstein",
+      "year": "1848",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Kriebstein_(by_Hermann_Lungkwitz).jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Published 1848, well before 1929 cutoff."
+    },
+    {
+      "filename": "lungkwitz_old_pinta_crossing_guadalupe_1850s.jpg",
+      "title": "The Old Pinta Crossing on the Guadalupe",
+      "year": "c. 1850s",
+      "source_url": "https://commons.wikimedia.org/wiki/File:The_Old_Pinta_Crossing_on_the_Guadalupe.jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1891."
+    },
+    {
+      "filename": "lungkwitz_guenthers_mill_live_oak_creek_1855.jpg",
+      "title": "Guenther's Mill on Live Oak Creek",
+      "year": "1855",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Guenther%27s_Mill_on_Live_Oak_Creek.jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Published 1855, well before 1929 cutoff."
+    },
+    {
+      "filename": "lungkwitz_split_rock_shoal_creek_austin.jpg",
+      "title": "Split Rock on Shoal Creek, Austin",
+      "year": "Undated (Austin period, 1850s-1880s)",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Split_Rok_on_Shoal_Creek,_Austin.jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1891."
+    },
+    {
+      "filename": "lungkwitz_on_shoal_creek_austin.jpg",
+      "title": "On Shoal Creek, Austin",
+      "year": "Undated (Austin period, 1850s-1880s)",
+      "source_url": "https://commons.wikimedia.org/wiki/File:On_Shoal_Creek,_Austin.jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1891."
+    },
+    {
+      "filename": "lungkwitz_paggis_mill_barton_creek_1885.jpg",
+      "title": "Paggi's Mill on Barton Creek",
+      "year": "1885",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Paggi%27s_Mill_on_Barton_Creek.jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Published 1885, well before 1929 cutoff."
+    },
+    {
+      "filename": "lungkwitz_schroeter_ranch_colorado_river_1882.jpg",
+      "title": "August Schroeter Ranch on the Colorado River",
+      "year": "1882",
+      "source_url": "https://commons.wikimedia.org/wiki/File:August_Schroeter_Ranch_on_the_Colorado_River.jpg",
+      "institution": "Per the-athenaeum.org catalog listing",
+      "pd_status": "Public domain",
+      "pd_basis": "Published 1882, well before 1929 cutoff."
+    }
+  ]
+}

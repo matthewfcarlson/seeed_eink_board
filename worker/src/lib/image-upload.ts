@@ -11,6 +11,11 @@
  * right field types). Every board is required: the client (admin.ts's
  * confirmUpload/reencryptOneImage) always generates all of them, and only
  * two boards exist today, so there's no partial-upload case worth supporting.
+ *
+ * `content_hash` is optional (present only from clients new enough to send
+ * it): the upload route uses it for duplicate rejection, the rotation
+ * reencrypt-image route just refreshes the stored column (the rotation
+ * re-derives the packed pixels, so the old hash may be stale either way).
  */
 
 import { BOARD_IDS, isValidPackedEncoding, type BoardId, type PackedEncoding } from "./media-constants";
@@ -25,6 +30,10 @@ export interface CiphertextUploadVariantFields {
 export interface CiphertextUploadFields {
   raw: File;
   variants: Record<BoardId, CiphertextUploadVariantFields>;
+  /** 16-hex-char keyed content hash (client/crypto.ts's computeContentHash)
+   *  over the DEFAULT board's plaintext packed buffer — see migrations/
+   *  0020_image_content_hash.sql. Optional; absent = no duplicate detection. */
+  contentHash?: string;
 }
 
 /** Checks field presence/type only — cheap, synchronous, before touching any bytes. */
@@ -53,7 +62,12 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
     variants[board] = { packed, thumb, packedHash, packedEncoding };
   }
 
-  return { raw, variants };
+  const contentHash = body.content_hash;
+  if (contentHash !== undefined && (typeof contentHash !== "string" || !/^[0-9a-f]{16}$/.test(contentHash))) {
+    return { error: "content_hash must be a 16-char hex string when present" };
+  }
+
+  return { raw, variants, contentHash };
 }
 
 export interface CiphertextUploadVariantBytes {

@@ -7,6 +7,7 @@ import { getRotationSnapshot, peekPendingImage } from "../lib/rotation";
 import { getImageVariant } from "../lib/image-store";
 import { renderRegistrationBuffer } from "../lib/qr-registration";
 import { registrationUrl } from "../lib/registration-url";
+import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 import { isValidMac } from "../lib/validate";
 
 /**
@@ -26,6 +27,9 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     const mac = normalizeMac(macHeader);
     // Same validity gate as /image_packed — see that route's comment.
     if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
+    if (!(await checkRateLimit(c.env, "device", mac, RATE_LIMITS.device.limit, RATE_LIMITS.device.windowSeconds))) {
+      return rateLimitedResponse(RATE_LIMITS.device.windowSeconds);
+    }
     const lookup = await resolveDeviceKey(c.env, mac);
     const deviceKey = lookup.deviceKey;
 

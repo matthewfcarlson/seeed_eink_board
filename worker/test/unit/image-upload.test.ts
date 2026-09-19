@@ -62,6 +62,32 @@ describe("validateCiphertextUploadFields", () => {
   });
 });
 
+describe("validateCiphertextUploadFields content_hash", () => {
+  it("accepts a body with a valid 16-hex-char content_hash", () => {
+    const result = validateCiphertextUploadFields(validBody({ content_hash: VALID_HASH }));
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) expect(result.contentHash).toBe(VALID_HASH);
+  });
+
+  it("accepts a body without content_hash (optional field, older callers)", () => {
+    const result = validateCiphertextUploadFields(validBody());
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) expect(result.contentHash).toBeUndefined();
+  });
+
+  it("rejects a non-string content_hash", () => {
+    const result = validateCiphertextUploadFields(validBody({ content_hash: 12345 }));
+    expect(result).toEqual({ error: expect.stringContaining("content_hash") });
+  });
+
+  it("rejects a content_hash of the wrong length or charset", () => {
+    for (const bad of ["short", "0123456789abcdeg", "0123456789ABCDEF"]) {
+      const result = validateCiphertextUploadFields(validBody({ content_hash: bad }));
+      expect(result).toEqual({ error: expect.stringContaining("content_hash") });
+    }
+  });
+});
+
 describe("readCiphertextUploadBytes", () => {
   it("reads raw plus every board's packed/thumb bytes", async () => {
     const fields = validateCiphertextUploadFields(

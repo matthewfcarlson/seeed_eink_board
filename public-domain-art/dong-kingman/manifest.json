@@ -1,0 +1,72 @@
+{
+  "bucket": "Dong Kingman (1911-2000)",
+  "artist": "Dong Kingman (1911-2000) - American watercolor painter",
+  "important_note": "Dong Kingman died in 2000, so his life+70 copyright term runs until 2070 - the OVERWHELMING MAJORITY of his catalog is still under copyright and was deliberately NOT downloaded. The Met, SFMOMA, and other institutions explicitly mark most Kingman works '© Dong Kingman' or 'rights reserved'. Only two narrow categories of exception were found and are documented per-image below. If a Kingman image is wanted beyond what's here, it almost certainly requires a licensing request to the rightsholder (his estate) or the holding museum.",
+  "license_categories": {
+    "1_public_domain": "Watercolors Kingman painted 1935-1942 while employed by the WPA Federal Art Project in California. Under 17 U.S.C. §§ 101 and 105, works made by federal employees/programs as part of official duties are US Government works and are NOT eligible for copyright at all - this is a distinct legal basis from Kingman's personal death date and is explicitly documented via the {{PD-USGov-WPA}} rationale on Wikimedia Commons (verified by reading the template's own legal explanation, not just the category name).",
+    "2_institution_noncommercial_license": "Digitized images from the Smithsonian American Art Museum (SAAM) website, used under SAAM's own stated site-wide terms: \"Personal, educational and non-commercial use of digital images from our website is permitted, with attribution to the Smithsonian American Art Museum, for all images unless otherwise noted.\" (https://americanart.si.edu/art/reproductions). This does NOT mean the underlying artwork is public domain - Kingman's copyright likely still applies - it means SAAM, as the institution holding and having photographed the physical object, permits personal/non-commercial reproduction of ITS digital image. This project (a personal, non-commercial e-ink picture frame) qualifies. These images may NOT be used commercially or redistributed beyond personal use."
+  },
+  "images": [
+    {
+      "filename": "landscape_h_1937_wpa.jpg",
+      "title": "Landscape H",
+      "year": "1937",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Landscape_H,_SAAM-1971.447.47_1.jpg",
+      "institution": "Smithsonian American Art Museum",
+      "license_category": 1,
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons tag PD-USGov-WPA: painted 1937 while Kingman was a WPA Federal Art Project employee in California; work of the US federal government, not eligible for copyright (17 U.S.C. SS101, 105)."
+    },
+    {
+      "filename": "lands_end_1939_wpa.jpg",
+      "title": "Land's End",
+      "year": "1939",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Land%E2%80%99s_End_SAAM-1971.447.48_1.jpg",
+      "institution": "Smithsonian American Art Museum",
+      "license_category": 1,
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons tag PD-USGov-WPA: painted 1939 while Kingman was a WPA Federal Art Project employee in California."
+    },
+    {
+      "filename": "southern_pacific_depot_morning_1940_wpa.jpg",
+      "title": "Southern Pacific Depot in the Morning",
+      "year": "c. 1940",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Southern_Pacific_Depot_in_the_Morning_SAAM-1971.447.46_1.jpg",
+      "institution": "Smithsonian American Art Museum",
+      "license_category": 1,
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons tag PD-USGov-WPA: painted c.1940 while Kingman was a WPA Federal Art Project employee in California."
+    },
+    {
+      "filename": "coastline_california_wpa.jpg",
+      "title": "Coastline, California",
+      "year": "1935-1941",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Coastline,_California_SAAM-1985.8.9_1.jpg",
+      "institution": "Smithsonian American Art Museum",
+      "license_category": 1,
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons tag PD-USGov-WPA: painted 1935-1941 during Kingman's WPA Federal Art Project employment."
+    },
+    {
+      "filename": "bridge_over_river_1936_saam_noncommercial.jpg",
+      "title": "Bridge over River",
+      "year": "1936",
+      "source_url": "https://americanart.si.edu/artwork/bridge-over-river-13757",
+      "institution": "Smithsonian American Art Museum",
+      "license_category": 2,
+      "pd_status": "NOT confirmed public domain - personal/non-commercial use only",
+      "pd_basis": "Credit line reads 'Transfer from the U.S. Department of Labor' (consistent with WPA-era federal ownership, same 1936 window as the confirmed-PD pieces above), but this specific file is not tagged with an explicit PD rationale on Wikimedia Commons and carries no per-item rights statement on its SAAM object page, so it is NOT claimed as verified public domain. Downloaded under SAAM's site-wide 'personal, educational and non-commercial use... unless otherwise noted' policy instead. RESTRICTION: personal/non-commercial use only, attribution to Smithsonian American Art Museum required."
+    },
+    {
+      "filename": "nut_street_station_saam_noncommercial.jpg",
+      "title": "Nut Street Station",
+      "year": "n.d. (Kingman WPA/1930s-40s period, per SAAM catalog placement)",
+      "source_url": "https://americanart.si.edu/artwork/nut-street-station-81660",
+      "institution": "Smithsonian American Art Museum",
+      "license_category": 2,
+      "pd_status": "NOT confirmed public domain - personal/non-commercial use only",
+      "pd_basis": "Credit line reads 'Bequest of Henry Ward Ranger through the National Academy of Design' - no WPA/federal-government ownership chain, and no explicit PD tag exists on Commons or SAAM's page for this work. Downloaded under SAAM's site-wide 'personal, educational and non-commercial use... unless otherwise noted' policy. RESTRICTION: personal/non-commercial use only, attribution to Smithsonian American Art Museum required."
+    }
+  ],
+  "excluded_example": "File:Dong Kingman - Kearney Street (San Francisco) - 43.104 - Detroit Institute of Arts.jpg was found on Wikimedia Commons tagged {{PD-old-100-1923}}, but this tag was judged to be a MISAPPLIED template (it assumes an artist/work old enough to be pre-1923, which does not fit a work painted in 1940 by an artist who died in 2000) and was deliberately excluded rather than trusted at face value - exactly the kind of name-based/tag-based assumption this research was told to avoid."
+}

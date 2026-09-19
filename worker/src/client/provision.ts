@@ -36,6 +36,14 @@ const CHAR_SCAN_RESULTS_UUID = "97c497fa-7e94-4fe6-bad2-68ffd9d34d5e";
 
 let simOrigin = new URLSearchParams(window.location.search).get("sim");
 
+// The ?sim= transport is a development tool — honor it only when the page
+// itself is served from a local dev origin. On a deployed /provision, an
+// attacker-crafted ?sim=https://evil.example link would otherwise redirect the
+// whole save/scan flow (device config JSON, /gatt/info responses) at an
+// arbitrary origin; harmless today since sim mode disables the WiFi password
+// field, but there's no reason to allow it off-localhost at all.
+if (simOrigin && !isLocalDevOrigin()) simOrigin = null;
+
 // firmware/simulator/stubs/NimBLEDevice.h's fixed SIM_GATT_PORT - one
 // simulator process (whichever board is currently in config mode) can be
 // listening here at a time. Only ever probed when this page's own origin is

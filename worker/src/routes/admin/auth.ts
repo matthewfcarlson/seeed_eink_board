@@ -7,13 +7,25 @@ import { readSharingKeyWrap, type SharingKeyWrap } from "../../lib/webauthn";
 export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
   // Lets the admin UI verify a pasted API key / minted session is still valid.
   app.get("/admin/me", requireAdmin, async (c) => {
-    const row = await c.env.DB.prepare("SELECT display_name FROM users WHERE id = ?")
+    const row = await c.env.DB.prepare("SELECT display_name, sharing_public_key FROM users WHERE id = ?")
       .bind(c.var.user.id)
-      .first<{ display_name: string | null }>();
+      .first<{ display_name: string | null; sharing_public_key: string | null }>();
     // is_superuser: from the token already resolved by requireAdmin, not a
     // second query — lets the client conditionally show the "Public bucket"
     // checkbox (see root CLAUDE.md's public-buckets plan / migrations/0018).
-    return c.json({ id: c.var.user.id, display_name: row?.display_name ?? null, is_superuser: c.var.user.is_superuser });
+    // sharing_public_key: the account's P-256 sharing public key, so a caller
+    // holding only the API key (scripts/upload-images.mjs) can ECIES-wrap a
+    // new bucket's content key for this account exactly like the dashboard's
+    // browser does (client/crypto.ts's wrapKeyFor) — without it, a bucket
+    // created by the script would have no key row and be unrecoverable. The
+    // public half is not sensitive (it's what every invite/device wrap
+    // targets anyway); null until the account's first passkey login.
+    return c.json({
+      id: c.var.user.id,
+      display_name: row?.display_name ?? null,
+      is_superuser: c.var.user.is_superuser,
+      sharing_public_key: row?.sharing_public_key ?? null,
+    });
   });
 
   app.patch("/admin/me", requireAdmin, async (c) => {

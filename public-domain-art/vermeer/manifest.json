@@ -1,0 +1,61 @@
+{
+  "bucket": "Johannes Vermeer (1632-1675)",
+  "artist": "Johannes Vermeer (1632-1675)",
+  "category_basis": "Vermeer died in 1675; all works are roughly 350+ years old, unambiguously public domain under any US copyright rule (both pre-1929 and life+70). All files are tagged public domain on Wikimedia Commons and sourced from the Mauritshuis, Rijksmuseum, National Gallery of Art, and Städel Museum via Google Art Project.",
+  "images": [
+    {
+      "filename": "girl_with_a_pearl_earring.jpg",
+      "title": "Girl with a Pearl Earring",
+      "year": "c. 1665",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Meisje_met_de_parel.jpg",
+      "institution": "Mauritshuis, The Hague",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1675."
+    },
+    {
+      "filename": "the_milkmaid.jpg",
+      "title": "The Milkmaid",
+      "year": "c. 1658-1661",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Johannes_Vermeer_-_Het_melkmeisje_-_Google_Art_Project.jpg",
+      "institution": "Rijksmuseum, Amsterdam",
+      "pd_status": "Public domain",
+      "pd_basis": "Rijksmuseum public domain release, confirmed on Wikimedia Commons."
+    },
+    {
+      "filename": "view_of_delft.jpg",
+      "title": "View of Delft",
+      "year": "c. 1660-1661",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Johannes_Vermeer_-_View_of_Delft_-_92_-_Mauritshuis.jpg",
+      "institution": "Mauritshuis, The Hague",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1675."
+    },
+    {
+      "filename": "girl_reading_a_letter.jpg",
+      "title": "Girl Reading a Letter at an Open Window",
+      "year": "c. 1657-1659",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Johannes_Vermeer_-_Girl_Reading_a_Letter_by_an_Open_Window_-_Google_Art_Project.jpg",
+      "institution": "Gemäldegalerie Alte Meister, Dresden",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1675."
+    },
+    {
+      "filename": "woman_holding_a_balance.jpg",
+      "title": "Woman Holding a Balance",
+      "year": "c. 1664",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Johannes_Vermeer_-_Woman_Holding_a_Balance_-_Google_Art_Project.jpg",
+      "institution": "National Gallery of Art, Washington DC (Widener Collection)",
+      "pd_status": "Public domain",
+      "pd_basis": "National Gallery of Art open access; artist died 1675."
+    },
+    {
+      "filename": "the_geographer.jpg",
+      "title": "The Geographer",
+      "year": "1669",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Johannes_Vermeer_-_The_Geographer_-_Google_Art_Project.jpg",
+      "institution": "Städel Museum, Frankfurt",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; artist died 1675."
+    }
+  ]
+}

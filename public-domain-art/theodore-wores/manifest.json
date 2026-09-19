@@ -1,0 +1,79 @@
+{
+  "bucket": "Theodore Wores (1859-1939)",
+  "artist": "Theodore Wores (1859-1939) - American painter",
+  "category_basis": "Theodore Wores died in 1939, so life+70 expired in 2009. All works below were also painted/published 1881-1903, independently satisfying the pre-1929 fixed-term rule. Every file is tagged Public domain on Wikimedia Commons, sourced from the Smithsonian American Art Museum, Met Museum (CC0), and other public collections.",
+  "images": [
+    {
+      "filename": "chinese_fishmonger_1881.jpg",
+      "title": "The Chinese Fishmonger",
+      "year": "1881",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Theodore_Wores_-_The_Chinese_Fishmonger_-_1972.153_-_Smithsonian_American_Art_Museum.jpg",
+      "institution": "Smithsonian American Art Museum",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons public domain tag; painted 1881, artist died 1939 (life+70 expired 2009)."
+    },
+    {
+      "filename": "new_years_day_sf_chinatown_1881.jpg",
+      "title": "New Year's Day in San Francisco's Chinatown",
+      "year": "1881",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Theodore_Wores,_1881_-_New_Year%E2%80%99s_Day_in_San_Francisco%E2%80%99s_Chinatown.jpg",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Painted 1881, well before 1929 cutoff; artist died 1939."
+    },
+    {
+      "filename": "chinese_restaurant_1884.jpg",
+      "title": "Chinese Restaurant",
+      "year": "1884",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Chinese_Restaurant_by_Theodore_Wores,_1884.jpg",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Painted 1884, well before 1929 cutoff; artist died 1939."
+    },
+    {
+      "filename": "costume_of_the_japanese_1895.jpg",
+      "title": "Costume of the Japanese",
+      "year": "1895",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Costume_of_the_Japanese_-_by_Theodore_Wores.jpg",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Painted 1895, well before 1929 cutoff; artist died 1939."
+    },
+    {
+      "filename": "a_street_in_ikao_1895.jpg",
+      "title": "A Street in Ikao",
+      "year": "1895",
+      "source_url": "https://commons.wikimedia.org/wiki/File:A_Street_in_Ikao_MET_DP105593.jpg",
+      "institution": "Metropolitan Museum of Art",
+      "pd_status": "Public domain",
+      "pd_basis": "Met Museum Open Access, CC0 license (explicit CC-Zero tag on Wikimedia Commons)."
+    },
+    {
+      "filename": "the_lei_maker_1901.jpg",
+      "title": "The Lei Maker",
+      "year": "1901",
+      "source_url": "https://commons.wikimedia.org/wiki/File:The_Lei_Maker,_oil_on_canvas_painting_by_Theodore_Wores,_1901.jpg",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Painted 1901, well before 1929 cutoff; artist died 1939."
+    },
+    {
+      "filename": "hawaiian_girl_1902.jpg",
+      "title": "Hawaiian Girl",
+      "year": "1902",
+      "source_url": "https://commons.wikimedia.org/wiki/File:%27Hawaiian_Girl%27_by_Theodore_Wores,_1902.JPG",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Painted 1902, well before 1929 cutoff; artist died 1939."
+    },
+    {
+      "filename": "granada_garden_path_1903.jpg",
+      "title": "Granada Garden Path",
+      "year": "1903",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Granada_Garden_Path_by_Theodore_Wores,_1903.jpg",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Painted 1903, well before 1929 cutoff; artist died 1939."
+    }
+  ]
+}

@@ -21,6 +21,7 @@ import {
   generateBucketKey,
   generateP256KeyPair,
   importAesKeyRaw,
+  computeContentHash,
   importPrivateKeyPkcs8,
   toBase64,
   toBase64Url,
@@ -28,9 +29,9 @@ import {
   wrapKeyFor,
   type WrappedKey,
 } from "./crypto";
-import { DEFAULT_CROP, decodeToBoardBuffer, type CropParams } from "./decode";
+import { DEFAULT_CROP, decodeToBoardBuffer, resizeForStorage, type CropParams } from "./decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
-import { BOARD_IDS, type DitherAlgorithm } from "../lib/media-constants";
+import { BOARD_IDS, DEFAULT_BOARD_ID, type DitherAlgorithm } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
 import { makeThumbnailJpeg } from "./thumbnail";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
@@ -87,6 +88,23 @@ function escapeHtml(s: unknown): string {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[c] ?? c);
 }
 
+/** A complete JS string literal (JSON.stringify's quotes included) safe to embed
+ *  inside a double-quoted HTML attribute that holds JavaScript — e.g.
+ *  `'<button onclick="fn(' + jsArg(x) + ')">'`. escapeHtml() alone is NOT safe
+ *  in that position: the HTML parser decodes entities in attribute values
+ *  BEFORE the JS engine parses the handler code, so escapeHtml's `&#39;`
+ *  becomes a literal `'` again and terminates the handler's single-quoted
+ *  string — the old `escapeHtml(x).replace(/'/g, "\\'")` idiom was a no-op
+ *  against exactly that, leaving a stored-XSS hole in every onclick that
+ *  interpolated a filename/label/mac. JSON.stringify escapes quotes,
+ *  backslashes, and all control characters in one pass, so the only thing
+ *  left to HTML-escape is the delimiting double quotes themselves (plus &/</>
+ *  for the attribute context), which decode back into exactly the JS the
+ *  stringify produced. */
+function jsArg(value: unknown): string {
+  return escapeHtml(JSON.stringify(String(value)));
+}
+
 // Single-cell LiPo range this board's battery circuit is calibrated for (see
 // CLAUDE.md's Battery Monitoring section). Percent is derived at render time
 // from the voltage already stored — not sent by the firmware separately, so
@@ -109,11 +127,18 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   const res = await fetch(path, Object.assign({}, options, { headers }));
   if (!res.ok) {
     let message = res.status + " " + res.statusText;
+    let body: any = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       if (body && body.error) message = body.error;
     } catch {}
-    throw new Error(message);
+    // Structured extras for callers that branch on a specific failure (e.g.
+    // confirmUpload's 409 duplicate flow) — every existing catch site only
+    // reads err.message, so this is purely additive.
+    const err = new Error(message) as Error & { status?: number; body?: any };
+    err.status = res.status;
+    err.body = body;
+    throw err;
   }
   const contentType = res.headers.get("content-type") || "";
   return contentType.includes("application/json") ? res.json() : res.text();
@@ -565,7 +590,7 @@ function renderAssignBucketBanner() {
   banner.innerHTML =
     '<div class="message success">' +
     "Scanned from a device with no images assigned yet: <code>" + escapeHtml(mac) + "</code>. " +
-    '<button class="sm" onclick="openBucketModal(\'' + escapeHtml(mac) + '\')">Assign buckets&hellip;</button>' +
+    '<button class="sm" onclick="openBucketModal(' + jsArg(mac) + ')">Assign buckets&hellip;</button>' +
     "</div>";
   if (!assignBucketModalAutoOpened) {
     assignBucketModalAutoOpened = true;
@@ -699,7 +724,7 @@ function renderDevicesTable(devices: any[]) {
     const currentImage = !d.current_image
       ? '<span class="hint">n/a</span>'
       : currentImageThumbUrl
-      ? '<img class="device-thumb" src="' + currentImageThumbUrl + '" alt="" onclick="openLightbox(\'' + d.current_image.id + '\', \'' + escapeHtml(d.current_image.source_bucket_id) + '\', \'' + escapeHtml(d.current_image.filename).replace(/'/g, "\\'") + '\')">'
+      ? '<img class="device-thumb" src="' + currentImageThumbUrl + '" alt="" onclick="openLightbox(' + jsArg(d.current_image.id) + ', ' + jsArg(d.current_image.source_bucket_id) + ', ' + jsArg(d.current_image.filename) + ')">'
       : escapeHtml(d.current_image.filename);
     return "<tr>" +
       "<td>" + escapeHtml(d.label || "") + "</td>" +
@@ -709,9 +734,9 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + uptime + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
-      '<td><button class="ghost sm" onclick="openBucketModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
-      '<td><button class="ghost sm" onclick="openScheduleModal(\'' + escapeHtml(d.mac) + '\')">Manage</button></td>' +
-      '<td><button class="danger sm" onclick="deleteDevice(\'' + escapeHtml(d.mac) + '\')">Remove</button></td>' +
+      '<td><button class="ghost sm" onclick="openBucketModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
+      '<td><button class="ghost sm" onclick="openScheduleModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
+      '<td><button class="danger sm" onclick="deleteDevice(' + jsArg(d.mac) + ')">Remove</button></td>' +
       "</tr>";
   }).join("");
 }
@@ -719,16 +744,20 @@ function renderDevicesTable(devices: any[]) {
 function scheduleFormHtml(target: string, override: any): string {
   const v = override || {};
   const has = !!override;
+  // encodeURIComponent for the element ids (safe inside a double-quoted
+  // attribute and invertible, so saveSchedule/clearSchedule below find the
+  // same elements); jsArg for anything embedded in an onclick handler.
+  const idKey = encodeURIComponent(target);
   return (
     '<div class="inline-form">' +
-      '<div class="row"><label>Refresh (min)</label><input type="number" min="1" max="1440" id="sched-refresh-' + target + '" value="' + (v.refresh_interval_minutes ?? 60) + '"></div>' +
-      '<div class="row"><label>Active start hr</label><input type="number" min="0" max="23" id="sched-start-' + target + '" value="' + (v.active_start_hour ?? 8) + '"></div>' +
-      '<div class="row"><label>Active end hr</label><input type="number" min="0" max="23" id="sched-end-' + target + '" value="' + (v.active_end_hour ?? 20) + '"></div>' +
-      '<div class="row"><label>TZ offset (min)</label><input type="number" min="-720" max="840" id="sched-tz-' + target + '" value="' + (v.timezone_offset_minutes ?? 0) + '"></div>' +
+      '<div class="row"><label>Refresh (min)</label><input type="number" min="1" max="1440" id="sched-refresh-' + encodeURIComponent(target) + '" value="' + (v.refresh_interval_minutes ?? 60) + '"></div>' +
+      '<div class="row"><label>Active start hr</label><input type="number" min="0" max="23" id="sched-start-' + encodeURIComponent(target) + '" value="' + (v.active_start_hour ?? 8) + '"></div>' +
+      '<div class="row"><label>Active end hr</label><input type="number" min="0" max="23" id="sched-end-' + encodeURIComponent(target) + '" value="' + (v.active_end_hour ?? 20) + '"></div>' +
+      '<div class="row"><label>TZ offset (min)</label><input type="number" min="-720" max="840" id="sched-tz-' + encodeURIComponent(target) + '" value="' + (v.timezone_offset_minutes ?? 0) + '"></div>' +
     "</div>" +
     '<div class="inline-form" style="margin-top:10px;">' +
-      '<button onclick="saveSchedule(\'' + target + '\')">Save</button>' +
-      (has ? '<button class="ghost" onclick="clearSchedule(\'' + target + '\')">Clear override</button>' : "") +
+      '<button onclick="saveSchedule(' + jsArg(target) + ')">Save</button>' +
+      (has ? '<button class="ghost" onclick="clearSchedule(' + jsArg(target) + ')">Clear override</button>' : "") +
       '<span class="hint">' + (has ? "Override active" : "No override — falls back to the next tier") + "</span>" +
     "</div>"
   );
@@ -886,10 +915,10 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
         ? '<img src="' + thumbnailUrlCache[img.id] + '" alt="">'
         : '<div class="photo-tile-empty hint">no preview</div>';
       const deleteBtn = canWrite
-        ? '<button class="icon-btn photo-tile-delete" aria-label="Delete photo" onclick="event.stopPropagation(); deleteImage(\'' + img.id + '\')">&#10005;</button>'
+        ? '<button class="icon-btn photo-tile-delete" aria-label="Delete photo" onclick="event.stopPropagation(); deleteImage(' + jsArg(img.id) + ')">&#10005;</button>'
         : "";
       return (
-        '<div class="photo-tile" onclick="openLightbox(\'' + img.id + '\', \'' + escapeHtml(bucket.id) + '\', \'' + escapeHtml(img.filename).replace(/'/g, "\\'") + '\')">' +
+        '<div class="photo-tile" onclick="openLightbox(' + jsArg(img.id) + ', ' + jsArg(bucket.id) + ', ' + jsArg(img.filename) + ')">' +
           thumb +
           '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
           deleteBtn +
@@ -900,7 +929,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
     .join("");
 
   const addTile = canWrite
-    ? '<button type="button" class="photo-tile photo-tile-add" onclick="openUploadModal(\'' + escapeHtml(bucket.id) + '\')">' +
+    ? '<button type="button" class="photo-tile photo-tile-add" onclick="openUploadModal(' + jsArg(bucket.id) + ')">' +
         '<span class="plus">+</span> Add photo' +
       "</button>"
     : "";
@@ -912,7 +941,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
         .map(
           (u) =>
             "<li>" + escapeHtml(u.display_name || "Account " + u.id.slice(0, 8)) +
-            ' <button class="ghost sm" onclick="removeBucketCollaborator(\'' + escapeHtml(bucket.id) + '\', \'' + escapeHtml(u.id) + '\')">Remove</button></li>'
+            ' <button class="ghost sm" onclick="removeBucketCollaborator(' + jsArg(bucket.id) + ', ' + jsArg(u.id) + ')">Remove</button></li>'
         )
         .join("") +
       "</ul>"
@@ -924,9 +953,9 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
     : rotation
     ? '<div class="hint-block" style="margin-top:10px;">' +
         "<p><strong>Key rotation in progress:</strong> " + rotation.done_image_ids.length + " of " + totalRotationImages + " images re-encrypted.</p>" +
-        '<button class="ghost sm" onclick="runBucketRotation(\'' + escapeHtml(bucket.id) + '\')">Resume rotation</button>' +
+        '<button class="ghost sm" onclick="runBucketRotation(' + jsArg(bucket.id) + ')">Resume rotation</button>' +
       "</div>"
-    : '<button class="ghost sm" onclick="runBucketRotation(\'' + escapeHtml(bucket.id) + '\')">Rotate key&hellip;</button>';
+    : '<button class="ghost sm" onclick="runBucketRotation(' + jsArg(bucket.id) + ')">Rotate key&hellip;</button>';
 
   // Public toggle: superuser-only (checked client-side for display; the
   // Worker re-checks is_superuser server-side regardless — see
@@ -934,7 +963,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
   // owner — a collaborator can't make someone else's bucket public.
   const publicToggle =
     isOwnedShareable && currentUser && currentUser.is_superuser
-      ? '<button class="ghost sm" onclick="toggleBucketPublic(\'' + escapeHtml(bucket.id) + "', " + (bucket.is_public ? "false" : "true") + ')">' +
+      ? '<button class="ghost sm" onclick="toggleBucketPublic(' + jsArg(bucket.id) + ", " + (bucket.is_public ? "false" : "true") + ')">' +
           (bucket.is_public ? "Make private" : "Make public&hellip;") +
         "</button>"
       : "";
@@ -950,9 +979,9 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
     ? '<h4 style="margin-top:18px;">Sharing</h4>' +
       collabList +
       '<div class="inline-form" style="margin-top:8px;">' +
-        '<button class="ghost sm" onclick="createBucketInvite(\'' + escapeHtml(bucket.id) + '\')">Get invite link</button>' +
+        '<button class="ghost sm" onclick="createBucketInvite(' + jsArg(bucket.id) + ')">Get invite link</button>' +
         publicToggle +
-        '<button class="danger sm" onclick="deleteBucket(\'' + escapeHtml(bucket.id) + '\')">Delete bucket</button>' +
+        '<button class="danger sm" onclick="deleteBucket(' + jsArg(bucket.id) + ')">Delete bucket</button>' +
       "</div>" +
       '<h4 style="margin-top:18px;">Key rotation</h4>' +
       '<p class="hint hint-block">Generates a new encryption key, re-encrypts every image in this bucket under it, then revokes the old key for everyone. Use this after removing a collaborator or device you want to make sure can no longer read this bucket.</p>' +
@@ -968,7 +997,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
   const sharedPill = isSharedWithMe ? '<span class="pill">Shared</span>' : "";
 
   const renameButton = isOwnedShareable
-    ? '<button class="ghost xs bucket-rename-btn" onclick="startRenameBucket(\'' + escapeHtml(bucket.id) + '\')">Rename</button>'
+    ? '<button class="ghost xs bucket-rename-btn" onclick="startRenameBucket(' + jsArg(bucket.id) + ')">Rename</button>'
     : "";
 
   const titleRow =
@@ -1213,12 +1242,26 @@ async function confirmUpload() {
   confirmBtn.textContent = "Processing…";
 
   try {
-    const rawBytes = new Uint8Array(await file.arrayBuffer());
+    // Never store the original file: re-encode a bounded "storage original"
+    // (see decode.ts's resizeForStorage — capped at 2560px long side, JPEG).
+    // This is what the lightbox preview decrypts and what a key rotation
+    // re-crops from, so both stay bounded and rotation-compatible; the raw
+    // camera original never leaves this browser.
+    const rawBytes = await resizeForStorage(file);
     const rawCiphertext = await aesGcmEncryptBlob(bucketKey, rawBytes);
 
     const formData = new FormData();
     formData.set("dither_algorithm", dither);
     formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
+
+    // Bucket-key-keyed hash of the default board's PLAINTEXT packed buffer
+    // (see crypto.ts's computeContentHash) — the Worker compares it against
+    // the bucket's other images and rejects a duplicate rendition with 409
+    // (migrations/0020_image_content_hash.sql). Must be captured before the
+    // compress/encrypt steps below, which would make the hash
+    // nondeterministic. Holder object because TS can't narrow a plain `let`
+    // assigned inside this async closure.
+    const contentHash = { value: null as string | null };
 
     // A bucket isn't board-scoped (migrations/0019_image_board_variants.sql)
     // - every upload generates every board's rendition from this one crop,
@@ -1230,6 +1273,9 @@ async function confirmUpload() {
         enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
         const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
         const packed = packToNibbles(indices);
+        if (board === DEFAULT_BOARD_ID) {
+          contentHash.value = await computeContentHash(bucketKey, packed);
+        }
         const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
 
         // Compress the plaintext packed buffer BEFORE encrypting it -
@@ -1251,12 +1297,30 @@ async function confirmUpload() {
       })
     );
 
+    if (contentHash.value) formData.set("content_hash", contentHash.value);
+
     // No Content-Type header: FormData needs the browser to set its own
     // multipart boundary, which apiFetch only does when we don't override it.
-    await apiFetch(
-      "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) + "&filename=" + encodeURIComponent(filename),
-      { method: "POST", body: formData }
-    );
+    const uploadUrl =
+      "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) + "&filename=" + encodeURIComponent(filename);
+    try {
+      await apiFetch(uploadUrl, { method: "POST", body: formData });
+    } catch (err: any) {
+      // Duplicate rendition (migrations/0020_image_content_hash.sql): say
+      // which filename already holds it, and let the user force it through
+      // with allow_duplicate=1 — retrying the exact same formData, so the
+      // (expensive) decode/dither/encrypt pipeline above doesn't re-run.
+      if (err?.status !== 409 || !err?.body?.duplicate_of) throw err;
+      const proceed = confirm(
+        `This bucket already contains this image as "${err.body.duplicate_of}". Upload it again anyway?`
+      );
+      if (!proceed) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = "Upload photo";
+        return;
+      }
+      await apiFetch(uploadUrl + "&allow_duplicate=1", { method: "POST", body: formData });
+    }
     closeUploadModal();
     await renderApp();
   } catch (err: any) {
@@ -1483,6 +1547,13 @@ async function reencryptOneImage(
       enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
       const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
       const packed = packToNibbles(indices);
+      // Refresh the keyed content hash under the NEW bucket key while the
+      // plaintext is in hand (migrations/0020_image_content_hash.sql) — the
+      // stored hash must stay comparable with post-rotation uploads, which
+      // are keyed with this same new key.
+      if (board === DEFAULT_BOARD_ID) {
+        formData.set("content_hash", await computeContentHash(newKey, packed));
+      }
       const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
 
       const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
@@ -1788,7 +1859,7 @@ function renderFirmwareTargetsTable(targets: any[]) {
         "<td><code>" + escapeHtml(t.target) + "</code></td>" +
         "<td><code>" + escapeHtml(t.channel) + "</code></td>" +
         "<td>" + new Date(t.updated_at * 1000).toLocaleString() + "</td>" +
-        '<td><button class="ghost" onclick="clearFirmwareTarget(\'' + escapeHtml(t.target) + '\')">Clear</button></td>' +
+        '<td><button class="ghost" onclick="clearFirmwareTarget(' + jsArg(t.target) + ')">Clear</button></td>' +
         "</tr>"
       ).join("")
     : '<tr><td colspan="4" class="hint">No channels set — no device will OTA.</td></tr>';
@@ -1863,7 +1934,7 @@ function renderJoinBucketBanner() {
   banner.innerHTML =
     '<div class="message success">' +
     "You've been invited to a shared image bucket. " +
-    '<button onclick="joinBucket(\'' + escapeHtml(token) + '\')">Join</button>' +
+    '<button onclick="joinBucket(' + jsArg(token) + ')">Join</button>' +
     "</div>";
 }
 

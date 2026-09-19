@@ -525,6 +525,18 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     // too - trust whatever it reports the same way admin/images.ts's upload
     // route does, rather than assuming this image's previous
     // packed_encoding still applies.
+
+    // Same for the keyed content hash (migrations/0020_image_content_hash.sql):
+    // reencryptOneImage computes it under the NEW bucket key (and the pixels may
+    // have changed anyway - the DEFAULT_CROP re-derive doesn't reproduce custom
+    // crops), so refresh the column whenever the client sends one. COALESCE
+    // keeps the old value for clients that didn't send a hash at all.
+    if (fields.contentHash) {
+      await c.env.DB.prepare("UPDATE images SET content_hash = ? WHERE id = ?")
+        .bind(fields.contentHash, imageId)
+        .run();
+    }
+
     await Promise.all([
       putRawImage(c.env, id, imageId, rawBytes),
       ...BOARD_IDS.flatMap((board) => [

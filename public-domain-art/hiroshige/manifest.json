@@ -1,0 +1,57 @@
+{
+  "bucket": "Utagawa Hiroshige (1797-1858)",
+  "artist": "Utagawa Hiroshige (1797-1858)",
+  "category_basis": "Woodblock prints published 1833-1858, all well before the 1929 US fixed-term cutoff; artist died 1858 (life+70 expired 1928). Each file carries an explicit PD tag on Wikimedia Commons (PD-old / PD-Japan / CC0) sourced from the Library of Congress, Rijksmuseum, Brooklyn Museum, or Met Museum.",
+  "images": [
+    {
+      "filename": "sudden_shower_shin_ohashi.jpg",
+      "title": "Sudden Shower over Shin-Ōhashi Bridge and Atake",
+      "series": "One Hundred Famous Views of Edo",
+      "year": "1857",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Hiroshige,_Sudden_shower_over_Shin-%C5%8Chashi_bridge_and_Atake,_1857.jpg",
+      "institution": "Library of Congress",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-Japan / Images from the Library of Congress; published 1857."
+    },
+    {
+      "filename": "plum_park_kameido.jpg",
+      "title": "The Plum Garden in Kameido",
+      "series": "One Hundred Famous Views of Edo",
+      "year": "1857",
+      "source_url": "https://commons.wikimedia.org/wiki/File:De_pruimenboomgaard_te_Kameido-Rijksmuseum_RP-P-1956-743.jpeg",
+      "institution": "Rijksmuseum, Amsterdam",
+      "pd_status": "Public domain",
+      "pd_basis": "Rijksmuseum public domain release (CC0), confirmed via Wikimedia Commons CC-Zero tag."
+    },
+    {
+      "filename": "evening_snow_kanbara.jpg",
+      "title": "Evening Snow at Kanbara",
+      "series": "Fifty-three Stations of the Tōkaidō",
+      "year": "c. 1833-1834",
+      "source_url": "https://commons.wikimedia.org/wiki/File:%E6%9D%B1%E6%B5%B7%E9%81%93%E4%BA%94%E5%8D%81%E4%B8%89%E6%AC%A1%E4%B9%8B%E5%86%85_%E8%92%B2%E5%8E%9F_%E5%A4%9C%E3%81%AE%E9%9B%AA-Evening_Snow_at_Kanbara,_from_the_series_%22Fifty-three_Stations_of_the_T%C5%8Dkaid%C5%8D%22_MET_DP109333.jpg",
+      "institution": "Metropolitan Museum of Art",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons, Public domain tag; published c.1833-1834."
+    },
+    {
+      "filename": "moon_pine_ueno.jpg",
+      "title": "Moon Pine, Ueno",
+      "series": "One Hundred Famous Views of Edo",
+      "year": "1856",
+      "source_url": "https://commons.wikimedia.org/wiki/File:100_views_edo_089.jpg",
+      "institution": "Brooklyn Museum",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired / PD-Art (PD-old-auto-expired), CC-PD-Mark; published 1856."
+    },
+    {
+      "filename": "fireworks_at_ryogoku.jpg",
+      "title": "Fireworks at Ryōgoku Bridge",
+      "series": "One Hundred Famous Views of Edo",
+      "year": "1858",
+      "source_url": "https://commons.wikimedia.org/wiki/File:%E5%90%8D%E6%89%80%E6%B1%9F%E6%88%B6%E7%99%BE%E6%99%AF_%E4%B8%A1%E5%9B%BD%E8%8A%B1%E7%81%AB-Fireworks_at_Ry%C5%8Dgoku_Bridge,_from_the_series_One_Hundred_Famous_Views_of_Edo_MET_DP121524.jpg",
+      "institution": "Metropolitan Museum of Art",
+      "pd_status": "Public domain",
+      "pd_basis": "Met Museum Open Access, CC0 license (explicit CC-Zero tag on Wikimedia Commons)."
+    }
+  ]
+}

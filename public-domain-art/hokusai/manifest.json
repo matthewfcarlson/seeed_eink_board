@@ -1,0 +1,57 @@
+{
+  "bucket": "Katsushika Hokusai (1760-1849)",
+  "artist": "Katsushika Hokusai (1760-1849)",
+  "category_basis": "All works are ukiyo-e woodblock prints first published c. 1830-1832, well before the 1929 US fixed-term cutoff, and the artist died in 1849 (life+70 expired 1919). Every file is tagged on Wikimedia Commons with an explicit PD rationale (PD-old-100-expired / PD-Art) or is Met Museum Open Access CC0.",
+  "images": [
+    {
+      "filename": "great_wave_off_kanagawa.jpg",
+      "title": "The Great Wave off Kanagawa",
+      "series": "Thirty-six Views of Mount Fuji",
+      "year": "c. 1830-1832",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Tsunami_by_hokusai_19th_century.jpg",
+      "institution": "Metropolitan Museum of Art (Havemeyer Collection)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired / PD-Art (PD-old-auto-expired); published c.1830-1832, artist died 1849."
+    },
+    {
+      "filename": "red_fuji_fine_wind_clear_morning.jpg",
+      "title": "Fine Wind, Clear Morning (Red Fuji)",
+      "series": "Thirty-six Views of Mount Fuji",
+      "year": "c. 1830-1832",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Katsushika_Hokusai_-_Fine_Wind,_Clear_Morning_(Gaif%C5%AB_kaisei)_-_Google_Art_Project.jpg",
+      "institution": "Indianapolis Museum of Art (via Google Art Project)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-old-100-expired."
+    },
+    {
+      "filename": "thunderstorm_beneath_the_summit.jpg",
+      "title": "Thunderstorm Beneath the Summit (Rainstorm Beneath the Summit)",
+      "series": "Thirty-six Views of Mount Fuji",
+      "year": "c. 1830-1832",
+      "source_url": "https://commons.wikimedia.org/wiki/File:%E5%86%A8%E5%B6%BD%E4%B8%89%E5%8D%81%E5%85%AD%E6%99%AF_%E5%B1%B1%E4%B8%8B%E7%99%BD%E9%9B%A8-Storm_below_Mount_Fuji_(Sanka_no_haku_u),_from_the_series_Thirty-six_Views_of_Mount_Fuji_(Fugaku_sanj%C5%ABrokkei)_MET_DP140976.jpg",
+      "institution": "Metropolitan Museum of Art",
+      "pd_status": "Public domain",
+      "pd_basis": "Met Museum Open Access, CC0 license (explicit CC-Zero tag on Wikimedia Commons)."
+    },
+    {
+      "filename": "ejiri_in_suruga_province.jpg",
+      "title": "Ejiri in Suruga Province",
+      "series": "Thirty-six Views of Mount Fuji",
+      "year": "c. 1830-1832",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Ejiri_in_Suruga_Province_(5758987963).jpg",
+      "institution": "Public collection (per Commons)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons category PD-Art (PD-old-100), CC-PD-Mark."
+    },
+    {
+      "filename": "waterwheel_at_onden.jpg",
+      "title": "The Waterwheel at Onden",
+      "series": "Thirty-six Views of Mount Fuji",
+      "year": "c. 1830-1832",
+      "source_url": "https://commons.wikimedia.org/wiki/File:The_Waterwheel_at_Onden_LACMA_M.40.1.170.jpg",
+      "institution": "Los Angeles County Museum of Art (LACMA)",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons, LACMA public domain release; published c.1830-1832."
+    }
+  ]
+}

@@ -69,12 +69,19 @@ export async function verifyDeviceSignature(
   const expected = await hmacHex(secret, `${mac}|${path}|${nonce}`);
   if (!timingSafeEqual(expected, signatureHeader.toLowerCase())) return false;
 
+  // Strictly greater than the high-water mark, not just "not less than" —
+  // an equality allowance here made the exact captured request (same nonce
+  // and signature) replayable forever: `nonce < last_nonce` passed when they
+  // were equal, and the UPDATE's `last_nonce <= nonce` then rewrote the same
+  // value, leaving no trace of the replay. The firmware persists a strictly
+  // increasing NVS counter before each request (ConfigManager::nextNonce()),
+  // so an honest device never reuses a value and never needs the == case.
   const row = await env.DB.prepare("SELECT last_nonce FROM devices WHERE mac = ?")
     .bind(mac)
     .first<{ last_nonce: number }>();
-  if (row && nonce < row.last_nonce) return false;
+  if (row && nonce <= row.last_nonce) return false;
 
-  await env.DB.prepare("UPDATE devices SET last_nonce = ? WHERE mac = ? AND last_nonce <= ?")
+  await env.DB.prepare("UPDATE devices SET last_nonce = ? WHERE mac = ? AND last_nonce < ?")
     .bind(nonce, mac, nonce)
     .run();
 

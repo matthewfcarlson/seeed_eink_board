@@ -39,6 +39,14 @@ async function findImageDeviceKey(env: Env, id: string): Promise<string | null> 
  * change-detection only) — the Worker has no way to verify them without the
  * bucket key, same trust boundary it always implicitly had for upload
  * *content*, now extended to these fields as well.
+ *
+ * Duplicate detection (migrations/0020_image_content_hash.sql): an optional
+ * `content_hash` form field — a bucket-key-keyed HMAC over the default
+ * board's plaintext packed buffer, computed client-side before encryption —
+ * is compared against the bucket's other images, and a match is rejected 409
+ * with the existing filename (the client offers "upload anyway" and retries
+ * with ?allow_duplicate=1). Re-uploading the SAME filename, hash or not, is
+ * the existing overwrite/replace path — never a duplicate.
  */
 export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/images/upload", requireAdmin, async (c) => {
@@ -67,6 +75,27 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
 
     const fields = validateCiphertextUploadFields(body);
     if ("error" in fields) return c.json({ error: fields.error }, 400);
+
+    // Duplicate check before reading/storing any bytes — the multipart body has
+    // already been transferred at this point, but nothing has been written, so a
+    // rejected upload leaves zero partial state behind.
+    if (fields.contentHash && c.req.query("allow_duplicate") !== "1") {
+      const dup = await c.env.DB.prepare(
+        "SELECT filename FROM images WHERE device_key = ? AND content_hash = ? AND filename <> ?"
+      )
+        .bind(deviceKey, fields.contentHash, filename)
+        .first<{ filename: string }>();
+      if (dup) {
+        return c.json(
+          {
+            error: `duplicate: this bucket already has this rendition as "${dup.filename}" (pass allow_duplicate=1 to upload anyway)`,
+            duplicate_of: dup.filename,
+          },
+          409
+        );
+      }
+    }
+
     const bytes = await readCiphertextUploadBytes(fields);
     if ("error" in bytes) return c.json({ error: bytes.error }, 400);
     const { rawBytes, variants } = bytes;
@@ -98,14 +127,15 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     const now = Math.floor(Date.now() / 1000);
     await c.env.DB.batch([
       c.env.DB.prepare(
-        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version, content_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(device_key, filename) DO UPDATE SET
            dither_algorithm = excluded.dither_algorithm,
            raw_bytes = excluded.raw_bytes,
            created_at = excluded.created_at,
-           key_version = excluded.key_version`
-      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion),
+           key_version = excluded.key_version,
+           content_hash = excluded.content_hash`
+      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion, fields.contentHash ?? null),
       ...BOARD_IDS.map((board) =>
         c.env.DB.prepare(
           `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)

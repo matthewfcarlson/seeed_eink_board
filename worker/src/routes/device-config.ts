@@ -7,6 +7,7 @@ import { resolveScheduleConfig } from "../lib/schedule";
 import { resolveFirmwareTarget } from "../lib/firmware-target";
 import { getBucketKeysForDevice } from "../lib/bucket-keys";
 import { isValidFirmwareVersion, isValidMac, isValidP256PublicKeyB64 } from "../lib/validate";
+import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 
 /**
  * GET /device_config — contract-critical (firmware/lib/common/device_app.h's
@@ -63,6 +64,9 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
       // up — much less render it into the registration QR like an unregistered
       // MAC would get.
       if (!isValidMac(mac)) return c.text("X-Device-MAC header is not a valid MAC address", 400);
+      if (!(await checkRateLimit(c.env, "device", mac, RATE_LIMITS.device.limit, RATE_LIMITS.device.windowSeconds))) {
+        return rateLimitedResponse(RATE_LIMITS.device.windowSeconds);
+      }
       const lookup = await resolveDeviceKey(c.env, mac);
       deviceKey = lookup.deviceKey;
 

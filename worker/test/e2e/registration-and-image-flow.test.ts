@@ -32,6 +32,13 @@ import { startWranglerDev, type WranglerDevHandle } from "./lib/wrangler-dev";
  *   bucket to BOTH an EE02 and an EE04 device -> each device fetches,
  *   decrypts, and displays its own board's rendition of it.
  *
+ * It then proves schedule-driven quiet hours end to end: a real
+ * PUT /admin/schedule override (one-hour window two hours ahead of
+ * device-local now, so deterministically quiet) makes the device sync
+ * config/time but defer the image fetch entirely (nothing rendered, rotation
+ * cursor untouched); flipping the same device's schedule to always-active
+ * makes the SAME image display, proving the deferral was schedule-driven.
+ *
  * This is the direct proof of migrations/0019_image_board_variants.sql: a
  * bucket was never board-scoped (device_buckets is plain many-to-many), and
  * now neither is an image - uploading once produces every board's variant,
@@ -113,8 +120,13 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
     expect(countMagentaPixels(screen), `${board} no-bucket screen: no unrecognized/undecoded pixels`).toBe(0);
   }
 
-  async function assertDisplaysUploadedImage(board: SimBoard, label: string, expectedHash: string) {
-    const boot = runSimulatorOnce({ board, server: wrangler.baseUrl, exportPath: path.join(workDir, `${board}-${label}.jpg`) });
+  async function assertDisplaysUploadedImage(
+    board: SimBoard,
+    label: string,
+    expectedHash: string,
+    bootOpts: Partial<Parameters<typeof runSimulatorOnce>[0]> = {}
+  ) {
+    const boot = runSimulatorOnce({ board, server: wrangler.baseUrl, exportPath: path.join(workDir, `${board}-${label}.jpg`), ...bootOpts });
     expect(boot.stdout).not.toContain("Invalid content length");
     expect(boot.stdout).not.toContain("Image fetch/display failed");
     expect(boot.stdout).toContain(`X-Image-Hash=${expectedHash}`);
@@ -186,13 +198,39 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
 
     const ee02Image = buildTestPackedImage();
     const ee04Image = buildEe04TestPackedImage();
-    await admin.uploadImage(bucketId, "e2e-test.bin", {
-      raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
-      variants: {
-        "ee02-13in3": { packedHash: ee02Image.packedHash, packed: await aesGcmEncryptBlob(bucketKey, ee02Image.packed), thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb-ee02")) },
-        "ee04-7in3": { packedHash: ee04Image.packedHash, packed: await aesGcmEncryptBlob(bucketKey, ee04Image.packed), thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb-ee04")) },
-      },
+    // Any 16-hex string works as the keyed content hash — the Worker can't
+    // verify it (it never sees plaintext), it only compares equal values.
+    const CONTENT_HASH = "0123456789abcdef";
+    const rawCiphertext = await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw"));
+    const uploadVariants = {
+      "ee02-13in3": { packedHash: ee02Image.packedHash, packed: await aesGcmEncryptBlob(bucketKey, ee02Image.packed), thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb-ee02")) },
+      "ee04-7in3": { packedHash: ee04Image.packedHash, packed: await aesGcmEncryptBlob(bucketKey, ee04Image.packed), thumb: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb-ee04")) },
+    };
+    await admin.uploadImage(bucketId, "e2e-test.bin", { raw: rawCiphertext, variants: uploadVariants, contentHash: CONTENT_HASH });
+
+    //    Duplicate detection (migrations/0020_image_content_hash.sql): a
+    //    second FILENAME carrying the same content hash is rejected 409 and
+    //    names the existing image; ?allow_duplicate=1 bypasses it. The forced
+    //    duplicate is deleted right after so the single-image rotation
+    //    assertions below stay single-image (no device fetch happens in
+    //    between, so the rotation cursor is untouched).
+    const dupeRes = await admin.uploadImageRaw(bucketId, "e2e-duplicate.bin", {
+      raw: rawCiphertext,
+      variants: uploadVariants,
+      contentHash: CONTENT_HASH,
     });
+    expect(dupeRes.status, "same-rendition re-upload under a new filename should be rejected").toBe(409);
+    expect(((await dupeRes.json()) as { duplicate_of?: string }).duplicate_of).toBe("e2e-test.bin");
+
+    await admin.uploadImage(bucketId, "e2e-duplicate.bin", {
+      raw: rawCiphertext,
+      variants: uploadVariants,
+      contentHash: CONTENT_HASH,
+      allowDuplicate: true,
+    });
+    const dupRow = (await admin.listImages(bucketId)).find((i) => i.filename === "e2e-duplicate.bin");
+    expect(dupRow, "allow_duplicate=1 upload should have landed").toBeTruthy();
+    await admin.deleteImage(dupRow!.id);
 
     const ee02DevicePublicKeyRaw = fromBase64(ee02Device!.sharing_public_key!);
     const ee04DevicePublicKeyRaw = fromBase64(ee04Device!.sharing_public_key!);
@@ -221,7 +259,57 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
     await assertDisplaysUploadedImage("ee02", "boot4-still-image", ee02Image.packedHash);
     await assertDisplaysUploadedImage("ee04", "boot4-still-image", ee04Image.packedHash);
 
-    // 7. Deleting the bucket must actually succeed - a bucket with an image
+    // 7. Server-scheduled quiet hours (the real product path: an override
+    //    written by PUT /admin/schedule, served via /device_config, applied
+    //    by the firmware before its image fetch). The active window is
+    //    exactly one hour, two hours ahead of device-local now (the
+    //    simulator's compiled-in tz offset is -360 minutes), so the current
+    //    hour can never be inside it — even crossing an hour boundary
+    //    between the hour computation and the boot leaves an hour of
+    //    margin. This replaces the harness's active-window pin via
+    //    activeWindow: null, which is the whole point: the SCHEDULE decides,
+    //    not the wall clock (before that pin existed, this exact scenario
+    //    made the whole suite time-of-day flaky).
+    const DEVICE_TZ_MINUTES = -360; // simulator's DEFAULT_TIMEZONE_OFFSET_MINUTES
+    const localHour = (new Date().getUTCHours() + DEVICE_TZ_MINUTES / 60 + 24) % 24;
+    await admin.setSchedule(ee02Claim.mac, {
+      refresh_interval_minutes: 60,
+      active_start_hour: (localHour + 2) % 24,
+      active_end_hour: (localHour + 3) % 24,
+      timezone_offset_minutes: DEVICE_TZ_MINUTES,
+    });
+
+    const quietBoot = runSimulatorOnce({
+      board: "ee02",
+      server: wrangler.baseUrl,
+      exportPath: path.join(workDir, "ee02-boot5-quiet.jpg"),
+      activeWindow: null, // no pin — the server's schedule drives this boot
+    });
+    expect(quietBoot.stdout, "quiet-hours boot must defer the image fetch").toContain("Currently in quiet hours - skipping image fetch");
+    expect(quietBoot.stdout, "quiet-hours boot must still sync config/time first").toContain("Remote config source:");
+    expect(quietBoot.exportedJpegPaths, "nothing may be rendered during quiet hours").toHaveLength(0);
+
+    //    The rotation cursor must be untouched: the image is still pending,
+    //    nothing has been served or skipped past.
+    const currentAfterQuiet = await admin.getCurrent(ee02Claim.mac);
+    expect(currentAfterQuiet.total_images).toBe(1);
+    expect(currentAfterQuiet.pending_image).toBe("e2e-test.bin");
+
+    //    Positive control — same device, SAME image, server schedule flipped
+    //    to always-active (start == end means "always active" per
+    //    device_app.h's isWithinActiveWindow): the image now displays. This
+    //    proves the quiet boot above deferred the fetch because of the
+    //    schedule, not because something else was broken (decode, keys,
+    //    rotation). Also proves the cursor resumed exactly where it was.
+    await admin.setSchedule(ee02Claim.mac, {
+      refresh_interval_minutes: 60,
+      active_start_hour: 12,
+      active_end_hour: 12,
+      timezone_offset_minutes: DEVICE_TZ_MINUTES,
+    });
+    await assertDisplaysUploadedImage("ee02", "boot6-quiet-resume", ee02Image.packedHash, { activeWindow: null });
+
+    // 8. Deleting the bucket must actually succeed - a bucket with an image
     //    that has variant rows for both boards (migrations/
     //    0019_image_board_variants.sql) previously tripped a FOREIGN KEY
     //    constraint failure, because DELETE /admin/buckets/:id deleted the

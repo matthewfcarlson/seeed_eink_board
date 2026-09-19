@@ -39,14 +39,43 @@ export class AdminClient {
     return res.json() as Promise<T>;
   }
 
-  /** Binds an unclaimed device's self-reported (mac, secret) pair to this
-   *  account - the same call /admin's claim page makes after a QR scan. */
   async claimDevice(mac: string, secret: string): Promise<void> {
     await this.json("/admin/devices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mac, secret }),
     });
+  }
+
+  /** PUT /admin/schedule/{mac} — the same override write /admin's schedule
+   *  modal makes. This is the real product path a device's quiet-hours
+   *  behavior follows: the override lands in D1, /device_config serves it,
+   *  and the firmware applies it before its active-window check. */
+  async setSchedule(
+    mac: string,
+    config: {
+      refresh_interval_minutes: number;
+      active_start_hour: number;
+      active_end_hour: number;
+      timezone_offset_minutes: number;
+    }
+  ): Promise<void> {
+    await this.json(`/admin/schedule/${encodeURIComponent(mac)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+  }
+
+  /** GET /current?device={mac} — the debug status endpoint, used to assert
+   *  the rotation cursor directly (pending image, nothing served). */
+  async getCurrent(mac: string): Promise<{
+    device_id: string;
+    current_image: string | null;
+    pending_image: string | null;
+    total_images: number;
+  }> {
+    return this.json(`/current?device=${encodeURIComponent(mac)}`, { method: "GET" });
   }
 
   /** Registers a device by mac with a caller-supplied sharing_public_key
@@ -135,6 +164,10 @@ export class AdminClient {
       method: "GET",
     });
     return images;
+  }
+
+  async deleteImage(imageId: string): Promise<void> {
+    await this.json(`/admin/images/${encodeURIComponent(imageId)}`, { method: "DELETE" });
   }
 
   async rotateStart(bucketId: string, key: WrappedKey): Promise<{ rotation_id: string; new_key_version: number; image_ids: string[] }> {
@@ -238,22 +271,34 @@ export class AdminClient {
    *  images.ts's doc comment). This suite builds synthetic ciphertext
    *  directly (lib/test-image.ts) rather than running the real browser
    *  decode/dither pipeline, since the Worker never inspects plaintext
-   *  either way. */
+   *  either way. Optional contentHash/allowDuplicate exercise the upload
+   *  duplicate-detection path (migrations/0020_image_content_hash.sql) —
+   *  any 16-hex string works, since the Worker can't verify the hash. */
   async uploadImage(
     bucketId: string,
     filename: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }
+    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; contentHash?: string; allowDuplicate?: boolean }
   ): Promise<void> {
-    const form = buildVariantFormData(opts);
-    form.set("dither_algorithm", "floyd_steinberg");
-
-    const res = await fetch(
-      `${this.baseUrl}/admin/images/upload?device_key=${encodeURIComponent(bucketId)}&filename=${encodeURIComponent(filename)}`,
-      { method: "POST", headers: this.authHeaders(), body: form }
-    );
+    const res = await this.uploadImageRaw(bucketId, filename, opts);
     if (!res.ok) {
       throw new Error(`POST /admin/images/upload failed: ${res.status} ${await res.text()}`);
     }
+  }
+
+  /** Same request as uploadImage, but returns the raw Response so a test can
+   *  assert on non-2xx outcomes (e.g. the 409 duplicate rejection). */
+  async uploadImageRaw(
+    bucketId: string,
+    filename: string,
+    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; contentHash?: string; allowDuplicate?: boolean }
+  ): Promise<Response> {
+    const form = buildVariantFormData(opts);
+    form.set("dither_algorithm", "floyd_steinberg");
+    if (opts.contentHash) form.set("content_hash", opts.contentHash);
+
+    let url = `${this.baseUrl}/admin/images/upload?device_key=${encodeURIComponent(bucketId)}&filename=${encodeURIComponent(filename)}`;
+    if (opts.allowDuplicate) url += "&allow_duplicate=1";
+    return fetch(url, { method: "POST", headers: this.authHeaders(), body: form });
   }
 }
 
