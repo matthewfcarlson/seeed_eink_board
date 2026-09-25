@@ -85,7 +85,7 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     }
 
     const snapshot = await getRotationSnapshot(c.env, deviceKey);
-    const pending = peekPendingImage(snapshot);
+    const pending = peekPendingImage(deviceKey, snapshot);
 
     // A bucket is never board-scoped (any mix of EE02/EE04 devices can
     // subscribe to the same one — see migrations/0019_image_board_variants.sql),
@@ -94,7 +94,7 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
     // last-resort check: if it ever happens, serving nothing would be safer
     // than the firmware's content-length check failing (or worse, rendering
     // garbage), so it's treated the same as "no pending image" below.
-    const variant = pending ? await getImageVariant(c.env, pending.image.id, board) : null;
+    const variant = pending ? await getImageVariant(c.env, pending.id, board) : null;
 
     // Registered but nothing to show — no bucket assigned, every assigned
     // bucket has zero images, removed from every bucket it had, or (see
@@ -123,10 +123,10 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
       return new Response(null, { status: 304, headers: { "X-Image-Hash": variant.packedHash } });
     }
 
-    const bytes = await getPackedImage(c.env, pending.image.sourceDeviceKey, pending.image.id, board);
+    const bytes = await getPackedImage(c.env, pending.sourceDeviceKey, pending.id, board);
     if (!bytes) return c.text("Failed to process image", 500);
 
-    const writeback = await markServed(c.env, deviceKey, snapshot, pending.index, pending.image.id);
+    const writeback = await markServed(c.env, deviceKey, snapshot, pending);
     c.executionCtx.waitUntil(writeback());
 
     return new Response(bytes, {
@@ -136,18 +136,18 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
         "Content-Length": String(bytes.byteLength),
         "Content-Disposition": "attachment; filename=image.bin",
         "X-Image-Hash": variant.packedHash,
-        "X-Image-Name": pending.image.filename,
+        "X-Image-Name": pending.filename,
         "X-Device-ID": deviceKey,
         // Which of this device's (possibly several) subscribed buckets the
         // ciphertext body is encrypted under — device_app.h looks this up in
         // the bucket_keys it already unwrapped from /device_config to pick
         // the right AES-256-GCM key before decrypting.
-        "X-Bucket-Id": pending.image.sourceDeviceKey,
+        "X-Bucket-Id": pending.sourceDeviceKey,
         // Which of that bucket's key versions this specific image is encrypted
         // under (see migrations/0016_bucket_key_rotation.sql) — mid-rotation a
         // device can hold both an old and a new wrapped key for the same
         // bucket_id, so it needs this to pick the right one.
-        "X-Bucket-Key-Version": String(pending.image.keyVersion),
+        "X-Bucket-Key-Version": String(pending.keyVersion),
         // 'identity' or 'deflate-raw' - see migrations/0017_packed_encoding.sql. Tells
         // device_app.h's fetchAndDisplayImage() whether to stream ciphertext straight
         // into the display buffer (identity) or decrypt+inflate it chunk-by-chunk.

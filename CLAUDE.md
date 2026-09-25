@@ -147,7 +147,7 @@ Devices are identified by MAC and assigned to **buckets** (named image
 collections; `worker/src/lib/rotation.ts`, `buckets`/`device_buckets`
 tables). An unregistered MAC gets a "scan to register" QR code
 (`worker/src/lib/qr-registration.ts`) — never a shared/default fallback. Claim
-via `/admin?claim=<mac>`; each device tracks its own rotation cursor. Buckets
+via `/admin?claim=<mac>`; each device tracks its own rotation state. Buckets
 can be shared across accounts via invite link
 (`POST /admin/buckets/{id}/invite`). MAC and admin device list both show a
 device's MAC for registration.
@@ -274,9 +274,22 @@ Accepted upload formats: JPEG, PNG, WebP, GIF, BMP (HEIC/HEIF depends on the
 browser's `createImageBitmap` support). All processing (EXIF correction,
 crop/resize, dithering, palette-packing, encryption) happens client-side at
 upload time; the Worker's `/admin/images/upload` just validates and stores
-ciphertext. Rotation order is upload order, tracked per-device
-(`worker/src/lib/rotation.ts`); uploading/deleting takes effect on the
-device's next `/image_packed` request, which also advances the cursor.
+ciphertext. Selection is "human random" rather than sequential
+(`worker/src/lib/rotation.ts`): never twice in a row from the same bucket
+while another subscribed bucket has an image to offer, and never an image
+still inside a recency window of about half the collection. The bucket is
+picked uniformly *per bucket*, not weighted by image count, so a 500-photo
+bucket doesn't drown out a 5-photo one — the flip side being that with two
+buckets each gets every other slot however lopsided they are. The pick is a
+seeded PRNG over persisted state (`rotation_state`'s `last_returned`,
+`last_bucket_id`, `recent_image_ids` — see
+`migrations/0022_random_rotation.sql`), not `crypto.getRandomValues`, so
+`/hash`, `/current` and the `/image_packed` that follows them all agree on
+which image is next while only `/image_packed` writes state. Rotation state
+is tracked per-device, and two devices sharing the same buckets are seeded
+with their own MAC so they don't march in lockstep. Uploading/deleting takes
+effect on the device's next `/image_packed` request, which also records what
+was served.
 
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default

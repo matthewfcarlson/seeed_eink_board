@@ -68,7 +68,7 @@ export class AdminClient {
   }
 
   /** GET /current?device={mac} — the debug status endpoint, used to assert
-   *  the rotation cursor directly (pending image, nothing served). */
+   *  the rotation state directly (pending image, nothing served). */
   async getCurrent(mac: string): Promise<{
     device_id: string;
     current_image: string | null;

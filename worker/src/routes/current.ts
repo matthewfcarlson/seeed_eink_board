@@ -12,7 +12,7 @@ import { resolveScheduleConfig } from "../lib/schedule";
  *  server (filenames, battery, schedule) to anyone, see migrations/0009_bucket_ownership.sql. */
 async function buildDeviceStatus(env: Env, deviceKey: string) {
   const snapshot = await getRotationSnapshot(env, deviceKey);
-  const pending = peekPendingImage(snapshot);
+  const pending = peekPendingImage(deviceKey, snapshot);
   const { config, source } = await resolveScheduleConfig(env, deviceKey);
   const deviceRow = await env.DB.prepare(
     "SELECT last_battery_voltage, last_battery_at FROM devices WHERE mac = ?"
@@ -27,7 +27,7 @@ async function buildDeviceStatus(env: Env, deviceKey: string) {
   return {
     device_id: deviceKey,
     current_image: lastReturnedFilename,
-    pending_image: pending ? pending.image.filename : null,
+    pending_image: pending ? pending.filename : null,
     total_images: snapshot.images.length,
     schedule_config: config,
     config_source: source,

@@ -35,9 +35,19 @@ export interface ImageMeta {
 }
 
 export interface RotationSnapshot {
-  currentIndex: number;
   lastReturned: string | null; // image id
-  images: ImageMeta[]; // ORDER BY filename ASC, computed at cache-population time
+  // Which bucket lastReturned came from, kept as its own field rather than
+  // looked up through `images` because the next pick needs it even after that
+  // image (or the whole bucket) is gone — see rotation.ts's peekPendingImage.
+  lastBucketId: string | null;
+  // Recently served image ids, newest first, capped at RECENT_HISTORY_CAP. The
+  // pick avoids the newest slice of this (see rotation.ts's recentWindow) so a
+  // random rotation doesn't repeat a photo the viewer just saw.
+  recentImageIds: string[];
+  // ORDER BY filename ASC, computed at cache-population time. Not a rotation
+  // order any more (selection is random) — just a stable order, so the seeded
+  // pick is identical for /hash and the /image_packed that follows it.
+  images: ImageMeta[];
 }
 
 export interface ScheduleConfig {
