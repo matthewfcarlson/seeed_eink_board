@@ -6,7 +6,8 @@
 -- 0013_firmware_releases_board.sql, 0014_firmware_channel.sql,
 -- 0015_bucket_encryption.sql, 0016_bucket_key_rotation.sql,
 -- 0017_packed_encoding.sql, 0018_public_buckets.sql,
--- 0019_image_board_variants.sql, and 0021_rate_limits.sql (wrangler d1
+-- 0019_image_board_variants.sql, 0020_image_content_hash.sql,
+-- 0021_rate_limits.sql, and 0022_random_rotation.sql (wrangler d1
 -- migrations tracks applied state per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -151,17 +152,23 @@ CREATE TABLE bucket_rotations (
 CREATE INDEX idx_bucket_rotations_bucket_id ON bucket_rotations(bucket_id, created_at DESC);
 CREATE UNIQUE INDEX idx_bucket_rotations_one_active ON bucket_rotations(bucket_id) WHERE status = 'in_progress';
 
--- Durable mirror of the live rotation cursor. KV is the hot path; this table is
+-- Durable mirror of the live rotation state. KV is the hot path; this table is
 -- written async (ctx.waitUntil) and used for recovery + the /current status view.
 CREATE TABLE rotation_state (
-  device_key    TEXT PRIMARY KEY, -- mac, or the literal string 'default'
-  current_index INTEGER NOT NULL DEFAULT 0,
-  last_returned TEXT,
-  updated_at    INTEGER NOT NULL
+  device_key       TEXT PRIMARY KEY, -- mac, or the literal string 'default'
+  last_returned    TEXT,
+  -- Which bucket last_returned came from, and the recently-served image ids
+  -- (JSON array, newest first) — the two inputs "human random" selection needs
+  -- to keep the next pick out of the same bucket and off a photo just shown.
+  -- See migrations/0022_random_rotation.sql and lib/rotation.ts.
+  last_bucket_id   TEXT,
+  recent_image_ids TEXT,
+  updated_at       INTEGER NOT NULL
 );
 
--- Catalog of processed images per device bucket. Rotation order is
--- `ORDER BY filename ASC`, computed once here rather than re-listing KV per request.
+-- Catalog of processed images per device bucket. Listed `ORDER BY filename ASC`
+-- once here rather than re-listing KV per request — a stable order for the
+-- seeded random pick (lib/rotation.ts), not a play order.
 -- The actual image bytes live in KV under deterministic keys derived from
 -- (device_key, id) — see lib/image-store.ts — not stored as columns here.
 CREATE TABLE images (

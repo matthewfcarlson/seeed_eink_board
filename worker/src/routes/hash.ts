@@ -60,10 +60,10 @@ export function registerHashRoute(app: Hono<{ Bindings: Env }>) {
     }
 
     const snapshot = await getRotationSnapshot(c.env, deviceKey);
-    const pending = peekPendingImage(snapshot);
+    const pending = peekPendingImage(deviceKey, snapshot);
     if (!pending) return c.text("No image", 404);
 
-    const variant = await getImageVariant(c.env, pending.image.id, board);
+    const variant = await getImageVariant(c.env, pending.id, board);
     if (!variant) return c.text("No image", 404);
 
     return c.text(variant.packedHash, 200, { "Content-Type": "text/plain" });

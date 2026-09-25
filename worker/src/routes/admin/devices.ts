@@ -15,9 +15,9 @@ import { MAX_DEVICE_LABEL, isValidMac, isValidP256PublicKeyB64, validateLabel } 
 // junk values getting stored as a secret.
 const SECRET_PATTERN = /^[0-9a-f]{16,64}$/i;
 
-/** What a device was last successfully sent, per its rotation cursor (see lib/rotation.ts's
- *  markServed) — not necessarily what's on the physical screen. markServed advances the
- *  cursor as soon as the response body starts streaming, so a device that dies mid-download
+/** What a device was last successfully sent, per its rotation state (see lib/rotation.ts's
+ *  markServed) — not necessarily what's on the physical screen. markServed records the serve
+ *  as soon as the response body starts streaming, so a device that dies mid-download
  *  or mid-refresh will still show as having "sent" the new image here, even though the e-ink
  *  panel — which holds its last completed refresh through power loss — is still showing the
  *  previous one. Falls back to a thumbnail-less entry if that image has since been deleted

@@ -103,7 +103,8 @@ confirm registration with your passkey.
 **6. Upload images** — from `/admin`, create a bucket and assign it to your
 device, then upload JPEG/PNG/WebP/GIF/BMP photos (not HEIC — convert first).
 Processing (EXIF rotation, crop, dithering, encryption) happens once at
-upload time; images then rotate in upload order.
+upload time; images are then picked randomly rather than in upload order —
+with more than one bucket assigned, never twice in a row from the same one.
 
 **7. Test it** — press reset. It should connect to WiFi, check its config
 and image hash, download+display if changed (20-30s of flickering), then

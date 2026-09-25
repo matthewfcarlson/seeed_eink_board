@@ -36,7 +36,7 @@ import { startWranglerDev, type WranglerDevHandle } from "./lib/wrangler-dev";
  * PUT /admin/schedule override (one-hour window two hours ahead of
  * device-local now, so deterministically quiet) makes the device sync
  * config/time but defer the image fetch entirely (nothing rendered, rotation
- * cursor untouched); flipping the same device's schedule to always-active
+ * state untouched); flipping the same device's schedule to always-active
  * makes the SAME image display, proving the deferral was schedule-driven.
  *
  * This is the direct proof of migrations/0019_image_board_variants.sql: a
@@ -213,7 +213,7 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
     //    names the existing image; ?allow_duplicate=1 bypasses it. The forced
     //    duplicate is deleted right after so the single-image rotation
     //    assertions below stay single-image (no device fetch happens in
-    //    between, so the rotation cursor is untouched).
+    //    between, so the rotation state is untouched).
     const dupeRes = await admin.uploadImageRaw(bucketId, "e2e-duplicate.bin", {
       raw: rawCiphertext,
       variants: uploadVariants,
@@ -289,7 +289,7 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
     expect(quietBoot.stdout, "quiet-hours boot must still sync config/time first").toContain("Remote config source:");
     expect(quietBoot.exportedJpegPaths, "nothing may be rendered during quiet hours").toHaveLength(0);
 
-    //    The rotation cursor must be untouched: the image is still pending,
+    //    The rotation state must be untouched: the image is still pending,
     //    nothing has been served or skipped past.
     const currentAfterQuiet = await admin.getCurrent(ee02Claim.mac);
     expect(currentAfterQuiet.total_images).toBe(1);
@@ -300,7 +300,7 @@ describe("simulator e2e: one bucket serves both EE02 and EE04 devices", () => {
     //    device_app.h's isWithinActiveWindow): the image now displays. This
     //    proves the quiet boot above deferred the fetch because of the
     //    schedule, not because something else was broken (decode, keys,
-    //    rotation). Also proves the cursor resumed exactly where it was.
+    //    rotation). Also proves the pending image survived the quiet boot.
     await admin.setSchedule(ee02Claim.mac, {
       refresh_interval_minutes: 60,
       active_start_hour: 12,
