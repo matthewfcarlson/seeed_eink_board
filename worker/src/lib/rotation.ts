@@ -145,6 +145,18 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+/** Picks one pool with probability proportional to its size, given a uniform
+ *  roll in [0, 1). Pools are never empty — they come from grouping real images. */
+function pickWeightedBucket(pools: ImageMeta[][], roll: number): ImageMeta[] {
+  const total = pools.reduce((sum, pool) => sum + pool.length, 0);
+  let target = Math.floor(roll * total);
+  for (const pool of pools) {
+    if (target < pool.length) return pool;
+    target -= pool.length;
+  }
+  return pools[pools.length - 1]!; // unreachable for roll < 1; keeps the type total
+}
+
 /**
  * The image that would be served next, without advancing. Never mutates state,
  * and returns the same image for the same snapshot — see mulberry32 above.
@@ -153,9 +165,11 @@ function mulberry32(seed: number): () => number {
  *  - Never twice in a row from the same bucket, as long as some other
  *    subscribed bucket has an image to offer. Someone flipping through their
  *    own albums by hand doesn't serve one album to exhaustion.
- *  - Bucket chosen uniformly *per bucket*, not weighted by image count, so a
- *    500-photo bucket doesn't drown out a 5-photo one. The flip side: with two
- *    buckets, each gets every other slot however lopsided they are.
+ *  - Bucket chosen weighted by its image count, so among the eligible
+ *    buckets every image has the same chance — as close to plain random as
+ *    the bucket rule allows. With exactly two buckets the rule still forces
+ *    strict alternation however lopsided they are; weighting only matters
+ *    from three buckets up.
  *  - Within the chosen bucket, images inside the recency window are skipped, so
  *    the same photo doesn't come back around immediately.
  */
@@ -178,7 +192,7 @@ export function peekPendingImage(deviceKey: string, snapshot: RotationSnapshot):
     const others = bucketIds.filter((bucketId) => bucketId !== snapshot.lastBucketId);
     if (others.length > 0) bucketIds = others;
   }
-  const pool = byBucket.get(bucketIds[Math.floor(random() * bucketIds.length)]!)!;
+  const pool = pickWeightedBucket(bucketIds.map((bucketId) => byBucket.get(bucketId)!), random());
 
   // A bucket smaller than the recency window can't avoid repeats — fall back to
   // the whole bucket rather than abandoning the bucket rule to dodge one.

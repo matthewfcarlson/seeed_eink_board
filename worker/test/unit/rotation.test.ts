@@ -65,7 +65,7 @@ describe("peekPendingImage", () => {
   });
 
   it("never picks from the bucket just served when another bucket has images", () => {
-    // Deliberately lopsided: a sequential/size-weighted pick would sit in
+    // Deliberately lopsided: a sequential or plain-random pick would sit in
     // bucket-a for 9 out of 10 images.
     const images = [
       ...Array.from({ length: 9 }, (_, i) => image(`a${i}`, "bucket-a")),
@@ -75,6 +75,27 @@ describe("peekPendingImage", () => {
       const pending = peekPendingImage("device-1", snapshot(images, { lastBucketId }));
       expect(pending!.sourceDeviceKey).not.toBe(lastBucketId);
     }
+  });
+
+  it("weights the bucket choice by image count among the eligible buckets", () => {
+    // Last serve came from bucket-b, so the choice is between bucket-a (8
+    // images) and bucket-c (2): weighted, that's 80/20; per-bucket it'd be 50/50.
+    const images = [
+      ...Array.from({ length: 8 }, (_, i) => image(`a${i}`, "bucket-a")),
+      image("b0", "bucket-b"),
+      image("c0", "bucket-c"),
+      image("c1", "bucket-c"),
+    ];
+    const state = snapshot(images, { lastBucketId: "bucket-b" });
+    const counts: Record<string, number> = {};
+    const trials = 2000;
+    for (let i = 0; i < trials; i++) {
+      const bucket = peekPendingImage(`device-${i}`, state)!.sourceDeviceKey;
+      counts[bucket] = (counts[bucket] ?? 0) + 1;
+    }
+    expect(counts["bucket-b"]).toBeUndefined();
+    expect(counts["bucket-a"]! / trials).toBeGreaterThan(0.72);
+    expect(counts["bucket-a"]! / trials).toBeLessThan(0.88);
   });
 
   it("still serves the last-served bucket when it is the only one with images", () => {
