@@ -98,6 +98,24 @@ describe("peekPendingImage", () => {
     expect(counts["bucket-a"]! / trials).toBeLessThan(0.88);
   });
 
+  it("caps a huge bucket's weight so a small one still gets play time", () => {
+    // Eligible: dogs (2000) vs art (30). Uncapped that's ~98.5/1.5; capped at
+    // 4x the smallest it's 120 vs 30 -> 80/20.
+    const images = [
+      ...Array.from({ length: 2000 }, (_, i) => image(`dog${i}`, "dogs")),
+      ...Array.from({ length: 30 }, (_, i) => image(`art${i}`, "art")),
+      image("x0", "other"),
+    ];
+    const state = snapshot(images, { lastBucketId: "other" });
+    let art = 0;
+    const trials = 1000;
+    for (let i = 0; i < trials; i++) {
+      if (peekPendingImage(`device-${i}`, state)!.sourceDeviceKey === "art") art++;
+    }
+    expect(art / trials).toBeGreaterThan(0.14);
+    expect(art / trials).toBeLessThan(0.26);
+  });
+
   it("still serves the last-served bucket when it is the only one with images", () => {
     const images = [image("a"), image("b")];
     const pending = peekPendingImage("device-1", snapshot(images, { lastBucketId: "device-1" }));

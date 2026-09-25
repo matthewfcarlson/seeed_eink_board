@@ -278,8 +278,10 @@ ciphertext. Selection is "human random" rather than sequential
 (`worker/src/lib/rotation.ts`): never twice in a row from the same bucket
 while another subscribed bucket has an image to offer, and never an image
 still inside a recency window of about half the collection. The bucket is
-picked weighted by image count, so among eligible buckets every image has an
-equal chance — as close to plain random as the bucket rule allows. With
+picked weighted by image count, so among eligible buckets every image has
+roughly an equal chance — but no bucket weighs more than 4x the smallest
+eligible one (`MAX_BUCKET_WEIGHT_RATIO`), so a 2000-photo bucket can't bury a
+30-photo one (80/20, not 98.5/1.5). With
 exactly two buckets the rule still forces strict alternation however
 lopsided they are; weighting only matters from three buckets up. The pick is a
 seeded PRNG over persisted state (`rotation_state`'s `last_returned`,

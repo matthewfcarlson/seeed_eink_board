@@ -145,14 +145,22 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-/** Picks one pool with probability proportional to its size, given a uniform
- *  roll in [0, 1). Pools are never empty — they come from grouping real images. */
+/** No eligible bucket weighs more than this many times the smallest one, so a
+ *  2000-photo bucket can't bury a 30-photo one: at 4x, those two split 80/20
+ *  rather than 98.5/1.5. */
+const MAX_BUCKET_WEIGHT_RATIO = 4;
+
+/** Picks one pool with probability proportional to its size — capped at
+ *  MAX_BUCKET_WEIGHT_RATIO times the smallest pool — given a uniform roll in
+ *  [0, 1). Pools are never empty — they come from grouping real images. */
 function pickWeightedBucket(pools: ImageMeta[][], roll: number): ImageMeta[] {
-  const total = pools.reduce((sum, pool) => sum + pool.length, 0);
+  const cap = Math.min(...pools.map((pool) => pool.length)) * MAX_BUCKET_WEIGHT_RATIO;
+  const weights = pools.map((pool) => Math.min(pool.length, cap));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
   let target = Math.floor(roll * total);
-  for (const pool of pools) {
-    if (target < pool.length) return pool;
-    target -= pool.length;
+  for (let i = 0; i < pools.length; i++) {
+    if (target < weights[i]!) return pools[i]!;
+    target -= weights[i]!;
   }
   return pools[pools.length - 1]!; // unreachable for roll < 1; keeps the type total
 }
@@ -166,8 +174,9 @@ function pickWeightedBucket(pools: ImageMeta[][], roll: number): ImageMeta[] {
  *    subscribed bucket has an image to offer. Someone flipping through their
  *    own albums by hand doesn't serve one album to exhaustion.
  *  - Bucket chosen weighted by its image count, so among the eligible
- *    buckets every image has the same chance — as close to plain random as
- *    the bucket rule allows. With exactly two buckets the rule still forces
+ *    buckets every image has roughly the same chance — but capped at
+ *    MAX_BUCKET_WEIGHT_RATIO times the smallest eligible bucket, so a huge
+ *    bucket can't starve a small one. With exactly two buckets the rule still forces
  *    strict alternation however lopsided they are; weighting only matters
  *    from three buckets up.
  *  - Within the chosen bucket, images inside the recency window are skipped, so
