@@ -7,14 +7,14 @@
 -- 0015_bucket_encryption.sql, 0016_bucket_key_rotation.sql,
 -- 0017_packed_encoding.sql, 0018_public_buckets.sql,
 -- 0019_image_board_variants.sql, 0020_image_content_hash.sql,
--- 0021_rate_limits.sql, and 0022_random_rotation.sql (wrangler d1
--- migrations tracks applied state per-database).
+-- 0021_rate_limits.sql, 0022_random_rotation.sql, and
+-- 0023_user_sessions.sql (wrangler d1 migrations tracks applied state
+-- per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
 -- way to create a row here, and a passkey needs nothing but the credential itself.
 CREATE TABLE users (
   id            TEXT PRIMARY KEY,
-  api_key_hash  TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
   -- Human-settable name shown instead of "Account <id prefix>" (see migrations/0008) —
   -- also how a user identifies themselves in a shared bucket's collaborator list.
@@ -250,6 +250,23 @@ CREATE TABLE credentials (
   wrap_nonce          TEXT
 );
 CREATE INDEX idx_credentials_user_id ON credentials(user_id);
+
+-- Per-login bearer-token sessions (see migrations/0023_user_sessions.sql) —
+-- replaces the old users.api_key_hash single-key model. One row per passkey
+-- ceremony (registration or login), so multiple browsers/devices stay logged
+-- in concurrently and each session can be listed/revoked independently.
+CREATE TABLE user_sessions (
+  id            TEXT PRIMARY KEY,     -- random, NOT secret; identifies a session for revocation/listing
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  token_hash    TEXT NOT NULL UNIQUE, -- SHA-256 of the bearer token (lib/auth-admin.ts)
+  credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+  created_at    INTEGER NOT NULL,
+  last_used_at  INTEGER,              -- throttled write, at most once/hour per session
+  expires_at    INTEGER,              -- NULL = never expires in v1; revocation is explicit
+  revoked_at    INTEGER
+);
+CREATE INDEX idx_user_sessions_user ON user_sessions(user_id);
+CREATE INDEX idx_user_sessions_token ON user_sessions(token_hash);
 
 -- Firmware OTA: releases Cloudflare has fetched from GitHub. Board-scoped
 -- (migrations/0013) — two boards built from the same version tag are two

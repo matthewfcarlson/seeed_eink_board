@@ -1,16 +1,17 @@
 {
   "bucket": "james-ensor",
   "artist": "James Ensor (1860-1949)",
-  "category_basis": "Ensor died 19 November 1949; the Belgian term (life+70) expired in 2020. Every work shown predates 1930, so each is public domain in both Belgium (life+70) and the US (pre-1930 publication). One file (skeletons_herring.jpg) is a museum photograph under CC BY-SA 4.0 of a public-domain painting — fine for personal use with attribution.",
+  "category_basis": "Ensor died 19 November 1949; the Belgian term (life+70) expired in 2020. Every work shown predates 1930, so each is public domain in both Belgium (life+70) and the US (pre-1930 publication). Some files are museum photographs under CC0/CC BY of public-domain paintings — noted per image; fine for personal use with attribution.",
   "images": [
     {
       "filename": "scandalized_masks.jpg",
       "title": "The Scandalized Masks (Les masques scandalisés)",
       "year": "1883",
-      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor,_Scandalized_Mask_(1883)_oil_on_canvas,_135_x_112_cm.,_Royal_Museums_of_Fine_Arts_of_Belgium,_Brussels.jpg",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_ensor,_le_maschere_scandalizzate.jpg",
       "institution": "Royal Museums of Fine Arts of Belgium, Brussels",
-      "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art; painted 1883."
+      "pd_status": "Painting public domain; photo CC BY 3.0 (photographer self-published)",
+      "pd_basis": "Underlying work 1883 (PD); photograph CC BY 3.0 — attribution required. Fine for personal display.",
+      "fit": "cover"
     },
     {
       "filename": "self_portrait_flowered_hat.jpg",
@@ -19,7 +20,17 @@
       "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor_-_Self-portrait_with_flower_hat.jpg",
       "institution": "Mu.ZEE, Ostend",
       "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art (Mu.ZEE source); dated 1883-1888 on Commons."
+      "pd_basis": "Wikimedia Commons PD-Art (Mu.ZEE source); dated 1883-1888 on Commons.",
+      "fit": "cover"
+    },
+    {
+      "filename": "adam_and_eve.jpg",
+      "title": "Adam and Eve Expelled from Paradise",
+      "year": "1887",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Adam_en_Eva_uit_het_paradijs_verjaagd,_James_Ensor,_1887,_Koninklijk_Museum_voor_Schone_Kunsten_Antwerpen,_2072.002.jpeg",
+      "institution": "Royal Museum of Fine Arts Antwerp (KMSKA)",
+      "pd_status": "Public domain (museum photo CC0)",
+      "pd_basis": "Painted 1887 (PD); KMSKA photograph released CC0."
     },
     {
       "filename": "masks_confronting_death.jpg",
@@ -40,22 +51,50 @@
       "pd_basis": "Wikimedia Commons PD-Art; Getty open content (getty.edu source)."
     },
     {
+      "filename": "grey_sea.jpg",
+      "title": "Grey Sea (Grijze zee)",
+      "year": "1880",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor_(1880)_-_Grijze_zee_001.jpg",
+      "institution": "See Commons file page",
+      "pd_status": "Public domain",
+      "pd_basis": "Wikimedia Commons PD-Art; painted 1880."
+    },
+    {
+      "filename": "baths_at_ostend.jpg",
+      "title": "The Baths at Ostend (De baden in Oostende)",
+      "year": "1890",
+      "source_url": "https://commons.wikimedia.org/wiki/File:De_baden_in_Oostende,_James_Ensor,_1890,_Museum_voor_Schone_Kunsten_Gent,_2011-GP.jpg",
+      "institution": "Museum of Fine Arts Ghent (MSK)",
+      "pd_status": "Public domain (museum photo CC0)",
+      "pd_basis": "Painted 1890 (PD); MSK Ghent photograph released CC0."
+    },
+    {
       "filename": "skeletons_herring.jpg",
       "title": "Skeletons Fighting over a Pickled Herring",
       "year": "1891",
-      "source_url": "https://commons.wikimedia.org/wiki/File:Skeletons_Fighting_over_a_Pickled_Herring_by_James_Ensor.jpg",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor,_Skeletons_Fighting_Over_a_Pickled_Herring_-_Musées_royaux_des_Beaux-Arts_de_Belgique,_Brussels.jpg",
       "institution": "Royal Museum of Fine Arts Antwerp (KMSKA)",
-      "pd_status": "Painting public domain; photo CC BY-SA 4.0 (photographer 1Veertje)",
-      "pd_basis": "Underlying work 1891 (PD); museum photograph licensed CC BY-SA 4.0 — attribution required, share-alike. Fine for personal display."
+      "pd_status": "Painting public domain; photograph public domain per Commons",
+      "pd_basis": "Underlying work 1891 (PD); museum photograph tagged PD on Commons."
     },
     {
       "filename": "death_and_the_masks.jpg",
-      "title": "Death and the Masks (Le mort et les masques)",
+      "title": "Death and the Masks (La mort et les masques)",
       "year": "c. 1897",
-      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor_-_Death_and_the_Masks.jpg",
-      "institution": "See Commons source page (pubhist.com)",
+      "source_url": "https://commons.wikimedia.org/wiki/File:James_Ensor_-_Death_and_the_masks.jpg",
+      "institution": "See Commons source page (wikioo.org)",
       "pd_status": "Public domain",
       "pd_basis": "Wikimedia Commons PD-Art; painted c. 1897."
+    },
+    {
+      "filename": "dunes.jpg",
+      "title": "Dunes (Duinen)",
+      "year": "c. 1870s-1880s",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Dunes,_James_Ensor,_Mu.ZEE,_SM000165.jpg",
+      "institution": "Mu.ZEE, Ostend",
+      "pd_status": "Public domain (museum photo CC0)",
+      "pd_basis": "Pre-1930 work (PD); Mu.ZEE photograph released CC0."
     }
-  ]
+  ],
+  "fit": "contain"
 }

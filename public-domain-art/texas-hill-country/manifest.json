@@ -86,5 +86,6 @@
       "pd_status": "Public domain",
       "pd_basis": "Published 1882, well before 1929 cutoff."
     }
-  ]
+  ],
+  "fit": "contain"
 }

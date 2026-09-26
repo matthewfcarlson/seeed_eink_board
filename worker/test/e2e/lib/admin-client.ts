@@ -47,6 +47,29 @@ export class AdminClient {
     });
   }
 
+  // --- Sessions (migrations/0023_user_sessions.sql) -------------------------
+
+  async getSessions(): Promise<{
+    current_session_id: string;
+    sessions: Array<{ id: string; credential_id: string | null; created_at: number; last_used_at: number | null; expires_at: number | null; is_current: boolean }>;
+  }> {
+    return this.json("/admin/sessions", { method: "GET" });
+  }
+
+  async revokeSession(sessionId: string): Promise<void> {
+    await this.json(`/admin/sessions/${sessionId}`, { method: "DELETE" });
+  }
+
+  async revokeOthers(): Promise<{ ok: true; revoked: number }> {
+    return this.json("/admin/sessions/revoke-others", { method: "POST" });
+  }
+
+  /** DELETE /admin/sessions/current — real logout. The calling session is
+   *  revoked server-side; this AdminClient is dead afterwards. */
+  async logout(): Promise<void> {
+    await this.json("/admin/sessions/current", { method: "DELETE" });
+  }
+
   /** PUT /admin/schedule/{mac} — the same override write /admin's schedule
    *  modal makes. This is the real product path a device's quiet-hours
    *  behavior follows: the override lands in D1, /device_config serves it,

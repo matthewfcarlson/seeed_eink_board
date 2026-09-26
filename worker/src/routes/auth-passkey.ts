@@ -10,6 +10,18 @@ import {
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import type { Env } from "../types";
 import { generateApiKey, hashApiKey } from "../lib/auth-admin";
+
+/** Mints a fresh session token and inserts its user_sessions row. Used by
+ *  login; registration inlines the same INSERT into its DB.batch instead —
+ *  the users row doesn't exist until that batch runs, and the
+ *  user_sessions.user_id foreign key needs it created first. */
+async function mintSession(env: Env, userId: string, credentialId: string, now: number): Promise<string> {
+  const token = generateApiKey();
+  await env.DB.prepare(
+    "INSERT INTO user_sessions (id, user_id, token_hash, credential_id, created_at) VALUES (?, ?, ?, ?, ?)"
+  ).bind(crypto.randomUUID(), userId, await hashApiKey(token), credentialId, now).run();
+  return token;
+}
 import { kvKeys } from "../lib/kv-keys";
 import {
   CHALLENGE_TTL_SECONDS,
@@ -41,9 +53,12 @@ interface CredentialRow {
  * "usernameless" too (resident/discoverable credential + OS account picker), so
  * there's nothing to type in either direction — just a button.
  *
- * Both endpoints mint a fresh API key on success, reusing the existing
- * Authorization: Bearer <api_key> model for the rest of /admin — a successful
- * ceremony is just another way to obtain one, same as the old bootstrap script.
+ * Both endpoints mint a fresh session token on success (one user_sessions row
+ * per ceremony — see migrations/0023_user_sessions.sql), reusing the existing
+ * Authorization: Bearer model for the rest of /admin. Unlike the old
+ * single api_key_hash column, sessions coexist: a second browser logging in
+ * no longer logs the first one out, and each can be revoked independently
+ * (routes/admin/sessions.ts).
  */
 /** Per-IP limit shared by all four passkey endpoints. Keyed by the edge-reported
  *  client IP; "unknown" collapses anything header-less into one bucket, which is
@@ -108,14 +123,14 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
     if (!verification.verified) return c.json({ error: "Passkey verification failed" }, 400);
 
     const { credential } = verification.registrationInfo;
+    const now = Math.floor(Date.now() / 1000);
+    const sessionId = crypto.randomUUID();
     const apiKey = generateApiKey();
     const apiKeyHash = await hashApiKey(apiKey);
-    const now = Math.floor(Date.now() / 1000);
 
     await c.env.DB.batch([
-      c.env.DB.prepare("INSERT INTO users (id, api_key_hash, created_at, sharing_public_key) VALUES (?, ?, ?, ?)").bind(
+      c.env.DB.prepare("INSERT INTO users (id, created_at, sharing_public_key) VALUES (?, ?, ?)").bind(
         pending.userId,
-        apiKeyHash,
         now,
         sharingKey?.sharing_public_key ?? null
       ),
@@ -132,10 +147,13 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
         sharingKey?.wrapped_sharing_key ?? null,
         sharingKey?.wrap_nonce ?? null
       ),
+      c.env.DB.prepare(
+        "INSERT INTO user_sessions (id, user_id, token_hash, credential_id, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).bind(sessionId, pending.userId, apiKeyHash, credential.id, now),
     ]);
 
     await c.env.KV.delete(kvKeys.passkeyAttempt(body.attemptId));
-    return c.json({ api_key: apiKey }, 201);
+    return c.json({ session_token: apiKey }, 201);
   });
 
   app.post("/auth/login/options", async (c) => {
@@ -201,12 +219,14 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
     }
     if (!verification.verified) return c.json({ error: "Passkey verification failed" }, 400);
 
-    // Mints a fresh API key on every login, same as the "Rotate API Key" admin
-    // action — only the hash is stored so there's no way to hand back an old one.
-    const apiKey = generateApiKey();
-    const apiKeyHash = await hashApiKey(apiKey);
+    // Mints a fresh session (one user_sessions row per login — see
+    // migrations/0023_user_sessions.sql) instead of overwriting a shared key,
+    // so concurrent logins no longer invalidate each other. Old sessions for
+    // this user are deliberately left active — sign them out explicitly via
+    // /admin/sessions if wanted.
+    const apiKey = await mintSession(c.env, credRow.user_id, credRow.id, Math.floor(Date.now() / 1000));
+
     await c.env.DB.batch([
-      c.env.DB.prepare("UPDATE users SET api_key_hash = ? WHERE id = ?").bind(apiKeyHash, credRow.user_id),
       c.env.DB.prepare("UPDATE credentials SET counter = ? WHERE id = ?").bind(
         verification.authenticationInfo.newCounter,
         credRow.id
@@ -218,13 +238,13 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
     // Whatever's currently on file for this credential — null means it has no
     // PRF-protected sharing key yet (never backfilled, or this authenticator
     // doesn't support PRF at all). Backfilling happens via a *separate*
-    // authenticated call (PATCH /admin/me/sharing-key, using the api_key just
+    // authenticated call (PATCH /admin/me/sharing-key, using the session token just
     // minted above), not here: this ceremony's challenge is single-use and
     // already consumed by the KV delete above, so there's no way to make a
     // second /auth/login/verify call with it if the client discovers only
     // after seeing this response that it needs to upload a wrap.
     return c.json({
-      api_key: apiKey,
+      session_token: apiKey,
       sharing_public_key: credRow.user_sharing_public_key,
       wrapped_sharing_key: credRow.wrapped_sharing_key,
       wrap_nonce: credRow.wrap_nonce,

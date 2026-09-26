@@ -9,8 +9,8 @@ declare module "hono" {
   }
 }
 
-/** Requires `Authorization: Bearer <api_key>`; sets c.var.user or responds 401.
- *  Rate-limited per user id — an API key that leaks gets bounded throughput,
+/** Requires `Authorization: Bearer <session token>`; sets c.var.user or responds 401.
+ *  Rate-limited per user id — a leaked token gets bounded throughput,
  *  and a runaway dashboard loop can't hammer D1. Superusers are exempt: they
  *  already have D1 access out-of-band, so a limit here only gets in the way.
  *
@@ -19,7 +19,9 @@ declare module "hono" {
  *  calls them right after every passkey ceremony, so heavy dashboard usage
  *  exhausting `admin` must not take the login/session path down with it. */
 export async function requireAdmin(c: Context<{ Bindings: Env }>, next: Next) {
-  const user = await authenticateAdmin(c.env, c.req.raw);
+  // waitUntil lets authenticateAdmin's throttled last_used_at write run
+  // post-response instead of adding latency to every admin request.
+  const user = await authenticateAdmin(c.env, c.req.raw, c.executionCtx);
   if (!user) return c.json({ error: "Unauthorized" }, 401);
   const path = c.req.path;
   const isMeEndpoint = path === "/admin/me" || path.startsWith("/admin/me/");

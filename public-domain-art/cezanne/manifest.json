@@ -14,12 +14,12 @@
     },
     {
       "filename": "card_players.jpg",
-      "title": "The Card Players (Les joueurs de cartes)",
+      "title": "The Card Players (Les joueurs de cartes, 5th version)",
       "year": "1892-1895",
-      "source_url": "https://commons.wikimedia.org/wiki/File:Paul_Cézanne,_Les_joueurs_de_carte_(1892-95).jpg",
-      "institution": "Courtauld Institute of Art, London",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Les_Joueurs_de_cartes,_par_Paul_Cézanne.jpg",
+      "institution": "See Commons source page (5th version)",
       "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art; source cezannecatalogue.com entry 691."
+      "pd_basis": "Wikimedia Commons PD-Art; painted 1892-1895."
     },
     {
       "filename": "still_life_with_apples.jpg",
@@ -46,16 +46,18 @@
       "source_url": "https://commons.wikimedia.org/wiki/File:Madame_Cézanne_aux_cheveux_dénoués,_par_Paul_Cézanne,_Yorck.jpg",
       "institution": "Yorck Project scan (see Commons file page)",
       "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art (Yorck Project)."
+      "pd_basis": "Wikimedia Commons PD-Art (Yorck Project).",
+      "fit": "cover"
     },
     {
       "filename": "gulf_of_marseille.jpg",
-      "title": "The Gulf of Marseille Seen from L'Estaque (Le Golfe de Marseille vu de l'Estaque)",
-      "year": "c. 1878-1879",
-      "source_url": "https://commons.wikimedia.org/wiki/File:Le_Golfe_de_Marseille_vu_de_l'Estaque,_par_Paul_Cézanne,_FWN_119.jpg",
-      "institution": "See Commons source page (cezannecatalogue.com entry 386)",
+      "title": "The Bay of Marseilles, Seen from L'Estaque",
+      "year": "c. 1885",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Paul_Cézanne_-_The_Bay_of_Marseilles,_Seen_from_L'Estaque_-_Google_Art_Project.jpg",
+      "institution": "See Commons file page (Google Art Project scan)",
       "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art; catalog FWN 119."
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan)."
     }
-  ]
+  ],
+  "fit": "contain"
 }

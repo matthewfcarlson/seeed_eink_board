@@ -38,7 +38,7 @@ export const RATE_LIMITS = {
    *  these right after a passkey ceremony and on every page load, so a burst
    *  of heavy dashboard calls must never be able to lock an account out of
    *  checking its own session or logging in. */
-  adminMe: { limit: 60, windowSeconds: 300 },
+  adminMe: { limit: 300, windowSeconds: 300 },
 } as const;
 
 /** True when the request is within `limit` for this window; false once the

@@ -1,7 +1,6 @@
 import type { Hono } from "hono";
 import type { Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { generateApiKey, hashApiKey } from "../../lib/auth-admin";
 import { readSharingKeyWrap, type SharingKeyWrap } from "../../lib/webauthn";
 
 export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
@@ -46,7 +45,7 @@ export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
   // for why this can't just be a second field on that endpoint: its challenge
   // is single-use and already consumed by the time the client's own
   // WebAuthn/crypto code has finished deciding whether a backfill is needed.
-  // Authenticated by the ordinary Bearer api_key that same login just minted,
+  // Authenticated by the ordinary Bearer session token that same login just minted,
   // not by another passkey ceremony. Guarded by the same IS NULL checks as
   // before — a client that resends this on every login can't clobber an
   // already-established wrap for either column.
@@ -76,15 +75,8 @@ export function registerAdminAuthRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json({ ok: true });
   });
 
-  app.post("/admin/keys/rotate", requireAdmin, async (c) => {
-    const newKey = generateApiKey();
-    const newHash = await hashApiKey(newKey);
-    await c.env.DB.prepare("UPDATE users SET api_key_hash = ? WHERE id = ?")
-      .bind(newHash, c.var.user.id)
-      .run();
-
-    // Returned exactly once — it is not recoverable after this response, since only
-    // the hash is stored.
-    return c.json({ api_key: newKey });
-  });
+  // API-key rotation is gone: tokens are per-login sessions now (see
+  // migrations/0023_user_sessions.sql), so "rotate" is replaced by
+  // POST /admin/sessions/revoke-others (sign out other devices) plus
+  // DELETE /admin/sessions/current (real logout) — see routes/admin/sessions.ts.
 }

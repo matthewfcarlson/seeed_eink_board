@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { encodeCBOR, type CBORType } from "@levischuck/tiny-cbor";
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 
@@ -27,11 +27,25 @@ interface RegistrationOptionsResponse {
   };
 }
 
+interface LoginOptionsResponse {
+  attemptId: string;
+  options: {
+    challenge: string;
+    rpId: string;
+  };
+}
+
+/** Private keys + monotonically-increasing sign counters for credentials this
+ *  module registered, so loginTestSession() can produce valid assertions.
+ *  Keyed by base64url credential id — the same value the Worker stores in
+ *  credentials.id and the assertion echoes back. */
+const virtualCredentials = new Map<string, { privateKeyPem: string; signCount: number }>();
+
 function sha256(data: Uint8Array): Uint8Array {
   return new Uint8Array(createHash("sha256").update(data).digest());
 }
 
-function concatBytes(parts: Uint8Array[]): Uint8Array {
+function concatBytes(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
   const out = new Uint8Array(total);
   let offset = 0;
@@ -61,7 +75,7 @@ export async function registerTestAccount(baseUrl: string): Promise<{ apiKey: st
   const { attemptId, options } = (await optionsRes.json()) as RegistrationOptionsResponse;
   const rpId = options.rp.id;
 
-  const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
   const x = isoBase64URL.toBuffer(jwk.x);
   const y = isoBase64URL.toBuffer(jwk.y);
@@ -134,6 +148,70 @@ export async function registerTestAccount(baseUrl: string): Promise<{ apiKey: st
   if (!verifyRes.ok) {
     throw new Error(`POST /auth/register/verify failed: ${verifyRes.status} ${await verifyRes.text()}`);
   }
-  const { api_key: apiKey } = (await verifyRes.json()) as { api_key: string };
+  // Wire field is session_token since the sessions migration (0023); the test-
+  // local name stays `apiKey` because the bearer format didn't change.
+  const { session_token: apiKey } = (await verifyRes.json()) as { session_token: string };
+  virtualCredentials.set(credentialIdB64, { privateKeyPem: privateKey.export({ format: "pem", type: "sec1" }).toString(), signCount: 0 });
   return { apiKey, credentialId: credentialIdB64 };
+}
+
+/** Runs a full /auth/login ceremony against a real Worker instance with a
+ *  credential previously registered here, returning the new session token —
+ *  the multi-session behavior under test (a second session must NOT
+ *  invalidate the first; see sessions.test.ts). Flags = UP(0x01)|UV(0x04);
+ *  the sign counter increments per assertion since
+ *  verifyAuthenticationResponse rejects a non-increasing one. */
+export async function loginTestSession(baseUrl: string, credentialIdB64: string): Promise<string> {
+  const cred = virtualCredentials.get(credentialIdB64);
+  if (!cred) throw new Error(`loginTestSession: credential ${credentialIdB64} was never registered here`);
+
+  const optionsRes = await fetch(`${baseUrl}/auth/login/options`, { method: "POST" });
+  if (!optionsRes.ok) {
+    throw new Error(`POST /auth/login/options failed: ${optionsRes.status} ${await optionsRes.text()}`);
+  }
+  const { attemptId, options } = (await optionsRes.json()) as LoginOptionsResponse;
+
+  const rpIdHash = sha256(new TextEncoder().encode(options.rpId));
+  const flags = new Uint8Array([0x01 | 0x04]);
+  cred.signCount += 1;
+  const signCount = new Uint8Array(4);
+  new DataView(signCount.buffer).setUint32(0, cred.signCount, false);
+  const authData = concatBytes([rpIdHash, flags, signCount]);
+
+  const clientDataJSON = new TextEncoder().encode(
+    JSON.stringify({ type: "webauthn.get", challenge: options.challenge, origin: baseUrl, crossOrigin: false })
+  );
+
+  // ECDSA/SHA-256 over authenticatorData || SHA-256(clientDataJSON), DER-encoded
+  // (Node's createSign emits ASN.1 DER, which is what the browser would send).
+  // Bare createSign import, not crypto.createSign — `crypto` resolves to the
+  // global WebCrypto in TS's view of this file.
+  const toSign = Buffer.concat([Buffer.from(authData), Buffer.from(sha256(clientDataJSON))]);
+  const signature = createSign("SHA256").update(toSign).sign(cred.privateKeyPem);
+
+  const body = {
+    attemptId,
+    response: {
+      id: credentialIdB64,
+      rawId: credentialIdB64,
+      type: "public-key",
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: isoBase64URL.fromBuffer(clientDataJSON),
+        authenticatorData: isoBase64URL.fromBuffer(authData),
+        signature: isoBase64URL.fromBuffer(Uint8Array.from(signature)),
+      },
+    },
+  };
+
+  const verifyRes = await fetch(`${baseUrl}/auth/login/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!verifyRes.ok) {
+    throw new Error(`POST /auth/login/verify failed: ${verifyRes.status} ${await verifyRes.text()}`);
+  }
+  const { session_token: sessionToken } = (await verifyRes.json()) as { session_token: string };
+  return sessionToken;
 }

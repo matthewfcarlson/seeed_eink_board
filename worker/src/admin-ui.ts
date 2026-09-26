@@ -1,10 +1,14 @@
 /**
  * Admin single-page app shell. Calls the JSON admin API (Authorization: Bearer
- * <api_key>) client-side. The API key is kept in localStorage only — this route
+ * <session token>) client-side. The token is kept in localStorage only — this route
  * itself serves no secrets and needs no server-side auth. Accounts are created
  * and re-authenticated via a passkey ceremony (see routes/auth-passkey.ts); a
- * successful ceremony just mints an API key, which is then used exactly like any
- * Bearer-token API client.
+ * successful ceremony mints a per-login session (see
+ * migrations/0023_user_sessions.sql), which is then used exactly like any
+ * Bearer-token API client. Tokens are format-compatible with the old API key
+ * (`eink_…`), so a token pasted from another session still works — but each
+ * browser must run its own ceremony to get one, since sessions can no longer
+ * be rotated out of existence server-side.
  *
  * The client-side logic lives in src/client/admin.ts, compiled by
  * scripts/build-client.mjs to public/static/admin.js and served as a static
@@ -60,12 +64,12 @@ export function renderAdminPage(): string {
     </div>
 
     <details class="api-key-fallback">
-      <summary>Use an API key instead</summary>
+      <summary>Use a session token instead</summary>
       <div class="row">
-        <label for="api-key-input">API Key</label>
+        <label for="api-key-input">Session token</label>
         <input type="password" id="api-key-input" placeholder="eink_...">
       </div>
-      <button class="subtle" id="login-btn">Log in with API key</button>
+      <button class="subtle" id="login-btn">Log in with session token</button>
     </details>
   </div>
 </div>
@@ -95,7 +99,7 @@ export function renderAdminPage(): string {
     <p class="hint hint-block">New device? The <strong>+</strong> button takes you to Device Setup, which pairs over Bluetooth and registers it to this account in one step. "Last image sent" below is what the server handed the device on its last successful poll &mdash; e-ink holds whatever it last finished displaying even through power loss, so if a device died mid-refresh (or before one), the physical screen can lag behind this.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Registered</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
+        <thead><tr><th>Label</th><th>Board</th><th>Last image sent</th><th>Firmware</th><th>Last seen</th><th>Battery</th><th>Buckets</th><th>Schedule</th><th></th></tr></thead>
         <tbody id="devices-table"></tbody>
       </table>
     </div>
@@ -249,9 +253,9 @@ export function renderAdminPage(): string {
   </div>
 
   <div class="card">
-    <h3>API key</h3>
-    <p class="hint hint-block">Rotating your key immediately invalidates the old one &mdash; anything using it (scripts, the firmware config page) will need the new value.</p>
-    <button class="ghost" id="rotate-key-btn">Rotate API key</button>
+    <h3>Sessions</h3>
+    <p class="hint hint-block">Each browser login creates its own session. Signing out other devices revokes their tokens immediately; this browser stays logged in.</p>
+    <button class="ghost" id="rotate-key-btn">Sign out other devices</button>
   </div>
 
   <div class="card">

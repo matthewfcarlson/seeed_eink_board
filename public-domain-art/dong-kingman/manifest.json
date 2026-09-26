@@ -68,5 +68,6 @@
       "pd_basis": "Credit line reads 'Bequest of Henry Ward Ranger through the National Academy of Design' - no WPA/federal-government ownership chain, and no explicit PD tag exists on Commons or SAAM's page for this work. Downloaded under SAAM's site-wide 'personal, educational and non-commercial use... unless otherwise noted' policy. RESTRICTION: personal/non-commercial use only, attribution to Smithsonian American Art Museum required."
     }
   ],
-  "excluded_example": "File:Dong Kingman - Kearney Street (San Francisco) - 43.104 - Detroit Institute of Arts.jpg was found on Wikimedia Commons tagged {{PD-old-100-1923}}, but this tag was judged to be a MISAPPLIED template (it assumes an artist/work old enough to be pre-1923, which does not fit a work painted in 1940 by an artist who died in 2000) and was deliberately excluded rather than trusted at face value - exactly the kind of name-based/tag-based assumption this research was told to avoid."
+  "excluded_example": "File:Dong Kingman - Kearney Street (San Francisco) - 43.104 - Detroit Institute of Arts.jpg was found on Wikimedia Commons tagged {{PD-old-100-1923}}, but this tag was judged to be a MISAPPLIED template (it assumes an artist/work old enough to be pre-1923, which does not fit a work painted in 1940 by an artist who died in 2000) and was deliberately excluded rather than trusted at face value - exactly the kind of name-based/tag-based assumption this research was told to avoid.",
+  "fit": "contain"
 }

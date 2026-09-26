@@ -11,6 +11,7 @@ import { registerAdminBucketRoutes } from "./routes/admin/buckets";
 import { registerAdminImageRoutes } from "./routes/admin/images";
 import { registerAdminScheduleRoutes } from "./routes/admin/schedule";
 import { registerAdminAuthRoutes } from "./routes/admin/auth";
+import { registerAdminSessionRoutes } from "./routes/admin/sessions";
 import { registerAdminFirmwareRoutes, syncLatestFirmwareRelease } from "./routes/admin/firmware";
 import { registerAdminCrashReportRoutes } from "./routes/admin/crash-reports";
 import { registerAuthPasskeyRoutes } from "./routes/auth-passkey";
@@ -38,12 +39,14 @@ registerCurrentRoute(app);
 registerFirmwareBinRoute(app);
 registerCrashReportRoute(app);
 
-// Admin-facing — require Authorization: Bearer <api_key>.
+// Admin-facing — require Authorization: Bearer <session token> (one per passkey
+// ceremony; see migrations/0023_user_sessions.sql).
 registerAdminDeviceRoutes(app);
 registerAdminBucketRoutes(app);
 registerAdminImageRoutes(app);
 registerAdminScheduleRoutes(app);
 registerAdminAuthRoutes(app);
+registerAdminSessionRoutes(app);
 registerAdminFirmwareRoutes(app);
 registerAdminCrashReportRoutes(app);
 

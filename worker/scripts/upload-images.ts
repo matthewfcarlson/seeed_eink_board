@@ -344,7 +344,7 @@ async function expandPaths(paths: string[]): Promise<string[]> {
  * letterboxes the remainder in white — the whole work stays visible, at the
  * cost of white bands on whichever axis doesn't fill.
  */
-async function decodeUpright(
+export async function decodeUpright(
   file: string,
   uprightW: number,
   uprightH: number,
@@ -363,11 +363,11 @@ async function decodeUpright(
   const scale =
     (fit === "contain"
       ? Math.min(uprightW / width, uprightH / height)
-      : Math.max(uprightW / width, uprightH / height)) * Math.max(1, crop.zoom);
+      : Math.max(uprightW / width, uprightH / height)) * Math.max(1, crop.zoom ?? 1);
   const scaledW = Math.round(width * scale);
   const scaledH = Math.round(height * scale);
-  const clampedPanX = Math.min(1, Math.max(0, crop.panX));
-  const clampedPanY = Math.min(1, Math.max(0, crop.panY));
+  const clampedPanX = Math.min(1, Math.max(0, crop.panX ?? 0.5));
+  const clampedPanY = Math.min(1, Math.max(0, crop.panY ?? 0));
 
   if (fit === "cover") {
     const x1 = Math.round((scaledW - uprightW) * clampedPanX);
@@ -387,32 +387,53 @@ async function decodeUpright(
 
   // contain: place the scaled image on the canvas per pan, crop if zoom
   // pushed it past the edge, then pad the remaining slack with white (the
-  // dither palette maps 255 to the e-ink white nibble).
+  // dither palette maps 255 to the e-ink white nibble). Two passes: sharp
+  // applies extract-after-resize AFTER extend in its fixed op order, so a
+  // single resize+extract+extend chain would pad and then immediately crop
+  // the padding back off.
   const left = Math.round((uprightW - scaledW) * clampedPanX);
   const top = Math.round((uprightH - scaledH) * clampedPanY);
   const cropX = Math.max(0, -left);
   const cropY = Math.max(0, -top);
   const fittedW = Math.min(scaledW - cropX, uprightW);
   const fittedH = Math.min(scaledH - cropY, uprightH);
-  const padL = Math.min(Math.round((uprightW - fittedW) * clampedPanX), uprightW - fittedW);
-  const padT = Math.min(Math.round((uprightH - fittedH) * clampedPanY), uprightH - fittedH);
-  const { data, info } = await img
-    .resize(scaledW, scaledH, { fit: "fill" })
-    .extract({ left: cropX, top: cropY, width: fittedW, height: fittedH })
-    .extend({
-      left: padL,
-      top: padT,
-      right: uprightW - fittedW - padL,
-      bottom: uprightH - fittedH - padT,
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
-    })
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  const cropNeeded = cropX > 0 || cropY > 0;
+  const pass1 = cropNeeded
+    ? await img
+        .resize(scaledW, scaledH, { fit: "fill" })
+        .extract({ left: cropX, top: cropY, width: fittedW, height: fittedH })
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true })
+    : await img
+        .resize(scaledW, scaledH, { fit: "fill" })
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+  let buf: Buffer = pass1.data;
+  let iw: number = pass1.info.width;
+  let ih: number = pass1.info.height;
+  const padL = Math.min(Math.round((uprightW - iw) * clampedPanX), uprightW - iw);
+  const padT = Math.min(Math.round((uprightH - ih) * clampedPanY), uprightH - ih);
+  if (padL > 0 || padT > 0 || uprightW - iw - padL > 0 || uprightH - ih - padT > 0) {
+    const pass2 = await sharp(buf, { raw: { width: iw, height: ih, channels: 4 } })
+      .extend({
+        left: padL,
+        top: padT,
+        right: uprightW - iw - padL,
+        bottom: uprightH - ih - padT,
+        background: { r: 255, g: 255, b: 255, alpha: 1 },
+      })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    buf = pass2.data;
+    iw = pass2.info.width;
+    ih = pass2.info.height;
+  }
   return {
-    rgba: new Uint8ClampedArray(data.buffer, data.byteOffset, info.width * info.height * 4),
-    width: info.width,
-    height: info.height,
+    rgba: new Uint8ClampedArray(buf.buffer, buf.byteOffset, iw * ih * 4),
+    width: iw,
+    height: ih,
   };
 }
 

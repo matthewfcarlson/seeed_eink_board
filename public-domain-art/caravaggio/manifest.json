@@ -19,7 +19,8 @@
       "source_url": "https://commons.wikimedia.org/wiki/File:Caravaggio_-_Bacco_adolescente_-_Google_Art_Project.jpg",
       "institution": "Galleria Borghese, Rome",
       "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan)."
+      "pd_basis": "Wikimedia Commons PD-Art (Google Art Project scan).",
+      "fit": "cover"
     },
     {
       "filename": "cardsharps.jpg",
@@ -46,7 +47,8 @@
       "source_url": "https://commons.wikimedia.org/wiki/File:Narcissus-Caravaggio_(1594-96)_edited.jpg",
       "institution": "Palazzo Barberini, Rome",
       "pd_status": "Public domain",
-      "pd_basis": "Wikimedia Commons PD-Art."
+      "pd_basis": "Wikimedia Commons PD-Art.",
+      "fit": "cover"
     },
     {
       "filename": "lute.jpg",
@@ -66,5 +68,6 @@
       "pd_status": "Public domain",
       "pd_basis": "Wikimedia Commons PD-Art."
     }
-  ]
+  ],
+  "fit": "contain"
 }

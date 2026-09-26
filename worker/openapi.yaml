@@ -9,9 +9,10 @@ info:
 
     - **Admin clients** (you, from a browser, curl, Postman, etc.) — everything
       under `/admin/*` plus `GET /current`. Authenticate with
-      `Authorization: Bearer <api_key>`. Get a key by completing passkey
-      registration (`/auth/register/*`) or by copying it from the admin UI at
-      `/admin` ("Rotate API Key").
+      `Authorization: Bearer <session_token>`. Get a token by completing a
+      passkey ceremony (`/auth/register/verify` or `/auth/login/verify`) —
+      each ceremony mints its own session (see `/admin/sessions`), so several
+      browsers can be logged in at once and each can be revoked separately.
     - **Devices** (the ESP32 firmware) — `/device_config`, `/hash`,
       `/image_packed`, `/firmware_bin`. These use a different, HMAC-based
       per-request signature (`X-Device-MAC` / `X-Device-Nonce` /
@@ -35,8 +36,8 @@ components:
       type: http
       scheme: bearer
       description: >-
-        Your account's API key, minted by /auth/register/verify,
-        /auth/login/verify, or POST /admin/keys/rotate.
+        A per-login session token, minted by /auth/register/verify or
+        /auth/login/verify and revocable via /admin/sessions.
   schemas:
     Error:
       type: object
@@ -418,10 +419,13 @@ paths:
         '200':
           description: OK
 
-  /admin/keys/rotate:
-    post:
-      summary: Rotate your API key
-      description: Invalidates the current key. The new key is returned exactly once.
+  /admin/sessions:
+    get:
+      summary: List your active sessions
+      description: >-
+        One row per passkey ceremony (registration or login), newest first.
+        Revoked sessions are excluded. Use `current_session_id` / `is_current`
+        to identify the session making this call.
       responses:
         '200':
           description: OK
@@ -430,7 +434,67 @@ paths:
               schema:
                 type: object
                 properties:
-                  api_key: { type: string }
+                  current_session_id: { type: string }
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        credential_id: { type: string, nullable: true }
+                        created_at: { type: integer }
+                        last_used_at: { type: integer, nullable: true }
+                        expires_at: { type: integer, nullable: true }
+                        is_current: { type: boolean }
+
+  /admin/sessions/{id}:
+    delete:
+      summary: Revoke one of your sessions
+      description: >-
+        The session's token stops working immediately. Scoped to your own
+        sessions — another account's session id is a 404, not a 403.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found (not yours, or already revoked)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/sessions/revoke-others:
+    post:
+      summary: Revoke every session except the current one
+      description: >-
+        "Sign out other devices." The calling session stays valid; every other
+        active session for this account is revoked. Replaces the old
+        POST /admin/keys/rotate, which invalidated the calling browser too.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  revoked: { type: integer }
+
+  /admin/sessions/current:
+    delete:
+      summary: Revoke the calling session (real logout)
+      description: >-
+        Logout that means something: the calling token stops working
+        server-side, not just in the browser that held it.
+      responses:
+        '200':
+          description: OK
 
   /admin/devices:
     get:
@@ -1212,7 +1276,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  api_key: { type: string }
+                  session_token: { type: string }
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1229,16 +1293,17 @@ paths:
     post:
       summary: Complete passkey login
       description: >-
-        Mints a fresh API key on every successful login. The response echoes
-        back whatever sharing-key wrap is currently on file for this
+        Mints a fresh session (one user_sessions row per login — concurrent
+        logins coexist; see /admin/sessions). The response echoes back
+        whatever sharing-key wrap is currently on file for this
         credential (possibly all null, if none has ever been established) so
         the client can unwrap its sharing private key using this exact
         ceremony's PRF output. If the client discovers it needs to backfill a
         wrap (no PRF-wrapped key existed yet, but this ceremony returned PRF
         output), it does so via a separate call to
-        PATCH /admin/me/sharing-key using the api_key from this response —
-        this ceremony's challenge is single-use and already consumed by the
-        time that decision can be made.
+        PATCH /admin/me/sharing-key using the session token from this
+        response — this ceremony's challenge is single-use and already
+        consumed by the time that decision can be made.
       security: []
       requestBody:
         required: true
@@ -1258,7 +1323,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  api_key: { type: string }
+                  session_token: { type: string }
                   sharing_public_key: { type: string, nullable: true }
                   wrapped_sharing_key: { type: string, nullable: true }
                   wrap_nonce: { type: string, nullable: true }

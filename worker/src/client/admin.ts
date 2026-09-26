@@ -119,8 +119,15 @@ function batteryPercent(voltage: number): number {
 }
 
 function getApiKey(): string | null { return localStorage.getItem(KEY_STORAGE); }
+// Named "ApiKey" for the storage key and these helpers because the wire format
+// (`eink_…` bearer string) never changed — only what mints/validates it did
+// (single users.api_key_hash → per-login user_sessions rows). Rebranding the
+// localStorage key would log every browser out for zero functional gain.
 function setApiKey(key: string) { localStorage.setItem(KEY_STORAGE, key); }
 function clearApiKey() { localStorage.removeItem(KEY_STORAGE); }
+/** Alias used at the ceremony call sites, where the server field is now
+ *  `session_token` — keeps grep honest in both directions. */
+const setSessionToken = setApiKey;
 
 async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   const headers = Object.assign({}, options.headers, { Authorization: "Bearer " + getApiKey() });
@@ -358,8 +365,8 @@ el("passkey-signup-btn").addEventListener("click", async () => {
       response: credential.toJSON(),
       ...sharingKeyFields,
     });
-    setApiKey(result.api_key);
-    alert("Account created! Your API key (also saved to this browser, shown once):\n\n" + result.api_key);
+    setSessionToken(result.session_token);
+    alert("Account created! Your session token (also saved to this browser, shown once):\n\n" + result.session_token);
     await tryLogin(true);
   } catch (err: any) {
     showMessage("login-message", "Failed to create account: " + err.message, "error");
@@ -372,14 +379,15 @@ el("passkey-signup-btn").addEventListener("click", async () => {
 // sharing key, since a fresh PRF result is only ever available mid-ceremony
 // (there's no way to request just PRF without a full assertion). Re-running
 // it for an already-authenticated account is harmless: it just re-verifies
-// the same passkey and overwrites the cached API key with an equivalent one.
+// the same passkey and overwrites the cached token with an equivalent one —
+// old sessions stay active (see routes/admin/sessions.ts for revocation).
 async function performPasskeyLoginCeremony(): Promise<void> {
   const { attemptId, options } = await publicFetch("/auth/login/options", {});
   const requestOptions = (window as any).PublicKeyCredential.parseRequestOptionsFromJSON(options);
   ensurePrfExtensionInput(requestOptions);
   const credential: any = await navigator.credentials.get({ publicKey: requestOptions });
   const loginResult = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
-  setApiKey(loginResult.api_key);
+  setSessionToken(loginResult.session_token);
   const backfillFields = await completeLoginSharingKey(credential, loginResult);
   if (Object.keys(backfillFields).length > 0) {
     // Separate authenticated call, not another /auth/login/verify — that
@@ -500,24 +508,32 @@ el("edit-name-btn").addEventListener("click", async () => {
 el("login-btn").addEventListener("click", async () => {
   const key = el<HTMLInputElement>("api-key-input").value.trim();
   if (!key) return;
-  setApiKey(key);
+  setSessionToken(key);
   await tryLogin(true);
 });
 
-el("logout-btn").addEventListener("click", () => {
+el("logout-btn").addEventListener("click", async () => {
+  // Revoke server-side before dropping the local copy — if the request fails
+  // (offline, already revoked) still clear locally: a dead token in storage
+  // is worse than a live one we failed to revoke (the user can re-run logout
+  // or "sign out other devices" from any session).
+  try {
+    await apiFetch("/admin/sessions/current", { method: "DELETE" });
+  } catch {
+    // fall through to local cleanup regardless
+  }
   clearApiKey();
   el("app").style.display = "none";
   el("login").style.display = "block";
 });
 
 el("rotate-key-btn").addEventListener("click", async () => {
-  if (!confirm("Rotate your API key? The old key stops working immediately.")) return;
+  if (!confirm("Sign out all other devices/browsers? This browser stays logged in; every other session's token stops working immediately.")) return;
   try {
-    const result = await apiFetch("/admin/keys/rotate", { method: "POST" });
-    setApiKey(result.api_key);
-    alert("New API key (also saved to this browser):\n\n" + result.api_key);
+    const result = await apiFetch("/admin/sessions/revoke-others", { method: "POST" });
+    alert("Signed out " + result.revoked + " other session(s). This browser is still logged in.");
   } catch (err: any) {
-    showMessage("app-message", "Failed to rotate key: " + err.message, "error");
+    showMessage("app-message", "Failed to sign out other sessions: " + err.message, "error");
   }
 });
 
@@ -681,26 +697,6 @@ el("schedule-modal-close-btn").addEventListener("click", () => {
   el("schedule-modal-overlay").classList.remove("open");
 });
 
-// "Registered" means wall-clock time since the device's row was first created
-// (its initial registration/provisioning), not continuous runtime — the board
-// deep-sleeps between wake cycles, so there's no meaningful "time since last boot".
-// Resetting or re-provisioning the hardware only updates the existing row
-// (ON CONFLICT ... DO UPDATE preserves created_at), so this counter never restarts.
-function formatRegisteredAge(createdAtSeconds: number): string {
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - createdAtSeconds);
-  const days = Math.floor(seconds / 86400);
-  if (days > 0) {
-    const hours = Math.floor((seconds % 86400) / 3600);
-    return days + "d" + (hours > 0 ? " " + hours + "h" : "");
-  }
-  const hours = Math.floor(seconds / 3600);
-  if (hours > 0) {
-    const minutes = Math.floor((seconds % 3600) / 60);
-    return hours + "h" + (minutes > 0 ? " " + minutes + "m" : "");
-  }
-  return Math.floor(seconds / 60) + "m";
-}
-
 // Short relative phrasing ("5 minutes ago", "2 days ago") for a table cell —
 // the exact timestamp is still available on hover (see renderDevicesTable's
 // lastSeen title attribute).
@@ -731,7 +727,7 @@ function batteryPillHtml(voltage: number): string {
 function renderDevicesTable(devices: any[]) {
   const tbody = el("devices-table");
   if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No devices registered yet &mdash; add one below.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No devices registered yet &mdash; add one below.</td></tr>';
     return;
   }
   tbody.innerHTML = devices.map((d) => {
@@ -747,9 +743,6 @@ function renderDevicesTable(devices: any[]) {
     const board = d.board
       ? '<span class="pill" title="MAC ' + escapeHtml(d.mac) + '">' + escapeHtml(d.board) + "</span>"
       : '<span class="hint" title="MAC ' + escapeHtml(d.mac) + '">unknown</span>';
-    const registered = d.created_at
-      ? '<span title="First seen ' + escapeHtml(new Date(d.created_at * 1000).toLocaleString()) + '">' + formatRegisteredAge(d.created_at) + "</span>"
-      : '<span class="hint">n/a</span>';
     const currentImageThumbUrl = d.current_image && d.current_image.id ? thumbnailUrlCache[d.current_image.id] : null;
     const currentImage = !d.current_image
       ? '<span class="hint">n/a</span>'
@@ -761,7 +754,6 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + board + "</td>" +
       "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
-      "<td>" + registered + "</td>" +
       "<td>" + lastSeen + "</td>" +
       "<td>" + battery + "</td>" +
       '<td><button class="ghost sm" onclick="openBucketModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
