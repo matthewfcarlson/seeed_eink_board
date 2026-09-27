@@ -905,16 +905,59 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-async function deleteImage(id: string) {
+async function deleteImage(id: string, bucketId: string) {
   if (!confirm("Delete this image? This cannot be undone.")) return;
   try {
     await apiFetch("/admin/images/" + encodeURIComponent(id), { method: "DELETE" });
-    await renderApp();
+    if (thumbnailUrlCache[id]) {
+      URL.revokeObjectURL(thumbnailUrlCache[id]);
+      delete thumbnailUrlCache[id];
+    }
+    await refreshBucket(bucketId);
   } catch (err: any) {
     showMessage("app-message", "Failed to delete image: " + err.message, "error");
   }
 }
 (window as any).deleteImage = deleteImage;
+
+// Re-renders a single bucket card in place (re-fetching just its images/
+// collaborators/rotation status) instead of the full renderApp() — a full
+// re-render re-fetches and rebuilds every bucket, which with dozens of
+// buckets is slow and, because it briefly collapses the buckets containers
+// to empty placeholders while everything reloads, shifts page height enough
+// to reset scroll position. Falls back to renderApp() if the bucket isn't in
+// allBucketsCache (stale cache, race with some other change).
+async function refreshBucket(bucketId: string) {
+  const bucket = allBucketsCache.find((b) => b.id === bucketId);
+  if (!bucket) {
+    await renderApp();
+    return;
+  }
+  const isOwnedShareable = bucket.is_owner;
+  const [imagesResult, collaboratorsResult, rotationStatusResult] = await Promise.all([
+    apiFetch("/admin/images?device_key=" + encodeURIComponent(bucket.id)),
+    isOwnedShareable
+      ? apiFetch("/admin/buckets/" + encodeURIComponent(bucket.id) + "/collaborators")
+      : Promise.resolve({ collaborators: [] }),
+    isOwnedShareable
+      ? apiFetch("/admin/buckets/" + encodeURIComponent(bucket.id) + "/rotate/status").catch(() => ({ rotation: null }))
+      : Promise.resolve({ rotation: null }),
+  ]);
+  await Promise.all(
+    imagesResult.images
+      .filter((img: any) => img.thumbnail_ciphertext_b64 && !thumbnailUrlCache[img.id])
+      .map(async (img: any) => {
+        const url = await decryptToObjectUrl(bucket.id, img.thumbnail_ciphertext_b64);
+        if (url) thumbnailUrlCache[img.id] = url;
+      })
+  );
+  el("bucket-" + bucket.id).innerHTML = bucketCardHtml(
+    bucket,
+    imagesResult.images,
+    collaboratorsResult.collaborators,
+    rotationStatusResult.rotation
+  );
+}
 
 // Whether this account holds a personal wrapped copy of the bucket's key —
 // true for the owner and for any accepted collaborator (see the join()
@@ -937,7 +980,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
         ? '<img src="' + thumbnailUrlCache[img.id] + '" alt="">'
         : '<div class="photo-tile-empty hint">no preview</div>';
       const deleteBtn = canWrite
-        ? '<button class="icon-btn photo-tile-delete" aria-label="Delete photo" onclick="event.stopPropagation(); deleteImage(' + jsArg(img.id) + ')">&#10005;</button>'
+        ? '<button class="icon-btn photo-tile-delete" aria-label="Delete photo" onclick="event.stopPropagation(); deleteImage(' + jsArg(img.id) + ', ' + jsArg(bucket.id) + ')">&#10005;</button>'
         : "";
       return (
         '<div class="photo-tile" onclick="openLightbox(' + jsArg(img.id) + ', ' + jsArg(bucket.id) + ', ' + jsArg(img.filename) + ')">' +
