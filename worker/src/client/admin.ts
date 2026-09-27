@@ -1600,9 +1600,16 @@ async function runQueuedUpload(item: UploadQueueItem) {
   refreshUploadQueueStrip();
   if (uploadQueue.some(isUploadInFlight)) return;
 
-  // Batch drained: refresh the bucket grids once, not after every photo.
+  // Batch drained: refresh just the buckets that received a photo, once,
+  // not after every photo — and not the full renderApp(), which rebuilds
+  // every bucket and resets scroll position (see refreshBucket).
   const failed = uploadQueue.filter((i) => i.status === "error");
-  await renderApp();
+  const touchedBuckets = new Set(uploadQueue.filter((i) => i.status === "done").map((i) => i.deviceKey));
+  try {
+    await Promise.all([...touchedBuckets].map((bucketId) => refreshBucket(bucketId)));
+  } catch (err: any) {
+    showMessage("app-message", "Uploaded, but failed to refresh the bucket: " + err.message, "error");
+  }
   if (failed.length) {
     showMessage(
       "app-message",
