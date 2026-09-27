@@ -2,7 +2,7 @@ import type { Env } from "../types";
 
 const ENCODER = new TextEncoder();
 
-function hexToBytes(hex: string): Uint8Array {
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(Math.floor(hex.length / 2));
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
