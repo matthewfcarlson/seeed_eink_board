@@ -286,6 +286,12 @@ async function completeRegistrationSharingKey(
   return { sharing_public_key: toBase64(sharingPublicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce };
 }
 
+/** Thrown by completeLoginSharingKey when the ceremony (and so the session)
+ *  succeeded but the account's sharing key can't be recovered in this browser.
+ *  Callers should carry on into the app — buckets stay locked behind the
+ *  "Unlock with passkey" banner — rather than treat it as a failed login. */
+class SharingKeyLockedError extends Error {}
+
 /** Called once, right after a successful login ceremony, with that ceremony's
  *  credential (for its PRF output) and the /auth/login/verify response (for
  *  whatever's already wrapped server-side). Recovers this session's sharing
@@ -308,17 +314,23 @@ async function completeLoginSharingKey(
 ): Promise<Partial<{ sharing_public_key: string; wrapped_sharing_key: string; wrap_nonce: string }>> {
   const prfOutput = readPrfOutput(credential);
 
+  // Set when this ceremony DID produce PRF output but it didn't open this
+  // credential's wrap — distinct from "no PRF output at all", and worth a
+  // different error message if the local cache can't cover for it either.
+  let prfUnwrapFailed = false;
+
   if (loginResult.wrapped_sharing_key && loginResult.sharing_public_key && prfOutput) {
-    // The wrap on file was encrypted under SOME credential's PRF output — not
-    // necessarily this one. A synced passkey restored to a different browser
-    // (Chrome-wrapped, now logging in from Safari) yields different PRF bytes,
-    // and AES-GCM then fails with a bare WebCrypto OperationError that Safari
-    // renders as "The operation failed for an operation-specific reason" —
-    // useless, and it used to abort the whole login even though the ceremony
-    // itself succeeded and the session was already minted. Treat it as "no
-    // usable PRF wrap this time" and fall through to the local-cache path:
-    // if this browser has ever unlocked the account before, its IndexedDB
-    // copy is still perfectly good.
+    // The wrap on file is this credential's own (the server returns the
+    // logging-in credential's row), so in theory the same PRF salt yields the
+    // same bytes every time. In practice it has been seen to fail — Safari
+    // surfaces it as a bare WebCrypto OperationError ("The operation failed
+    // for an operation-specific reason"). UV can't be the cause (the server
+    // requires it on every ceremony); an authenticator returning different
+    // PRF output at create() vs get() is the leading suspect. Either way it
+    // used to abort the whole login even though the ceremony itself succeeded
+    // and the session was already minted. Treat it as "no usable PRF wrap
+    // this time" and fall through to the local-cache path: if this browser has
+    // ever unlocked the account before, its IndexedDB copy is still good.
     try {
       const kek = await deriveKekFromPrf(prfOutput);
       const privateKeyPkcs8 = await aesGcmDecryptFromStrings(kek, loginResult.wrap_nonce, loginResult.wrapped_sharing_key);
@@ -327,10 +339,10 @@ async function completeLoginSharingKey(
       await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
       return {};
     } catch (err) {
+      prfUnwrapFailed = true;
       console.warn(
-        "The account's PRF-wrapped sharing key didn't decrypt with this ceremony's PRF output " +
-        "(expected when the wrap was created by a different browser/authenticator). " +
-        "Falling back to this browser's locally cached key, if any.",
+        "Couldn't recover the account's PRF-wrapped sharing key with this ceremony's PRF output " +
+        "(unwrap, import, or local caching failed). Falling back to this browser's locally cached key, if any.",
         err
       );
     }
@@ -351,6 +363,10 @@ async function completeLoginSharingKey(
         "This browser's cached sharing key doesn't match the account's registered sharing_public_key. " +
         "Bucket unlocks will fail here until the browser holding the original key re-wraps or rotates."
       );
+      // And never backfill it: the server's IS NULL guard would make this
+      // credential's wrap of the WRONG key permanent, so every later PRF login
+      // from any browser would "successfully" recover a mismatched key.
+      return {};
     }
     if (prfOutput && !loginResult.wrapped_sharing_key) {
       // First time this credential has produced PRF output — backfill the
@@ -375,18 +391,23 @@ async function completeLoginSharingKey(
   // loudly instead — the caller surfaces this the same way as any other
   // login failure.
   if (loginResult.sharing_public_key) {
-    // The failure mode this message describes is narrow and known: this
-    // ceremony produced no PRF result (cross-device QR/hybrid auth and some
-    // platform authenticators commonly don't) AND this browser has never
-    // unlocked this account before (no IndexedDB cache). Everything else —
-    // including a PRF output that doesn't match the wrap on file — already
-    // fell through to the cache above.
-    throw new Error(
-      "Logged in, but this browser can't unlock your account's encrypted buckets: the passkey didn't return a PRF result " +
+    // Reaching here means this browser has never unlocked this account before
+    // (no IndexedDB cache) AND the PRF path didn't work — either this ceremony
+    // produced no PRF result at all (cross-device QR/hybrid auth and some
+    // platform authenticators commonly don't), or it did but that output
+    // couldn't open the wrap on file. Different causes, different advice.
+    const reason = prfUnwrapFailed
+      ? "the passkey returned a PRF result, but it didn't unlock the key stored for this passkey"
+      : "the passkey didn't return a PRF result";
+    const hint = prfUnwrapFailed
+      ? "If this keeps happening, note which browser/authenticator you're using — the stored wrap may need to be recreated from a browser that can unlock it."
+      : "Common cause: signing in via the QR/one-time-code cross-device flow instead of this device's own passkey. " +
+        "Platform passkeys also sometimes return PRF on a second attempt.";
+    throw new SharingKeyLockedError(
+      `Logged in, but this browser can't unlock your account's encrypted buckets: ${reason}, ` +
       "and this browser has no locally cached key. You can still use everything except viewing/deleting existing images. " +
-      "To unlock: log in from the browser where the account was set up (or any browser that has logged in before), " +
-      "or retry here — platform passkeys sometimes return PRF on a second attempt. " +
-      "Common cause for the missing PRF result: signing in via the QR/one-time-code cross-device flow instead of this device's own passkey."
+      "To unlock: log in from the browser where the account was set up (or any browser that has logged in before). " +
+      hint
     );
   }
 
@@ -469,6 +490,12 @@ el("passkey-login-btn").addEventListener("click", async () => {
     await performPasskeyLoginCeremony();
     await tryLogin(true);
   } catch (err: any) {
+    if (err instanceof SharingKeyLockedError) {
+      // The session token is already set — enter the app with buckets locked,
+      // and show why after renderApp() (which clears app-message on entry).
+      if (await tryLogin(true)) showMessage("app-message", err.message, "error");
+      return;
+    }
     showMessage("login-message", "Failed to log in: " + err.message, "error");
   }
 });
@@ -488,7 +515,7 @@ async function unlockSharingKey() {
     await performPasskeyLoginCeremony();
     await renderApp();
   } catch (err: any) {
-    showMessage("app-message", "Failed to unlock: " + err.message, "error");
+    showMessage("app-message", (err instanceof SharingKeyLockedError ? "" : "Failed to unlock: ") + err.message, "error");
   }
 }
 (window as any).unlockSharingKey = unlockSharingKey;

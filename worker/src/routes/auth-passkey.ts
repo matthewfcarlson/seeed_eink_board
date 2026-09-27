@@ -80,7 +80,10 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
       userName: userId,
       userID: new TextEncoder().encode(userId).slice(),
       attestationType: "none",
-      authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+      // "required", not "preferred": verifyRegistrationResponse already rejects
+      // a ceremony without UV (requireUserVerification defaults to true), so
+      // asking for less just lets the browser offer a path that then fails.
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
       extensions: PRF_EXTENSION_INPUT,
     });
 
@@ -169,7 +172,8 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
     // (discoverable) credential registered for this rpID, across accounts.
     const options = await generateAuthenticationOptions({
       rpID,
-      userVerification: "preferred",
+      // Same reasoning as register/options — verify enforces UV regardless.
+      userVerification: "required",
       extensions: PRF_EXTENSION_INPUT,
     });
 
@@ -247,9 +251,9 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
     // authenticated call (PATCH /admin/me/sharing-key, using the session token just
     // minted above), not here: this ceremony's challenge is single-use and
     // already consumed by the KV delete above (deferred, but consumed), so
-    // there's no way to make a
-    // second /auth/login/verify call with it if the client discovers only
-    // after seeing this response that it needs to upload a wrap.
+    // there's no way to make a second /auth/login/verify call with it if the
+    // client discovers only after seeing this response that it needs to
+    // upload a wrap.
     return c.json({
       session_token: apiKey,
       sharing_public_key: credRow.user_sharing_public_key,
