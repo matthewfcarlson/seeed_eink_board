@@ -63,7 +63,7 @@ const bucketAesKeys = new Map<string, CryptoKey>();
 
 // CSS size of the crop viewport (see .crop-viewport in style.css) — EE02's
 // upright (pre-rotation) 3:4 ratio (1200x1600). A bucket isn't board-scoped
-// (migrations/0019_image_board_variants.sql) and confirmUpload()/
+// (migrations/0019_image_board_variants.sql) and processAndUploadImage()/
 // reencryptOneImage() always crop+pack for every board from this one
 // interactive crop, so there's one reference box for the preview rather than
 // a per-board one: the same panX/panY/zoom fractions this box produces are
@@ -73,10 +73,31 @@ const bucketAesKeys = new Map<string, CryptoKey>();
 // second crop UI.
 const CROP_BOX_W = 210;
 const CROP_BOX_H = 280;
+
+// One entry per photo picked in the upload modal. Each keeps its own crop,
+// filename and dither, so every photo in a multi-select gets positioned
+// individually; confirmed items process/upload one at a time in the
+// background (uploadChain) while you crop the next one.
+type UploadQueueItem = {
+  deviceKey: string;
+  file: File;
+  objectUrl: string;
+  crop: CropParams;
+  filename: string;
+  dither: DitherAlgorithm;
+  // pending: still waiting to be cropped. queued/uploading: confirmed, in
+  // uploadChain. skipped: declined at the duplicate-image prompt.
+  status: "pending" | "queued" | "uploading" | "done" | "skipped" | "error";
+  error?: string;
+};
 let uploadModalDeviceKey: string | null = null;
-let uploadModalFile: File | null = null;
-let uploadObjectUrl: string | null = null;
+let uploadQueue: UploadQueueItem[] = [];
+let uploadCurrent: UploadQueueItem | null = null;
+let uploadChain: Promise<void> = Promise.resolve();
+let uploadLastDither: DitherAlgorithm = DITHER_ALGORITHMS[0] as DitherAlgorithm;
 let cropNatural = { w: 0, h: 0 };
+// Aliases uploadCurrent.crop while a photo is on the crop stage, so the
+// drag/zoom handlers below write straight into that queue item.
 let cropState: CropParams = { ...DEFAULT_CROP };
 let cropDrag: { startX: number; startY: number; startLeft: number; startTop: number } | null = null;
 
@@ -288,12 +309,31 @@ async function completeLoginSharingKey(
   const prfOutput = readPrfOutput(credential);
 
   if (loginResult.wrapped_sharing_key && loginResult.sharing_public_key && prfOutput) {
-    const kek = await deriveKekFromPrf(prfOutput);
-    const privateKeyPkcs8 = await aesGcmDecryptFromStrings(kek, loginResult.wrap_nonce, loginResult.wrapped_sharing_key);
-    sharingPrivateKey = await importPrivateKeyPkcs8(privateKeyPkcs8);
-    sharingPublicKeyRaw = fromBase64(loginResult.sharing_public_key);
-    await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
-    return {};
+    // The wrap on file was encrypted under SOME credential's PRF output — not
+    // necessarily this one. A synced passkey restored to a different browser
+    // (Chrome-wrapped, now logging in from Safari) yields different PRF bytes,
+    // and AES-GCM then fails with a bare WebCrypto OperationError that Safari
+    // renders as "The operation failed for an operation-specific reason" —
+    // useless, and it used to abort the whole login even though the ceremony
+    // itself succeeded and the session was already minted. Treat it as "no
+    // usable PRF wrap this time" and fall through to the local-cache path:
+    // if this browser has ever unlocked the account before, its IndexedDB
+    // copy is still perfectly good.
+    try {
+      const kek = await deriveKekFromPrf(prfOutput);
+      const privateKeyPkcs8 = await aesGcmDecryptFromStrings(kek, loginResult.wrap_nonce, loginResult.wrapped_sharing_key);
+      sharingPrivateKey = await importPrivateKeyPkcs8(privateKeyPkcs8);
+      sharingPublicKeyRaw = fromBase64(loginResult.sharing_public_key);
+      await localKeystoreSet({ publicKeyRaw: sharingPublicKeyRaw, privateKeyPkcs8 });
+      return {};
+    } catch (err) {
+      console.warn(
+        "The account's PRF-wrapped sharing key didn't decrypt with this ceremony's PRF output " +
+        "(expected when the wrap was created by a different browser/authenticator). " +
+        "Falling back to this browser's locally cached key, if any.",
+        err
+      );
+    }
   }
 
   // No usable PRF-wrapped key from the server this time (either none exists
@@ -303,6 +343,15 @@ async function completeLoginSharingKey(
   if (local) {
     sharingPrivateKey = await importPrivateKeyPkcs8(local.privateKeyPkcs8);
     sharingPublicKeyRaw = local.publicKeyRaw;
+    if (loginResult.sharing_public_key && toBase64(local.publicKeyRaw) !== loginResult.sharing_public_key) {
+      // Not fatal (buckets were unlocked with this key before), but nothing
+      // wrapped for the account's registered key will open here — say so
+      // somewhere greppable instead of failing later with per-bucket errors.
+      console.warn(
+        "This browser's cached sharing key doesn't match the account's registered sharing_public_key. " +
+        "Bucket unlocks will fail here until the browser holding the original key re-wraps or rotates."
+      );
+    }
     if (prfOutput && !loginResult.wrapped_sharing_key) {
       // First time this credential has produced PRF output — backfill the
       // server with our existing local key instead of generating a new one.
@@ -326,9 +375,18 @@ async function completeLoginSharingKey(
   // loudly instead — the caller surfaces this the same way as any other
   // login failure.
   if (loginResult.sharing_public_key) {
+    // The failure mode this message describes is narrow and known: this
+    // ceremony produced no PRF result (cross-device QR/hybrid auth and some
+    // platform authenticators commonly don't) AND this browser has never
+    // unlocked this account before (no IndexedDB cache). Everything else —
+    // including a PRF output that doesn't match the wrap on file — already
+    // fell through to the cache above.
     throw new Error(
-      "This browser or authenticator can't unlock your account's encrypted buckets right now (no usable passkey PRF result). " +
-      "Try again from the browser/device where you first set this up, or a browser with full passkey PRF support."
+      "Logged in, but this browser can't unlock your account's encrypted buckets: the passkey didn't return a PRF result " +
+      "and this browser has no locally cached key. You can still use everything except viewing/deleting existing images. " +
+      "To unlock: log in from the browser where the account was set up (or any browser that has logged in before), " +
+      "or retry here — platform passkeys sometimes return PRF on a second attempt. " +
+      "Common cause for the missing PRF result: signing in via the QR/one-time-code cross-device flow instead of this device's own passkey."
     );
   }
 
@@ -1123,80 +1181,242 @@ async function toggleBucketPublic(bucketId: string, makePublic: boolean) {
 
 // ---- Upload / crop modal ----
 
+const isUploadInFlight = (i: UploadQueueItem) => i.status === "queued" || i.status === "uploading";
+
 function openUploadModal(deviceKey: string) {
   if (!bucketAesKeys.get(deviceKey)) {
     showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
     return;
   }
   uploadModalDeviceKey = deviceKey;
-  uploadModalFile = null;
-  if (uploadObjectUrl) { URL.revokeObjectURL(uploadObjectUrl); uploadObjectUrl = null; }
-  cropState = { ...DEFAULT_CROP };
-  el("upload-modal-title").textContent = "Add a photo";
-  renderUploadDropzone();
+  // Uploads still running from an earlier visit keep going regardless (they
+  // hold their own item); only this bucket's stay visible in the strip.
+  resetUploadQueue((i) => isUploadInFlight(i) && i.deviceKey === deviceKey);
+  renderUploadModal();
   el("upload-modal-overlay").classList.add("open");
 }
 (window as any).openUploadModal = openUploadModal;
 
 function closeUploadModal() {
   el("upload-modal-overlay").classList.remove("open");
-  if (uploadObjectUrl) { URL.revokeObjectURL(uploadObjectUrl); uploadObjectUrl = null; }
-  uploadModalFile = null;
+  // Un-confirmed photos are discarded; confirmed ones finish in the background.
+  resetUploadQueue(isUploadInFlight);
 }
 el("upload-modal-close-btn").addEventListener("click", closeUploadModal);
+
+function resetUploadQueue(keep: (i: UploadQueueItem) => boolean) {
+  for (const item of uploadQueue) {
+    if (!keep(item)) URL.revokeObjectURL(item.objectUrl);
+  }
+  uploadQueue = uploadQueue.filter(keep);
+  uploadCurrent = null;
+}
+
+// Picks whichever view fits the queue: the dropzone when it's empty, the crop
+// stage while a photo is waiting to be positioned, otherwise a progress view.
+function renderUploadModal() {
+  if (uploadCurrent) {
+    el("upload-modal-title").textContent = "Position & upload";
+    renderUploadCropStage(uploadCurrent);
+  } else if (uploadQueue.length) {
+    el("upload-modal-title").textContent = "Uploading photos";
+    renderUploadProgress();
+  } else {
+    el("upload-modal-title").textContent = "Add photos";
+    renderUploadDropzone();
+  }
+}
+
+const UPLOAD_FILE_INPUT =
+  '<input type="file" id="upload-file-input" multiple accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" style="display:none;">';
+
+function bindUploadFileInput() {
+  const fileInput = el<HTMLInputElement>("upload-file-input");
+  fileInput.addEventListener("change", () => {
+    addFilesToUploadQueue(Array.from(fileInput.files ?? []));
+    fileInput.value = "";
+  });
+}
 
 function renderUploadDropzone() {
   el("upload-modal-body").innerHTML =
     '<label class="dropzone" id="upload-dropzone" for="upload-file-input">' +
       '<span class="plus">+</span>' +
-      "Drop a photo here, or click to choose one" +
+      "Drop photos here, or click to choose some" +
     "</label>" +
-    '<input type="file" id="upload-file-input" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" style="display:none;">';
+    UPLOAD_FILE_INPUT;
 
   const dropzone = el("upload-dropzone");
-  const fileInput = el<HTMLInputElement>("upload-file-input");
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files && fileInput.files[0];
-    if (file) selectUploadFile(file);
-  });
+  bindUploadFileInput();
   dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("drag-over"); });
   dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag-over"));
   dropzone.addEventListener("drop", (e) => {
     e.preventDefault();
     dropzone.classList.remove("drag-over");
-    const file = e.dataTransfer?.files?.[0];
-    if (file) selectUploadFile(file);
+    addFilesToUploadQueue(Array.from(e.dataTransfer?.files ?? []));
   });
 }
 
-function selectUploadFile(file: File) {
-  uploadModalFile = file;
-  cropState = { ...DEFAULT_CROP };
-  if (uploadObjectUrl) URL.revokeObjectURL(uploadObjectUrl);
-  uploadObjectUrl = URL.createObjectURL(file);
-  el("upload-modal-title").textContent = "Position &amp; upload";
-  renderUploadCropStage(file.name);
+// The filename is the bucket's (device_key, filename) unique key and a
+// re-upload under the same name replaces that image, so two queued photos
+// that happen to share a name (IMG_0001.jpg from two cameras) get suffixed
+// rather than silently overwriting each other.
+function uniqueQueueFilename(deviceKey: string, name: string): string {
+  const taken = new Set(uploadQueue.filter((i) => i.deviceKey === deviceKey).map((i) => i.filename));
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let n = 2; ; n++) {
+    const candidate = base + " (" + n + ")" + ext;
+    if (!taken.has(candidate)) return candidate;
+  }
 }
 
-function renderUploadCropStage(defaultFilename: string) {
-  const ditherOptions = DITHER_ALGORITHMS.map((a) => '<option value="' + a + '">' + a + "</option>").join("");
+function addFilesToUploadQueue(files: File[]) {
+  const deviceKey = uploadModalDeviceKey;
+  if (!deviceKey) return;
+  const images = files.filter((f) => f.type.startsWith("image/"));
+  if (!images.length) return;
+  saveUploadCropForm();
+  const added = images.map((file): UploadQueueItem => {
+    const item: UploadQueueItem = {
+      deviceKey,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      crop: { ...DEFAULT_CROP },
+      filename: "",
+      dither: uploadLastDither,
+      status: "pending",
+    };
+    item.filename = uniqueQueueFilename(deviceKey, file.name);
+    uploadQueue.push(item);
+    return item;
+  });
+  if (!uploadCurrent) uploadCurrent = added[0] ?? null;
+  renderUploadModal();
+}
+
+// Copies the crop stage's filename/dither inputs back into the item being
+// edited, before anything switches away from it.
+function saveUploadCropForm() {
+  if (!uploadCurrent) return;
+  const nameInput = document.getElementById("upload-filename-input") as HTMLInputElement | null;
+  const ditherSelect = document.getElementById("upload-dither-select") as HTMLSelectElement | null;
+  if (nameInput) uploadCurrent.filename = nameInput.value.trim() || uploadCurrent.file.name;
+  if (ditherSelect) uploadCurrent.dither = ditherSelect.value as DitherAlgorithm;
+}
+
+function uploadQueueStripHtml(): string {
+  if (uploadQueue.length < 2) return "";
+  const labels: Record<UploadQueueItem["status"], string> = {
+    pending: "", queued: "Waiting", uploading: "Uploading…", done: "✓", skipped: "Skipped", error: "Failed — click to retry",
+  };
+  return uploadQueue.map((item, idx) =>
+    '<button type="button" class="upload-queue-item status-' + item.status + (item === uploadCurrent ? " current" : "") +
+      '" data-idx="' + idx + '" title="' + escapeHtml(item.error ? item.filename + ": " + item.error : item.filename) + '">' +
+      '<img src="' + item.objectUrl + '" alt="" loading="lazy" decoding="async">' +
+      (labels[item.status] ? '<span class="upload-queue-badge">' + labels[item.status] + "</span>" : "") +
+    "</button>"
+  ).join("");
+}
+
+function uploadQueueSummary(): string {
+  const count = (s: UploadQueueItem["status"]) => uploadQueue.filter((i) => i.status === s).length;
+  const parts: string[] = [];
+  const pending = count("pending");
+  const inFlight = count("queued") + count("uploading");
+  if (pending) parts.push(pending + " to position");
+  if (inFlight) parts.push(inFlight + " uploading");
+  if (count("done")) parts.push(count("done") + " uploaded");
+  if (count("skipped")) parts.push(count("skipped") + " skipped");
+  if (count("error")) parts.push(count("error") + " failed");
+  return parts.join(" · ");
+}
+
+// Re-renders just the thumbnail strip + summary line, so background upload
+// progress never resets the crop stage mid-drag.
+function refreshUploadQueueStrip() {
+  const strip = document.getElementById("upload-queue-strip");
+  if (strip) strip.innerHTML = uploadQueueStripHtml();
+  const summary = document.getElementById("upload-queue-summary");
+  if (summary) summary.textContent = uploadQueueSummary();
+}
+
+function bindUploadQueueStrip() {
+  el("upload-queue-strip").addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>(".upload-queue-item");
+    if (!btn) return;
+    const item = uploadQueue[Number(btn.dataset.idx)];
+    if (!item || item === uploadCurrent) return;
+    if (item.status === "error" || item.status === "skipped") {
+      item.status = "pending";
+      item.error = undefined;
+    }
+    if (item.status !== "pending") return;
+    saveUploadCropForm();
+    uploadCurrent = item;
+    renderUploadModal();
+  });
+}
+
+function renderUploadProgress() {
+  const failed = uploadQueue.filter((i) => i.status === "error");
   el("upload-modal-body").innerHTML =
+    '<div class="upload-queue" id="upload-queue-strip">' + uploadQueueStripHtml() + "</div>" +
+    '<p class="hint" id="upload-queue-summary">' + uploadQueueSummary() + "</p>" +
+    (failed.length
+      ? '<p class="hint">Click a failed photo to adjust it and try again.</p>'
+      : '<p class="hint">You can close this window — uploads keep going in the background.</p>') +
+    '<div class="upload-actions">' +
+      '<label class="btn ghost" for="upload-file-input">Add more photos</label>' +
+      '<button type="button" id="upload-done-btn">Close</button>' +
+    "</div>" +
+    UPLOAD_FILE_INPUT;
+  bindUploadQueueStrip();
+  bindUploadFileInput();
+  el("upload-done-btn").addEventListener("click", closeUploadModal);
+}
+
+function renderUploadCropStage(item: UploadQueueItem) {
+  cropState = item.crop;
+  cropNatural = { w: 0, h: 0 };
+  const ditherOptions = DITHER_ALGORITHMS.map((a) =>
+    '<option value="' + a + '"' + (a === item.dither ? " selected" : "") + ">" + a + "</option>"
+  ).join("");
+  const pendingOthers = uploadQueue.filter((i) => i.status === "pending" && i !== item).length;
+  el("upload-modal-body").innerHTML =
+    '<div class="upload-queue" id="upload-queue-strip">' + uploadQueueStripHtml() + "</div>" +
     '<div class="crop-stage">' +
       '<div class="crop-viewport" id="upload-crop-viewport" style="width:' + CROP_BOX_W + 'px;height:' + CROP_BOX_H + 'px;">' +
-        '<img id="upload-crop-img" src="' + uploadObjectUrl + '" alt="">' +
+        '<img id="upload-crop-img" src="' + item.objectUrl + '" alt="">' +
       "</div>" +
       '<div class="crop-controls">' +
         '<p class="crop-hint hint-block">Drag the photo to reposition it, and zoom in if you want to fill the frame differently. The box shows exactly what the display will show.</p>' +
         '<div class="crop-zoom-row">' +
           "<span>Zoom</span>" +
-          '<input type="range" id="upload-zoom-slider" min="100" max="300" step="1" value="100">' +
+          '<input type="range" id="upload-zoom-slider" min="100" max="300" step="1" value="' + Math.round(item.crop.zoom * 100) + '">' +
           '<button class="ghost sm" id="upload-crop-reset-btn" type="button">Reset</button>' +
         "</div>" +
-        '<div class="row"><label>Filename</label><input type="text" id="upload-filename-input" value="' + escapeHtml(defaultFilename) + '"></div>' +
+        '<div class="row"><label>Filename</label><input type="text" id="upload-filename-input" value="' + escapeHtml(item.filename) + '"></div>' +
         '<div class="row"><label>Dither</label><select id="upload-dither-select">' + ditherOptions + "</select></div>" +
-        '<button id="upload-confirm-btn">Upload photo</button>' +
+        '<div class="upload-actions">' +
+          '<button id="upload-confirm-btn">' + (pendingOthers ? "Upload &amp; next" : "Upload photo") + "</button>" +
+          (pendingOthers
+            ? '<button class="ghost" id="upload-all-btn" type="button">Upload all ' + (pendingOthers + 1) + "</button>"
+            : "") +
+        "</div>" +
+        '<div class="upload-actions">' +
+          '<label class="btn ghost sm" for="upload-file-input">Add more</label>' +
+          (uploadQueue.length > 1 ? '<button class="subtle sm" id="upload-remove-btn" type="button">Remove this photo</button>' : "") +
+        "</div>" +
+        '<p class="hint" id="upload-queue-summary">' + (uploadQueue.length > 1 ? uploadQueueSummary() : "") + "</p>" +
       "</div>" +
-    "</div>";
+    "</div>" +
+    UPLOAD_FILE_INPUT;
+
+  bindUploadQueueStrip();
+  bindUploadFileInput();
 
   const img = el<HTMLImageElement>("upload-crop-img");
   img.addEventListener("load", () => {
@@ -1215,11 +1435,21 @@ function renderUploadCropStage(defaultFilename: string) {
     layoutCropImage();
   });
   el("upload-crop-reset-btn").addEventListener("click", () => {
-    cropState = { ...DEFAULT_CROP };
+    Object.assign(cropState, DEFAULT_CROP);
     el<HTMLInputElement>("upload-zoom-slider").value = "100";
     layoutCropImage();
   });
   el("upload-confirm-btn").addEventListener("click", confirmUpload);
+  document.getElementById("upload-all-btn")?.addEventListener("click", confirmUploadAll);
+  document.getElementById("upload-remove-btn")?.addEventListener("click", () => {
+    if (!uploadCurrent) return;
+    const removed = uploadCurrent;
+    const next = nextPendingUploadItem(removed);
+    uploadQueue = uploadQueue.filter((i) => i !== removed);
+    URL.revokeObjectURL(removed.objectUrl);
+    uploadCurrent = next;
+    renderUploadModal();
+  });
 }
 
 // Positions/sizes the crop preview image from cropNatural + cropState, at the
@@ -1274,125 +1504,187 @@ function onCropPointerUp(e: PointerEvent) {
   try { el("upload-crop-viewport").releasePointerCapture(e.pointerId); } catch {}
 }
 
-/**
- * Decode -> EXIF-correct -> crop (per cropState, from the interactive picker
- * above) -> rotate -> enhance -> dither -> pack -> hash -> encrypt now all run
- * here, client-side — the Worker never sees plaintext (see root CLAUDE.md's
- * encrypted-buckets plan). `packed_hash` is computed over the encrypted
- * packed blob, not the plaintext, since that's the only thing the server can
- * compare on later requests.
- */
-async function confirmUpload() {
-  const deviceKey = uploadModalDeviceKey;
-  const file = uploadModalFile;
-  if (!deviceKey || !file) return;
-  const filename = (el<HTMLInputElement>("upload-filename-input").value || file.name).trim();
-  // Mirrors the server's validateFilename() (lib/validate.ts): the filename is
-  // the (bucket, filename) unique key and ends up in the X-Image-Name response
-  // header, so control characters and over-long values must never reach it.
-  if (!filename || filename.length > 255 || /[\u0000-\u001f\u007f]/.test(filename)) {
+// Next photo still waiting to be positioned, preferring the ones after
+// `from` in queue order and wrapping around to earlier skips.
+function nextPendingUploadItem(from: UploadQueueItem): UploadQueueItem | null {
+  const idx = uploadQueue.indexOf(from);
+  const ordered = [...uploadQueue.slice(idx + 1), ...uploadQueue.slice(0, Math.max(idx, 0))];
+  return ordered.find((i) => i.status === "pending" && i !== from) ?? null;
+}
+
+// Mirrors the server's validateFilename() (lib/validate.ts): the filename is
+// the (bucket, filename) unique key and ends up in the X-Image-Name response
+// header, so control characters and over-long values must never reach it.
+function isValidUploadFilename(filename: string): boolean {
+  return !!filename && filename.length <= 255 && !/[\u0000-\u001f\u007f]/.test(filename);
+}
+
+function confirmUpload() {
+  const item = uploadCurrent;
+  if (!item) return;
+  saveUploadCropForm();
+  if (!isValidUploadFilename(item.filename)) {
     showMessage("app-message", "Filename must be 1-255 characters with no control characters.", "error");
     return;
   }
-  const dither = el<HTMLSelectElement>("upload-dither-select").value as DitherAlgorithm;
+  uploadLastDither = item.dither;
+  enqueueUpload(item);
+  uploadCurrent = nextPendingUploadItem(item);
+  renderUploadModal();
+}
 
-  const bucketKey = bucketAesKeys.get(deviceKey);
-  if (!bucketKey) {
-    showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
+// Queues every remaining photo as-is: ones you haven't touched go up with the
+// default centered crop and the current dither choice.
+function confirmUploadAll() {
+  saveUploadCropForm();
+  const pending = uploadQueue.filter((i) => i.status === "pending");
+  const invalid = pending.find((i) => !isValidUploadFilename(i.filename));
+  if (invalid) {
+    uploadCurrent = invalid;
+    renderUploadModal();
+    showMessage("app-message", `"${invalid.filename}" isn't a valid filename (1-255 characters, no control characters).`, "error");
     return;
   }
+  if (uploadCurrent) uploadLastDither = uploadCurrent.dither;
+  for (const item of pending) enqueueUpload(item);
+  uploadCurrent = null;
+  renderUploadModal();
+}
 
-  const confirmBtn = el<HTMLButtonElement>("upload-confirm-btn");
-  confirmBtn.disabled = true;
-  confirmBtn.textContent = "Processing…";
+// Uploads run strictly one at a time: each one decodes/dithers every board's
+// rendition at full resolution, and doing several at once would multiply
+// that memory for no real speedup on the main thread.
+function enqueueUpload(item: UploadQueueItem) {
+  item.status = "queued";
+  item.error = undefined;
+  uploadChain = uploadChain.then(() => runQueuedUpload(item));
+}
 
+async function runQueuedUpload(item: UploadQueueItem) {
+  if (item.status !== "queued") return;
+  item.status = "uploading";
+  refreshUploadQueueStrip();
   try {
-    // Never store the original file: re-encode a bounded "storage original"
-    // (see decode.ts's resizeForStorage — capped at 2560px long side, JPEG).
-    // This is what the lightbox preview decrypts and what a key rotation
-    // re-crops from, so both stay bounded and rotation-compatible; the raw
-    // camera original never leaves this browser.
-    const rawBytes = await resizeForStorage(file);
-    const rawCiphertext = await aesGcmEncryptBlob(bucketKey, rawBytes);
-
-    const formData = new FormData();
-    formData.set("dither_algorithm", dither);
-    formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
-
-    // Bucket-key-keyed hash of the default board's PLAINTEXT packed buffer
-    // (see crypto.ts's computeContentHash) — the Worker compares it against
-    // the bucket's other images and rejects a duplicate rendition with 409
-    // (migrations/0020_image_content_hash.sql). Must be captured before the
-    // compress/encrypt steps below, which would make the hash
-    // nondeterministic. Holder object because TS can't narrow a plain `let`
-    // assigned inside this async closure.
-    const contentHash = { value: null as string | null };
-
-    // A bucket isn't board-scoped (migrations/0019_image_board_variants.sql)
-    // - every upload generates every board's rendition from this one crop,
-    // so any device subscribed to this bucket, whatever its screen, is
-    // servable without a second upload.
-    await Promise.all(
-      BOARD_IDS.map(async (board) => {
-        const landscape = await decodeToBoardBuffer(file, cropState, board);
-        enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-        const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
-        const packed = packToNibbles(indices);
-        if (board === DEFAULT_BOARD_ID) {
-          contentHash.value = await computeContentHash(bucketKey, packed);
-        }
-        const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
-
-        // Compress the plaintext packed buffer BEFORE encrypting it -
-        // ciphertext doesn't compress meaningfully (see compress.ts's doc
-        // comment). Only actually ships the compressed form if it's
-        // meaningfully smaller.
-        const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
-
-        const [packedCiphertext, thumbCiphertext] = await Promise.all([
-          aesGcmEncryptBlob(bucketKey, packedForUpload),
-          aesGcmEncryptBlob(bucketKey, thumbnail),
-        ]);
-        const packedHash = await computeHash16(packedCiphertext);
-
-        formData.set(`packed_encoding__${board}`, packedEncoding);
-        formData.set(`packed_hash__${board}`, packedHash);
-        formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
-        formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
-      })
-    );
-
-    if (contentHash.value) formData.set("content_hash", contentHash.value);
-
-    // No Content-Type header: FormData needs the browser to set its own
-    // multipart boundary, which apiFetch only does when we don't override it.
-    const uploadUrl =
-      "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) + "&filename=" + encodeURIComponent(filename);
-    try {
-      await apiFetch(uploadUrl, { method: "POST", body: formData });
-    } catch (err: any) {
-      // Duplicate rendition (migrations/0020_image_content_hash.sql): say
-      // which filename already holds it, and let the user force it through
-      // with allow_duplicate=1 — retrying the exact same formData, so the
-      // (expensive) decode/dither/encrypt pipeline above doesn't re-run.
-      if (err?.status !== 409 || !err?.body?.duplicate_of) throw err;
-      const proceed = confirm(
-        `This bucket already contains this image as "${err.body.duplicate_of}". Upload it again anyway?`
-      );
-      if (!proceed) {
-        confirmBtn.disabled = false;
-        confirmBtn.textContent = "Upload photo";
-        return;
-      }
-      await apiFetch(uploadUrl + "&allow_duplicate=1", { method: "POST", body: formData });
-    }
-    closeUploadModal();
-    await renderApp();
+    item.status = (await processAndUploadImage(item)) ? "done" : "skipped";
   } catch (err: any) {
-    showMessage("app-message", "Failed to upload image: " + err.message, "error");
-    confirmBtn.disabled = false;
-    confirmBtn.textContent = "Upload photo";
+    item.status = "error";
+    item.error = err?.message ?? String(err);
   }
+  refreshUploadQueueStrip();
+  if (uploadQueue.some(isUploadInFlight)) return;
+
+  // Batch drained: refresh the bucket grids once, not after every photo.
+  const failed = uploadQueue.filter((i) => i.status === "error");
+  await renderApp();
+  if (failed.length) {
+    showMessage(
+      "app-message",
+      "Failed to upload " + failed.map((i) => '"' + i.filename + '" (' + i.error + ")").join(", "),
+      "error"
+    );
+  }
+  const modalOpen = el("upload-modal-overlay").classList.contains("open");
+  if (!modalOpen) {
+    resetUploadQueue(() => false);
+  } else if (!uploadCurrent) {
+    if (failed.length) renderUploadModal();
+    else closeUploadModal();
+  }
+}
+
+/**
+ * Decode -> EXIF-correct -> crop (per the item's crop, from the interactive
+ * picker above) -> rotate -> enhance -> dither -> pack -> hash -> encrypt now
+ * all run here, client-side — the Worker never sees plaintext (see root
+ * CLAUDE.md's encrypted-buckets plan). `packed_hash` is computed over the
+ * encrypted packed blob, not the plaintext, since that's the only thing the
+ * server can compare on later requests. Returns false if the user declined
+ * to re-upload a duplicate.
+ */
+async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
+  const { deviceKey, file, filename, dither } = item;
+  const crop = { ...item.crop };
+  const bucketKey = bucketAesKeys.get(deviceKey);
+  if (!bucketKey) {
+    throw new Error("this bucket's key isn't unlocked in this session — log out and back in with your passkey");
+  }
+
+  // Never store the original file: re-encode a bounded "storage original"
+  // (see decode.ts's resizeForStorage — capped at 2560px long side, JPEG).
+  // This is what the lightbox preview decrypts and what a key rotation
+  // re-crops from, so both stay bounded and rotation-compatible; the raw
+  // camera original never leaves this browser.
+  const rawBytes = await resizeForStorage(file);
+  const rawCiphertext = await aesGcmEncryptBlob(bucketKey, rawBytes);
+
+  const formData = new FormData();
+  formData.set("dither_algorithm", dither);
+  formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
+
+  // Bucket-key-keyed hash of the default board's PLAINTEXT packed buffer
+  // (see crypto.ts's computeContentHash) — the Worker compares it against
+  // the bucket's other images and rejects a duplicate rendition with 409
+  // (migrations/0020_image_content_hash.sql). Must be captured before the
+  // compress/encrypt steps below, which would make the hash
+  // nondeterministic. Holder object because TS can't narrow a plain `let`
+  // assigned inside this async closure.
+  const contentHash = { value: null as string | null };
+
+  // A bucket isn't board-scoped (migrations/0019_image_board_variants.sql)
+  // - every upload generates every board's rendition from this one crop,
+  // so any device subscribed to this bucket, whatever its screen, is
+  // servable without a second upload.
+  await Promise.all(
+    BOARD_IDS.map(async (board) => {
+      const landscape = await decodeToBoardBuffer(file, crop, board);
+      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
+      const packed = packToNibbles(indices);
+      if (board === DEFAULT_BOARD_ID) {
+        contentHash.value = await computeContentHash(bucketKey, packed);
+      }
+      const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
+
+      // Compress the plaintext packed buffer BEFORE encrypting it -
+      // ciphertext doesn't compress meaningfully (see compress.ts's doc
+      // comment). Only actually ships the compressed form if it's
+      // meaningfully smaller.
+      const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
+      const [packedCiphertext, thumbCiphertext] = await Promise.all([
+        aesGcmEncryptBlob(bucketKey, packedForUpload),
+        aesGcmEncryptBlob(bucketKey, thumbnail),
+      ]);
+      const packedHash = await computeHash16(packedCiphertext);
+
+      formData.set(`packed_encoding__${board}`, packedEncoding);
+      formData.set(`packed_hash__${board}`, packedHash);
+      formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
+      formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+    })
+  );
+
+  if (contentHash.value) formData.set("content_hash", contentHash.value);
+
+  // No Content-Type header: FormData needs the browser to set its own
+  // multipart boundary, which apiFetch only does when we don't override it.
+  const uploadUrl =
+    "/admin/images/upload?device_key=" + encodeURIComponent(deviceKey) + "&filename=" + encodeURIComponent(filename);
+  try {
+    await apiFetch(uploadUrl, { method: "POST", body: formData });
+  } catch (err: any) {
+    // Duplicate rendition (migrations/0020_image_content_hash.sql): say
+    // which filename already holds it, and let the user force it through
+    // with allow_duplicate=1 — retrying the exact same formData, so the
+    // (expensive) decode/dither/encrypt pipeline above doesn't re-run.
+    if (err?.status !== 409 || !err?.body?.duplicate_of) throw err;
+    const proceed = confirm(
+      `This bucket already contains "${filename}" as "${err.body.duplicate_of}". Upload it again anyway?`
+    );
+    if (!proceed) return false;
+    await apiFetch(uploadUrl + "&allow_duplicate=1", { method: "POST", body: formData });
+  }
+  return true;
 }
 
 async function createBucketInvite(bucketId: string) {
@@ -1574,7 +1866,7 @@ el("rotate-modal-close-btn").addEventListener("click", rotateModalClose);
  * (the only ciphertext an admin route exposes — there is no route to fetch an
  * image's already-processed packed/thumb blobs) under `oldKey`, then re-runs
  * the exact decode -> enhance -> dither -> pack -> thumbnail pipeline
- * confirmUpload() uses, so the result is the same processing applied again,
+ * processAndUploadImage() uses, so the result is the same processing applied again,
  * not a copy of bytes that happen to already exist. Note this re-crops with
  * the DEFAULT_CROP framing (centered, no zoom): per-image pan/zoom choices
  * made at original upload time aren't persisted anywhere server-side (they're
@@ -1602,7 +1894,7 @@ async function reencryptOneImage(
   formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
 
   // Every board's variant gets re-derived and re-uploaded together, same as
-  // confirmUpload() - this does NOT try to preserve whatever packed_encoding
+  // processAndUploadImage() - this does NOT try to preserve whatever packed_encoding
   // each variant happened to have before rotation (there's nothing stored
   // server-side to read a "how was this compressed" answer from without the
   // bucket key anyway).

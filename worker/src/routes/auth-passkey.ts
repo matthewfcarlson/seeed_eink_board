@@ -152,7 +152,12 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
       ).bind(sessionId, pending.userId, apiKeyHash, credential.id, now),
     ]);
 
-    await c.env.KV.delete(kvKeys.passkeyAttempt(body.attemptId));
+    // Deferred via waitUntil — the delete's ~100ms has no reason to sit in the
+    // response path. The attempt stays single-use all the same: a replayed
+    // registration racing the delete's eventual consistency can only create a
+    // credential for the same pending userId. We deliberately don't rely on
+    // the TTL alone: a live challenge is a replayable one for its full 300s.
+    c.executionCtx.waitUntil(c.env.KV.delete(kvKeys.passkeyAttempt(body.attemptId)));
     return c.json({ session_token: apiKey }, 201);
   });
 
@@ -233,14 +238,16 @@ export function registerAuthPasskeyRoutes(app: Hono<{ Bindings: Env }>) {
       ),
     ]);
 
-    await c.env.KV.delete(kvKeys.passkeyAttempt(body.attemptId));
+    // Deferred via waitUntil — same reasoning as register/verify's delete.
+    c.executionCtx.waitUntil(c.env.KV.delete(kvKeys.passkeyAttempt(body.attemptId)));
 
     // Whatever's currently on file for this credential — null means it has no
     // PRF-protected sharing key yet (never backfilled, or this authenticator
     // doesn't support PRF at all). Backfilling happens via a *separate*
     // authenticated call (PATCH /admin/me/sharing-key, using the session token just
     // minted above), not here: this ceremony's challenge is single-use and
-    // already consumed by the KV delete above, so there's no way to make a
+    // already consumed by the KV delete above (deferred, but consumed), so
+    // there's no way to make a
     // second /auth/login/verify call with it if the client discovers only
     // after seeing this response that it needs to upload a wrap.
     return c.json({

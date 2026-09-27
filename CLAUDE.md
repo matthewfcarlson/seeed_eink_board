@@ -156,7 +156,7 @@ A bucket is never board-scoped. Instead, every image gets a packed+thumbnail
 variant per board (`ee02-13in3`/`ee04-7in3` - see `lib/media-constants.ts`'s
 `BoardGeometry`, `migrations/0019_image_board_variants.sql`'s `image_variants`
 table), generated automatically on every upload
-(`worker/src/client/admin.ts`'s `confirmUpload`/`reencryptOneImage` loop over
+(`worker/src/client/admin.ts`'s `processAndUploadImage`/`reencryptOneImage` loop over
 both boards from the same crop). Any device subscribed to a bucket is served
 whichever variant matches its own `X-Device-Board`
 (`lib/image-store.ts`'s `getImageVariant`), so one bucket happily mixes EE02
