@@ -105,3 +105,11 @@ describe("buildWebhookRequest", () => {
     expect(req.headers.get("Title")).toMatch(/^[\x20-\x7e]+$/);
   });
 });
+
+describe("describeAlert still_offline", () => {
+  it("says how long the device has been silent", () => {
+    expect(describeAlert({ ...offline, kind: "still_offline", lastSeenAt: NOW - 8 * 86400 }, NOW)).toBe(
+      "⏰ Kitchen is still offline. It hasn't checked in for 8 days."
+    );
+  });
+});

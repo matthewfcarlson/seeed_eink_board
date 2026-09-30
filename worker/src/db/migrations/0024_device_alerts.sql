@@ -29,8 +29,9 @@ CREATE TABLE notification_webhooks (
 CREATE INDEX idx_notification_webhooks_user ON notification_webhooks(user_id);
 
 -- Per-device alert state: non-NULL = "we already told the owner about this"
--- (the epoch it fired). The hourly check alerts only on transitions — once
--- when a device goes offline/low, once when it recovers — never every hour.
+-- (the epoch it fired). The hourly check alerts on transitions — once when a
+-- device goes offline/low, once when it recovers — plus "still offline"
+-- reminders paced by a KV TTL (weekly, then monthly), never every hour.
 ALTER TABLE devices ADD COLUMN offline_alerted_at INTEGER;
 ALTER TABLE devices ADD COLUMN low_battery_alerted_at INTEGER;
 -- Owner opted this device out of alerts (e.g. unplugged on purpose). Muted

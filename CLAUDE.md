@@ -320,12 +320,11 @@ treated as secrets (Slack/Discord embed a token): the API only returns a
 masked `url_preview`, and `signing_secret` is shown once at creation.
 
 **Detection** (`lib/device-health.ts`, pure): a dead frame can't report it's
-dead, so offline is inferred. With a schedule override, the Worker replays
-firmware's `calculateSleepSeconds` (TS port — keep in sync with
-`device_app.h`) from `last_seen_at` and adds 2 refresh intervals of grace
-(min 30 min), so quiet hours and one missed wake never alert. Without an
-override the device runs its BLE-provisioned schedule, which it doesn't
-report — but firmware never sleeps > 24h, so it's overdue after 25h. Low
+dead, so offline is inferred: no authenticated request for 24h
+(`OFFLINE_AFTER_SECONDS`). Deliberately schedule-agnostic — firmware never
+sleeps > 24h whatever its schedule, and a BLE-provisioned schedule isn't
+reported to the Worker anyway. Edge: a device on a full 1440-minute interval
+sleeps right up to that line and can alert/recover if a wake runs long. Low
 battery: < 3.5V, recovers at >= 3.7V (hysteresis). The offline message uses
 the last voltage to guess dead battery (< 3.6V) vs WiFi/power.
 
@@ -333,7 +332,13 @@ the last voltage to guess dead battery (< 3.6V) vs WiFi/power.
 (`index.ts`'s `scheduled()`; firmware sync still only every 6th hour). Alerts
 fire on transitions only — `devices.offline_alerted_at`/
 `low_battery_alerted_at` record what was sent, so each problem gets one
-message and one recovery message, batched per owner. State is written before
+message and one recovery message, batched per owner. While a device stays
+offline, `still_offline` reminders go out weekly for its first 30 days
+offline, then about monthly, forever until it recovers or is muted — paced
+by a KV key (`kvKeys.offlineReminder`) armed with that TTL at each alert;
+its expiry is what makes the next hourly run send one. D1's
+`offline_alerted_at` stays the source of truth (losing the KV key costs at
+most one extra reminder); recovery deletes the key. State is written before
 delivery regardless of outcome: a broken webhook shows `last_error` in
 `/admin` rather than retrying every hour, at the cost of a failed alert never
 being retried. `devices.alerts_muted` (the "Watched frames" checkboxes) skips

@@ -204,9 +204,8 @@ components:
           type: object
           description: >-
             Same evaluation the hourly alert check runs (lib/device-health.ts).
-            `offline_after` is when a silent device counts as overdue: its next
-            expected wake per its schedule override plus two refresh intervals
-            of grace, or 25h after last_seen_at when it has no override.
+            `offline_after` is when a silent device counts as offline:
+            last_seen_at + 24h.
           properties:
             offline: { type: boolean }
             low_battery: { type: boolean }
@@ -1281,7 +1280,8 @@ paths:
       description: >-
         `json` bodies are `{type, sent_at, text, alerts: [{kind, device: {mac,
         label}, last_seen_at, battery_voltage}]}` with `kind` one of offline,
-        back_online, low_battery, battery_ok; signed via `X-Eink-Timestamp` and
+        still_offline (weekly reminder for the first 30 days offline, then
+        about monthly), back_online, low_battery, battery_ok; signed via `X-Eink-Timestamp` and
         `X-Eink-Signature: sha256=<hex HMAC-SHA256(signing_secret,
         timestamp + "." + raw body)>`. `slack`/`discord` send `{text}`/`{content}`,
         `ntfy` a plain-text body. `signing_secret` is only ever returned here.

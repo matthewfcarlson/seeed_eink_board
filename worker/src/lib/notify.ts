@@ -93,6 +93,10 @@ export function describeAlert(a: DeviceAlert, now: number): string {
           : ` Its last battery reading was ${volts}, so check its WiFi or power.`;
       return `⚠️ ${name} hasn't checked in${since}.${why}`;
     }
+    case "still_offline": {
+      const since = a.lastSeenAt != null ? " It hasn't checked in for " + durationSince(a.lastSeenAt, now) + "." : "";
+      return `⏰ ${name} is still offline.${since}`;
+    }
     case "back_online":
       return `✅ ${name} is checking in again.`;
     case "low_battery":
@@ -160,7 +164,7 @@ export async function buildWebhookRequest(
       headers["Content-Type"] = "text/plain; charset=utf-8";
       // Header values must stay ASCII — labels live only in the body.
       headers["Title"] = opts.test ? "E-Ink frame: test alert" : "E-Ink frame alert";
-      const urgent = alerts.some((a) => a.kind === "offline" || a.kind === "low_battery");
+      const urgent = alerts.some((a) => a.kind === "offline" || a.kind === "still_offline" || a.kind === "low_battery");
       headers["Tags"] = urgent ? "warning" : "white_check_mark";
       headers["Priority"] = urgent && !opts.test ? "high" : "default";
       body = text;

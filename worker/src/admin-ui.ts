@@ -107,7 +107,7 @@ export function renderAdminPage(): string {
 
   <div class="card">
     <h2>Alerts</h2>
-    <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. Checked every hour; you get one message when something goes wrong and one when it recovers, never a repeat every hour. Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
+    <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. A frame counts as offline after 24 hours without checking in. You get one message when something goes wrong and one when it recovers; a frame that stays offline gets a reminder every week for its first month, then about monthly. Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Format</th><th>Destination</th><th>Last delivery</th><th></th></tr></thead>

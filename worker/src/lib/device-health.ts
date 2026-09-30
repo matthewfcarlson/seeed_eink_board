@@ -1,15 +1,28 @@
-import type { ScheduleConfig } from "../types";
-
 /**
  * Device health detection for owner alerts (see migrations/0024_device_alerts.sql).
- * Pure functions only — index.ts's scheduled() → runDeviceHealthCheck() does
- * the D1 reads/writes and lib/notify.ts does delivery.
- *
- * A dead frame can't report that it's dead, so "offline" is inferred: work out
- * when the device *should* next have woken (the same sleep math the firmware
- * runs — device_app.h's calculateSleepSeconds), and flag it once that's
- * passed by a grace margin.
+ * Pure functions only — lib/health-check.ts (run hourly from index.ts's
+ * scheduled()) does the D1/KV reads and writes, and lib/notify.ts does delivery.
  */
+
+/**
+ * A dead frame can't report that it's dead, so "offline" is inferred from
+ * silence: no authenticated request for a day. Firmware never deliberately
+ * sleeps longer than 24h (device_app.h's calculateSleepSeconds caps at
+ * max(refresh interval ≤ 1440 min, time until the next active-window start)),
+ * so any schedule wakes at least daily. Edge: a device on a full 1440-minute
+ * interval sleeps right up to this line and can alert (then recover) if a
+ * wake runs a few minutes long.
+ */
+export const OFFLINE_AFTER_SECONDS = 24 * 3600;
+
+/**
+ * Follow-up pacing while a device stays offline (paced by a KV key's TTL —
+ * see health-check.ts): weekly for its first month offline, then roughly
+ * monthly, until it recovers or its owner mutes it.
+ */
+export const WEEKLY_REMINDER_SECONDS = 7 * 86400;
+export const MONTHLY_REMINDER_AFTER_SECONDS = 30 * 86400;
+export const MONTHLY_REMINDER_SECONDS = 30 * 86400;
 
 /** Below this, alert: roughly the last ~10% of a LiPo's usable range on this
  *  board's divider (see CLAUDE.md's battery notes: 3.0V empty, 4.2V full; the
@@ -20,109 +33,6 @@ export const LOW_BATTERY_VOLTAGE = 3.5;
  *  USB reads >4.2V, comfortably above. */
 export const LOW_BATTERY_RECOVER_VOLTAGE = 3.7;
 
-/** Minimum slack past the expected wake before calling a device offline —
- *  covers WiFi association, a slow download, and the cron's own jitter for
- *  devices on very short refresh intervals. */
-const MIN_GRACE_SECONDS = 30 * 60;
-
-/**
- * Without a server-side schedule override the device runs whatever it was
- * provisioned with over BLE (interval, active hours, timezone) — none of
- * which it reports back. But calculateSleepSeconds never sleeps longer than
- * max(refresh interval ≤ 1440 min, time until the next active-window start
- * < 24h), so no healthy device is ever silent for more than a day. Past that
- * (plus an hour of slack) it's overdue whatever its schedule is.
- */
-export const UNKNOWN_SCHEDULE_OFFLINE_AFTER_SECONDS = 25 * 3600;
-
-// Mirrors firmware MIN_SLEEP_SECONDS floor closely enough for alerting; the
-// grace margin dwarfs it anyway.
-const MIN_SLEEP_SECONDS = 60;
-
-interface FullSchedule {
-  refreshMinutes: number;
-  activeStartHour: number;
-  activeEndHour: number;
-  timezoneOffsetMinutes: number;
-}
-
-function fullSchedule(config: ScheduleConfig | null): FullSchedule | null {
-  if (
-    !config ||
-    config.refresh_interval_minutes == null ||
-    config.active_start_hour == null ||
-    config.active_end_hour == null ||
-    config.timezone_offset_minutes == null
-  ) {
-    return null;
-  }
-  return {
-    refreshMinutes: config.refresh_interval_minutes,
-    activeStartHour: config.active_start_hour,
-    activeEndHour: config.active_end_hour,
-    timezoneOffsetMinutes: config.timezone_offset_minutes,
-  };
-}
-
-function localSecondsOfDay(utc: number, tzMinutes: number): number {
-  const s = (utc + tzMinutes * 60) % 86400;
-  return s < 0 ? s + 86400 : s;
-}
-
-function isWithinActiveWindow(utc: number, start: number, end: number, tz: number): boolean {
-  if (start === end) return true;
-  const sod = localSecondsOfDay(utc, tz);
-  const startS = start * 3600;
-  const endS = end * 3600;
-  return start < end ? sod >= startS && sod < endS : sod >= startS || sod < endS;
-}
-
-function secondsUntilNextActiveWindow(utc: number, start: number, tz: number): number {
-  const sod = localSecondsOfDay(utc, tz);
-  const startS = start * 3600;
-  return sod < startS ? startS - sod : 86400 - sod + startS;
-}
-
-function secondsUntilWindowEnd(utc: number, start: number, end: number, tz: number): number {
-  if (start === end) return Number.POSITIVE_INFINITY;
-  const sod = localSecondsOfDay(utc, tz);
-  const startS = start * 3600;
-  const endS = end * 3600;
-  if (start < end) return endS - sod;
-  return sod >= startS ? 86400 - sod + endS : endS - sod;
-}
-
-/** TS port of firmware/lib/common/device_app.h's calculateSleepSeconds, for a
- *  device whose clock is valid (any device that completed /device_config). */
-export function expectedSleepSeconds(wakeAt: number, s: FullSchedule): number {
-  const refresh = s.refreshMinutes * 60;
-  const { activeStartHour: start, activeEndHour: end, timezoneOffsetMinutes: tz } = s;
-  if (!isWithinActiveWindow(wakeAt, start, end, tz)) {
-    return Math.max(secondsUntilNextActiveWindow(wakeAt, start, tz), MIN_SLEEP_SECONDS);
-  }
-  if (refresh < secondsUntilWindowEnd(wakeAt, start, end, tz)) {
-    return Math.max(refresh, MIN_SLEEP_SECONDS);
-  }
-  return Math.max(secondsUntilNextActiveWindow(wakeAt, start, tz), MIN_SLEEP_SECONDS);
-}
-
-/**
- * Epoch after which a device last seen at `lastSeenAt` counts as offline.
- *
- * Known schedule: its next expected wake plus a grace of two refresh
- * intervals (min 30 min), so a single missed wake — one WiFi blip — never
- * alerts. Caveat: an override saved since the device's last wake is used here
- * even though the device computed its current sleep from the old one; a
- * lengthened interval can alert early once. Unknown schedule: see
- * UNKNOWN_SCHEDULE_OFFLINE_AFTER_SECONDS.
- */
-export function offlineDeadline(lastSeenAt: number, schedule: ScheduleConfig | null): number {
-  const s = fullSchedule(schedule);
-  if (!s) return lastSeenAt + UNKNOWN_SCHEDULE_OFFLINE_AFTER_SECONDS;
-  const grace = Math.max(2 * s.refreshMinutes * 60, MIN_GRACE_SECONDS);
-  return lastSeenAt + expectedSleepSeconds(lastSeenAt, s) + grace;
-}
-
 export interface DeviceHealthInput {
   mac: string;
   label: string | null;
@@ -130,7 +40,6 @@ export interface DeviceHealthInput {
   batteryVoltage: number | null;
   offlineAlertedAt: number | null;
   lowBatteryAlertedAt: number | null;
-  schedule: ScheduleConfig | null;
 }
 
 export interface DeviceHealth {
@@ -141,7 +50,7 @@ export interface DeviceHealth {
 }
 
 export function evaluateDeviceHealth(d: DeviceHealthInput, now: number): DeviceHealth {
-  const offlineAfter = d.lastSeenAt != null ? offlineDeadline(d.lastSeenAt, d.schedule) : null;
+  const offlineAfter = d.lastSeenAt != null ? d.lastSeenAt + OFFLINE_AFTER_SECONDS : null;
   const v = d.batteryVoltage;
   // Hysteresis: the threshold that applies depends on whether we're already
   // in the alerted state.
@@ -150,7 +59,13 @@ export function evaluateDeviceHealth(d: DeviceHealthInput, now: number): DeviceH
   return { offline: offlineAfter != null && now > offlineAfter, lowBattery, offlineAfter };
 }
 
-export type AlertKind = "offline" | "back_online" | "low_battery" | "battery_ok";
+/** How long until the next "still offline" reminder, given how long the
+ *  device has been silent as of this one. */
+export function reminderIntervalSeconds(lastSeenAt: number, now: number): number {
+  return now - lastSeenAt < MONTHLY_REMINDER_AFTER_SECONDS ? WEEKLY_REMINDER_SECONDS : MONTHLY_REMINDER_SECONDS;
+}
+
+export type AlertKind = "offline" | "still_offline" | "back_online" | "low_battery" | "battery_ok";
 
 export interface DeviceAlert {
   kind: AlertKind;
@@ -160,27 +75,42 @@ export interface DeviceAlert {
   batteryVoltage: number | null;
 }
 
+export interface DeviceAlertPlan {
+  alerts: DeviceAlert[];
+  /** New alert-state columns to persist (unchanged values when nothing fired). */
+  offlineAlertedAt: number | null;
+  lowBatteryAlertedAt: number | null;
+  /** Arm the reminder key with this TTL (seconds), or null to leave it alone. */
+  armReminderSeconds: number | null;
+  /** Delete the reminder key (device recovered). */
+  clearReminder: boolean;
+}
+
 /**
- * State transitions for one device: an alert fires only when health differs
- * from what was last alerted. Returns the alerts plus the new alert-state
- * columns to persist (unchanged values when nothing fired).
+ * State transitions for one device. `reminderDue` is whether this device's
+ * reminder key has expired from KV — only consulted while it's already
+ * alerted as offline. Alerts fire when health differs from what was last
+ * alerted, plus a "still_offline" follow-up each time the reminder lapses.
  */
-export function planDeviceAlerts(
-  d: DeviceHealthInput,
-  now: number
-): { alerts: DeviceAlert[]; offlineAlertedAt: number | null; lowBatteryAlertedAt: number | null } {
+export function planDeviceAlerts(d: DeviceHealthInput, now: number, reminderDue = false): DeviceAlertPlan {
   const health = evaluateDeviceHealth(d, now);
   const alerts: DeviceAlert[] = [];
   const base = { mac: d.mac, label: d.label, lastSeenAt: d.lastSeenAt, batteryVoltage: d.batteryVoltage };
   let offlineAlertedAt = d.offlineAlertedAt;
   let lowBatteryAlertedAt = d.lowBatteryAlertedAt;
+  let armReminderSeconds: number | null = null;
+  let clearReminder = false;
 
-  if (health.offline && offlineAlertedAt == null) {
-    alerts.push({ kind: "offline", ...base });
-    offlineAlertedAt = now;
-  } else if (!health.offline && offlineAlertedAt != null) {
+  if (health.offline) {
+    if (offlineAlertedAt == null || reminderDue) {
+      alerts.push({ kind: offlineAlertedAt == null ? "offline" : "still_offline", ...base });
+      offlineAlertedAt ??= now;
+      armReminderSeconds = reminderIntervalSeconds(d.lastSeenAt!, now);
+    }
+  } else if (offlineAlertedAt != null) {
     alerts.push({ kind: "back_online", ...base });
     offlineAlertedAt = null;
+    clearReminder = true;
   }
 
   if (health.lowBattery && lowBatteryAlertedAt == null) {
@@ -191,5 +121,5 @@ export function planDeviceAlerts(
     lowBatteryAlertedAt = null;
   }
 
-  return { alerts, offlineAlertedAt, lowBatteryAlertedAt };
+  return { alerts, offlineAlertedAt, lowBatteryAlertedAt, armReminderSeconds, clearReminder };
 }

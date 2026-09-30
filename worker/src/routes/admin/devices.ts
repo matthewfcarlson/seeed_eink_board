@@ -20,10 +20,6 @@ type DeviceHealthColumns = {
   alerts_muted: number;
   offline_alerted_at: number | null;
   low_battery_alerted_at: number | null;
-  refresh_interval_minutes: number | null;
-  active_start_hour: number | null;
-  active_end_hour: number | null;
-  timezone_offset_minutes: number | null;
 };
 
 // The device's self-generated HMAC key (hex), scanned off its own display via the
@@ -140,12 +136,10 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.get("/admin/devices", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      `SELECT d.mac, d.label, d.created_at, d.last_seen_at, d.last_seen_ip, d.last_battery_voltage, d.last_battery_at,
-              d.running_firmware_version, d.board, d.sharing_public_key,
-              d.alerts_muted, d.offline_alerted_at, d.low_battery_alerted_at,
-              s.refresh_interval_minutes, s.active_start_hour, s.active_end_hour, s.timezone_offset_minutes
-       FROM devices d LEFT JOIN schedule_overrides s ON s.target = d.mac
-       WHERE d.user_id = ?`
+      `SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at,
+              running_firmware_version, board, sharing_public_key,
+              alerts_muted, offline_alerted_at, low_battery_alerted_at
+       FROM devices WHERE user_id = ?`
     )
       .bind(c.var.user.id)
       .all<Record<string, unknown> & DeviceHealthColumns>();
@@ -168,10 +162,7 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
     const now = Math.floor(Date.now() / 1000);
     const devices = await Promise.all(
-      rows.results.map(async ({
-        refresh_interval_minutes, active_start_hour, active_end_hour, timezone_offset_minutes,
-        offline_alerted_at, low_battery_alerted_at, alerts_muted, ...row
-      }) => ({
+      rows.results.map(async ({ offline_alerted_at, low_battery_alerted_at, alerts_muted, ...row }) => ({
         ...row,
         alerts_muted: !!alerts_muted,
         // Same evaluation the hourly alert check runs (lib/health-check.ts), so the
@@ -184,12 +175,6 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
             batteryVoltage: (row.last_battery_voltage as number | null) ?? null,
             offlineAlertedAt: offline_alerted_at,
             lowBatteryAlertedAt: low_battery_alerted_at,
-            schedule: {
-              refresh_interval_minutes: refresh_interval_minutes ?? undefined,
-              active_start_hour: active_start_hour ?? undefined,
-              active_end_hour: active_end_hour ?? undefined,
-              timezone_offset_minutes: timezone_offset_minutes ?? undefined,
-            },
           },
           now
         )),
