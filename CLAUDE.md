@@ -307,6 +307,39 @@ correlation of identical photos. Bucket-key rotation recomputes every image's
 hash under the new key via the reencrypt path. Trusted client metadata (the
 Worker can't verify it) — a courtesy check, not a security boundary.
 
+## Device Health Alerts
+
+Owners get told when a frame stops checking in or its battery runs low, via
+webhooks they add in `/admin`'s Alerts card
+(`migrations/0024_device_alerts.sql`, `routes/admin/notifications.ts`).
+Accounts have no email/phone (passkey-only), so a user-supplied URL is the
+first channel that needs no new personal data. Formats: `json` (structured,
+signed `X-Eink-Signature: sha256=HMAC(signing_secret, "<X-Eink-Timestamp>.<body>")`),
+`slack`, `discord` (mentions disabled), `ntfy`. URLs are https-only and
+treated as secrets (Slack/Discord embed a token): the API only returns a
+masked `url_preview`, and `signing_secret` is shown once at creation.
+
+**Detection** (`lib/device-health.ts`, pure): a dead frame can't report it's
+dead, so offline is inferred. With a schedule override, the Worker replays
+firmware's `calculateSleepSeconds` (TS port — keep in sync with
+`device_app.h`) from `last_seen_at` and adds 2 refresh intervals of grace
+(min 30 min), so quiet hours and one missed wake never alert. Without an
+override the device runs its BLE-provisioned schedule, which it doesn't
+report — but firmware never sleeps > 24h, so it's overdue after 25h. Low
+battery: < 3.5V, recovers at >= 3.7V (hysteresis). The offline message uses
+the last voltage to guess dead battery (< 3.6V) vs WiFi/power.
+
+**Delivery** (`lib/health-check.ts`, `lib/notify.ts`): the cron is now hourly
+(`index.ts`'s `scheduled()`; firmware sync still only every 6th hour). Alerts
+fire on transitions only — `devices.offline_alerted_at`/
+`low_battery_alerted_at` record what was sent, so each problem gets one
+message and one recovery message, batched per owner. State is written before
+delivery regardless of outcome: a broken webhook shows `last_error` in
+`/admin` rather than retrying every hour, at the cost of a failed alert never
+being retried. `devices.alerts_muted` (the "Watched frames" checkboxes) skips
+a device entirely. `GET /admin/devices` returns the same `health` evaluation,
+shown as an "overdue" badge.
+
 ## OTA Firmware Updates
 
 Channel-based (`stable`/`beta`), not admin-picked versions

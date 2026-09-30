@@ -55,7 +55,13 @@ CREATE TABLE devices (
   -- P-256 public key, generated on-device at first boot and handed to the
   -- Worker at provisioning/claim time — see migrations/0015. Independent of
   -- `board`; the matching private key never leaves the device's NVS.
-  sharing_public_key          TEXT
+  sharing_public_key          TEXT,
+  -- Device health alert state (migrations/0024_device_alerts.sql): epoch the
+  -- offline/low-battery alert fired, NULL once recovered. alerts_muted skips
+  -- this device in the hourly check entirely. See lib/device-health.ts.
+  offline_alerted_at          INTEGER,
+  low_battery_alerted_at      INTEGER,
+  alerts_muted                INTEGER NOT NULL DEFAULT 0
 );
 
 -- Image buckets: independently-owned, shareable entities a device subscribes to
@@ -330,3 +336,20 @@ CREATE TABLE rate_limits (
   key   TEXT PRIMARY KEY,
   count INTEGER NOT NULL
 );
+
+-- Owner-registered alert destinations (see migrations/0024_device_alerts.sql,
+-- lib/notify.ts). `url` is a secret (Slack/Discord embed a token in it) — the
+-- admin API only returns a masked preview.
+CREATE TABLE notification_webhooks (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  url             TEXT NOT NULL,
+  format          TEXT NOT NULL CHECK (format IN ('json', 'slack', 'discord', 'ntfy')),
+  label           TEXT,
+  signing_secret  TEXT NOT NULL, -- hex HMAC key for the json format's X-Eink-Signature
+  created_at      INTEGER NOT NULL,
+  last_attempt_at INTEGER,
+  last_status     INTEGER,       -- HTTP status of the last attempt; 0 = network error
+  last_error      TEXT
+);
+CREATE INDEX idx_notification_webhooks_user ON notification_webhooks(user_id);

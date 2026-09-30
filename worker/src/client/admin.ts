@@ -822,6 +822,10 @@ function renderDevicesTable(devices: any[]) {
         (d.last_seen_ip ? " · " + escapeHtml(d.last_seen_ip) : "") + '">' +
         formatRelativeTime(d.last_seen_at) + "</span>"
       : '<span class="hint">never</span>';
+    // Same evaluation the hourly alert check runs server-side (lib/device-health.ts).
+    const overdue = d.health && d.health.offline
+      ? ' <span class="pill red" title="Missed its expected check-in' + (d.alerts_muted ? " (alerts muted)" : "") + '">overdue</span>'
+      : "";
     const firmware = d.running_firmware_version
       ? escapeHtml(d.running_firmware_version)
       : '<span class="hint">unknown</span>';
@@ -839,7 +843,7 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + board + "</td>" +
       "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
-      "<td>" + lastSeen + "</td>" +
+      "<td>" + lastSeen + overdue + "</td>" +
       "<td>" + battery + "</td>" +
       '<td><button class="ghost sm" onclick="openBucketModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
       '<td><button class="ghost sm" onclick="openScheduleModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
@@ -2370,6 +2374,136 @@ async function joinBucket(token: string) {
 }
 (window as any).joinBucket = joinBucket;
 
+// ---- Alerts (webhooks) — see routes/admin/notifications.ts ----
+
+/** Best guess at the payload format from a pasted URL; the user can still
+ *  override it in the select. */
+function guessWebhookFormat(raw: string): string | null {
+  let url: URL;
+  try { url = new URL(raw.trim()); } catch { return null; }
+  const host = url.hostname.toLowerCase();
+  if (host === "hooks.slack.com") return "slack";
+  if ((host === "discord.com" || host === "discordapp.com" || host.endsWith(".discord.com")) && url.pathname.startsWith("/api/webhooks/")) return "discord";
+  if (host === "ntfy.sh" || host.startsWith("ntfy.")) return "ntfy";
+  return "json";
+}
+
+el("new-webhook-url").addEventListener("input", () => {
+  const guess = guessWebhookFormat(el<HTMLInputElement>("new-webhook-url").value);
+  if (guess) el<HTMLSelectElement>("new-webhook-format").value = guess;
+});
+
+const WEBHOOK_FORMAT_LABELS: Record<string, string> = { json: "JSON", slack: "Slack", discord: "Discord", ntfy: "ntfy" };
+
+function renderWebhooksTable(webhooks: any[]) {
+  const tbody = el("webhooks-table");
+  if (webhooks.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No webhooks yet &mdash; add one below to get alerts.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = webhooks.map((w) => {
+    const delivery = !w.last_attempt_at
+      ? '<span class="hint">never sent</span>'
+      : w.last_error
+      ? '<span class="pill red" title="' + escapeHtml(w.last_error) + '">failed</span> <span class="hint">' + formatRelativeTime(w.last_attempt_at) + "</span>"
+      : '<span class="pill green">ok</span> <span class="hint">' + formatRelativeTime(w.last_attempt_at) + "</span>";
+    return "<tr>" +
+      "<td>" + escapeHtml(w.label || "") + "</td>" +
+      "<td>" + escapeHtml(WEBHOOK_FORMAT_LABELS[w.format] || w.format) + "</td>" +
+      "<td><code>" + escapeHtml(w.url_preview) + "</code></td>" +
+      "<td>" + delivery + "</td>" +
+      '<td><button class="ghost sm" onclick="testWebhook(' + jsArg(w.id) + ')">Send test</button> ' +
+      '<button class="danger sm" onclick="deleteWebhook(' + jsArg(w.id) + ')">Remove</button></td>' +
+      "</tr>";
+  }).join("");
+}
+
+function renderAlertDevicesList(devices: any[]) {
+  const list = el("alert-devices-list");
+  if (devices.length === 0) {
+    list.innerHTML = '<p class="hint">No devices registered yet.</p>';
+    return;
+  }
+  list.innerHTML = devices.map((d) => {
+    const id = "alert-mute-" + encodeURIComponent(d.mac);
+    return '<div class="row checkbox-row">' +
+      '<input type="checkbox" id="' + id + '"' + (d.alerts_muted ? "" : " checked") +
+      ' onchange="setDeviceAlertsMuted(' + jsArg(d.mac) + ', !this.checked)">' +
+      '<label for="' + id + '" style="margin:0;">' + escapeHtml(d.label || d.mac) + "</label>" +
+      "</div>";
+  }).join("");
+}
+
+async function loadWebhooks() {
+  const result = await apiFetch("/admin/notifications/webhooks");
+  renderWebhooksTable(result.webhooks);
+}
+
+el("add-webhook-btn").addEventListener("click", async () => {
+  const url = el<HTMLInputElement>("new-webhook-url").value.trim();
+  const format = el<HTMLSelectElement>("new-webhook-format").value;
+  const label = el<HTMLInputElement>("new-webhook-label").value.trim();
+  if (!url.startsWith("https://")) {
+    showMessage("app-message", "Webhook URL must start with https://", "error");
+    return;
+  }
+  try {
+    const created = await apiFetch("/admin/notifications/webhooks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, format, label: label || undefined }),
+    });
+    el<HTMLInputElement>("new-webhook-url").value = "";
+    el<HTMLInputElement>("new-webhook-label").value = "";
+    // Only the json format carries a signature; the secret is never shown again.
+    el("webhook-secret").innerHTML = format === "json"
+      ? '<div class="message success">Webhook added. Signing secret (shown once &mdash; save it if your receiver verifies <code>X-Eink-Signature</code>): <code style="word-break:break-all;">' +
+        escapeHtml(created.signing_secret) + "</code></div>"
+      : "";
+    await loadWebhooks();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to add webhook: " + err.message, "error");
+  }
+});
+
+async function testWebhook(id: string) {
+  try {
+    await apiFetch("/admin/notifications/webhooks/" + encodeURIComponent(id) + "/test", { method: "POST" });
+    showMessage("app-message", "Test alert sent.", "success");
+  } catch (err: any) {
+    showMessage("app-message", "Test alert failed: " + err.message, "error");
+  }
+  await loadWebhooks().catch(() => {});
+}
+(window as any).testWebhook = testWebhook;
+
+async function deleteWebhook(id: string) {
+  if (!confirm("Remove this webhook? It will stop receiving alerts.")) return;
+  try {
+    await apiFetch("/admin/notifications/webhooks/" + encodeURIComponent(id), { method: "DELETE" });
+    await loadWebhooks();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to remove webhook: " + err.message, "error");
+  }
+}
+(window as any).deleteWebhook = deleteWebhook;
+
+async function setDeviceAlertsMuted(mac: string, muted: boolean) {
+  try {
+    await apiFetch("/admin/devices/" + encodeURIComponent(mac), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alerts_muted: muted }),
+    });
+    const cached = devicesCache.find((d: any) => d.mac === mac);
+    if (cached) cached.alerts_muted = muted;
+  } catch (err: any) {
+    showMessage("app-message", "Failed to update alerts for " + mac + ": " + err.message, "error");
+    renderAlertDevicesList(devicesCache);
+  }
+}
+(window as any).setDeviceAlertsMuted = setDeviceAlertsMuted;
+
 async function renderApp() {
   showMessage("app-message", "", "");
   renderClaimBanner();
@@ -2380,6 +2514,8 @@ async function renderApp() {
   ]);
   const devices = devicesResult.devices;
   devicesCache = devices;
+  renderAlertDevicesList(devices);
+  loadWebhooks().catch((err) => showMessage("app-message", "Failed to load webhooks: " + err.message, "error"));
   allBucketsCache = bucketsResult.buckets;
   // Needs devicesCache/allBucketsCache populated (openBucketModal reads both) —
   // unlike renderClaimBanner/renderJoinBucketBanner above, which don't.

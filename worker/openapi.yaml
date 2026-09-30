@@ -197,6 +197,20 @@ components:
             X-Device-Sharing-Public-Key the same way as board. Required before
             a bucket can be assigned to this device (see
             PATCH /admin/devices/{mac}/buckets).
+        alerts_muted:
+          type: boolean
+          description: Skipped by the hourly offline/low-battery alert check.
+        health:
+          type: object
+          description: >-
+            Same evaluation the hourly alert check runs (lib/device-health.ts).
+            `offline_after` is when a silent device counts as overdue: its next
+            expected wake per its schedule override plus two refresh intervals
+            of grace, or 25h after last_seen_at when it has no override.
+          properties:
+            offline: { type: boolean }
+            low_battery: { type: boolean }
+            offline_after: { type: integer, nullable: true }
         bucket_ids:
           type: array
           items:
@@ -545,7 +559,7 @@ paths:
 
   /admin/devices/{mac}:
     patch:
-      summary: Rename a device
+      summary: Rename a device, or mute/unmute its health alerts
       parameters:
         - $ref: '#/components/parameters/MacPath'
       requestBody:
@@ -555,6 +569,11 @@ paths:
               type: object
               properties:
                 label: { type: string, maxLength: 80 }
+                alerts_muted:
+                  type: boolean
+                  description: >-
+                    true skips this device in the hourly offline/low-battery
+                    check (e.g. unplugged on purpose). See migrations/0024_device_alerts.sql.
       responses:
         '200': { description: OK }
         '403': { description: Forbidden }
@@ -1227,6 +1246,82 @@ paths:
       responses:
         '200': { description: OK }
         '403': { description: Forbidden }
+
+  /admin/notifications/webhooks:
+    get:
+      summary: List the caller's alert webhooks
+      description: >-
+        Device health alerts (offline / low battery — see lib/device-health.ts)
+        are POSTed hourly to every webhook, one batched message per check, and
+        only on state transitions. The URL itself is never returned (Slack and
+        Discord embed a token in it) — only `url_preview`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        format: { type: string, enum: [json, slack, discord, ntfy] }
+                        label: { type: string, nullable: true }
+                        url_preview: { type: string }
+                        created_at: { type: integer }
+                        last_attempt_at: { type: integer, nullable: true }
+                        last_status: { type: integer, nullable: true, description: 'HTTP status; 0 = network error' }
+                        last_error: { type: string, nullable: true }
+    post:
+      summary: Add an alert webhook (max 5 per account)
+      description: >-
+        `json` bodies are `{type, sent_at, text, alerts: [{kind, device: {mac,
+        label}, last_seen_at, battery_voltage}]}` with `kind` one of offline,
+        back_online, low_battery, battery_ok; signed via `X-Eink-Timestamp` and
+        `X-Eink-Signature: sha256=<hex HMAC-SHA256(signing_secret,
+        timestamp + "." + raw body)>`. `slack`/`discord` send `{text}`/`{content}`,
+        `ntfy` a plain-text body. `signing_secret` is only ever returned here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri, maxLength: 2048, description: 'https only, no embedded credentials' }
+                format: { type: string, enum: [json, slack, discord, ntfy] }
+                label: { type: string, maxLength: 80 }
+              required: [url, format]
+      responses:
+        '201': { description: Created — includes the one-time `signing_secret` }
+        '400': { description: Invalid url/format/label }
+        '409': { description: Webhook limit reached }
+
+  /admin/notifications/webhooks/{id}:
+    delete:
+      summary: Remove an alert webhook
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted }
+        '404': { description: Not found }
+
+  /admin/notifications/webhooks/{id}/test:
+    post:
+      summary: Send a sample alert to one webhook
+      description: Rate-limited to 20 per user per hour.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'Delivered — `{ok, status, error}`' }
+        '404': { description: Not found }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502': { description: 'The webhook endpoint failed or was unreachable — `{ok, status, error}`' }
 
   /admin/crash-reports:
     get:

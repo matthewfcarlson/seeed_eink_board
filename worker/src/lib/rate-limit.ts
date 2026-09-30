@@ -39,6 +39,10 @@ export const RATE_LIMITS = {
    *  of heavy dashboard calls must never be able to lock an account out of
    *  checking its own session or logging in. */
   adminMe: { limit: 300, windowSeconds: 150 },
+  /** "Send test" on an alert webhook — each one is an outbound POST to a URL
+   *  of the caller's choosing, so bound it well below the admin budget.
+   *  Per user, 1-hour window. */
+  webhookTest: { limit: 20, windowSeconds: 3600 },
 } as const;
 
 /** True when the request is within `limit` for this window; false once the

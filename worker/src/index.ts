@@ -14,6 +14,8 @@ import { registerAdminAuthRoutes } from "./routes/admin/auth";
 import { registerAdminSessionRoutes } from "./routes/admin/sessions";
 import { registerAdminFirmwareRoutes, syncLatestFirmwareRelease } from "./routes/admin/firmware";
 import { registerAdminCrashReportRoutes } from "./routes/admin/crash-reports";
+import { registerAdminNotificationRoutes } from "./routes/admin/notifications";
+import { runDeviceHealthCheck } from "./lib/health-check";
 import { registerAuthPasskeyRoutes } from "./routes/auth-passkey";
 import { renderAdminPage } from "./admin-ui";
 import { renderLandingPage } from "./landing-ui";
@@ -49,19 +51,31 @@ registerAdminAuthRoutes(app);
 registerAdminSessionRoutes(app);
 registerAdminFirmwareRoutes(app);
 registerAdminCrashReportRoutes(app);
+registerAdminNotificationRoutes(app);
 
 // Public — passkey registration/login. The only way to create an account.
 registerAuthPasskeyRoutes(app);
 
+// The cron fires hourly (wrangler.toml); firmware sync only needs every 6h.
+const FIRMWARE_SYNC_EVERY_HOURS = 6;
+
 export default {
   fetch: app.fetch,
-  // Auto-catalogs new GitHub releases (D1 + KV) so "Cloudflare picks them up" without
-  // a manual click — but never rolls anything out on its own. Actual device rollout
-  // always requires an explicit /admin/firmware/target write. See routes/admin/firmware.ts.
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    // Auto-catalogs new GitHub releases (D1 + KV) so "Cloudflare picks them up" without
+    // a manual click — but never rolls anything out on its own. Actual device rollout
+    // always requires an explicit /admin/firmware/target write. See routes/admin/firmware.ts.
+    if (new Date(event.scheduledTime).getUTCHours() % FIRMWARE_SYNC_EVERY_HOURS === 0) {
+      ctx.waitUntil(
+        syncLatestFirmwareRelease(env).catch((err) => {
+          console.error("Scheduled firmware sync failed:", err);
+        })
+      );
+    }
+    // Offline / low-battery alerts to owners' webhooks — see lib/health-check.ts.
     ctx.waitUntil(
-      syncLatestFirmwareRelease(env).catch((err) => {
-        console.error("Scheduled firmware sync failed:", err);
+      runDeviceHealthCheck(env).catch((err) => {
+        console.error("Scheduled device health check failed:", err);
       })
     );
   },

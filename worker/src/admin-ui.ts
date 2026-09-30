@@ -105,6 +105,41 @@ export function renderAdminPage(): string {
     </div>
   </div>
 
+  <div class="card">
+    <h2>Alerts</h2>
+    <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. Checked every hour; you get one message when something goes wrong and one when it recovers, never a repeat every hour. Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Format</th><th>Destination</th><th>Last delivery</th><th></th></tr></thead>
+        <tbody id="webhooks-table"></tbody>
+      </table>
+    </div>
+    <div class="inline-form" style="margin-top:14px;">
+      <div class="row">
+        <label for="new-webhook-url">Webhook URL</label>
+        <input type="url" id="new-webhook-url" placeholder="https://ntfy.sh/your-secret-topic" maxlength="2048" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="row">
+        <label for="new-webhook-format">Format</label>
+        <select id="new-webhook-format">
+          <option value="json">JSON (custom)</option>
+          <option value="discord">Discord</option>
+          <option value="slack">Slack</option>
+          <option value="ntfy">ntfy</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="new-webhook-label">Name</label>
+        <input type="text" id="new-webhook-label" placeholder="My phone" maxlength="80">
+      </div>
+      <button id="add-webhook-btn">Add webhook</button>
+    </div>
+    <div id="webhook-secret"></div>
+    <h3 style="margin-top:22px;">Watched frames</h3>
+    <p class="hint hint-block">Untick a frame you've unplugged on purpose so it doesn't alert.</p>
+    <div id="alert-devices-list"></div>
+  </div>
+
   <div class="modal-overlay" id="register-modal-overlay">
     <div class="modal">
       <div class="card-head">
