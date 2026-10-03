@@ -314,9 +314,12 @@ Channel-based (`stable`/`beta`), not admin-picked versions
 currently resolves to nothing. `stable` always resolves to the newest
 cataloged release for that device's board (devices self-report board via
 `X-Device-Board`; `firmware_releases` is keyed by `(board, version)`). No
-channel set = never touched. There's deliberately no shared "default" target
-any account could set for every device — removed as a cross-tenant risk
-(2026-07-13 privacy review).
+channel set = never touched. Claiming a new device (`POST /admin/devices`,
+from `/provision` or the `/admin` QR-claim modal) sets it to `stable` unless
+the owner unticks "Automatically install firmware updates" (`auto_update:
+false`); unregistering clears it. There's deliberately no shared "default"
+target any account could set for every device — removed as a cross-tenant
+risk (2026-07-13 privacy review).
 
 **Flow:** bump `FIRMWARE_VERSION` in `lib/common/version.h` (one version for
 every board) -> commit -> `git tag vX.Y.Z` -> push. CI
@@ -346,6 +349,21 @@ default bootloader-rollback + coredump-to-flash support):
 - Either path (or an unrelated core dump in flash) queues a JSON crash report
   (reset reason, crashing task/PC/backtrace) uploaded to `POST /crash_report`
   once connectivity returns; `/admin`'s Firmware panel lists recent reports.
+- An OTA that fails before rebooting (download HTTP error, stall, SHA-256
+  mismatch, `Update` error) is queued the same way via
+  `OtaHealth::recordOtaFailure()` with an `ota_error` token and sent
+  immediately — deduped on-device per `(target, error)` until the next
+  successful flash, so a broken release retried every wake reports once.
+- **GitHub issues** (`worker/src/lib/github-issues.ts`, ported from
+  `~/git/epaper_clock`'s relay Worker): every stored report is also filed via
+  a GitHub App (`GITHUB_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` secrets;
+  unset = skipped) in `waitUntil`, never delaying the device. Deduped by a
+  `<!-- device-failure-signature: ... -->` marker (kind + board + version +
+  PC/error, nothing device-specific) — an open match gets a comment instead of
+  a new issue; the same device+signature touches GitHub at most once/24h;
+  20 issue actions/hour globally. Plain brownouts (no core dump, no rollback)
+  aren't filed. The repo is public, so issues carry only a hashed MAC, never
+  the MAC or owner.
 - This does **not** catch firmware that boots and syncs fine but is otherwise
   broken (e.g. garbled display) — watch a release's first few devices in
   `/admin` after syncing rather than relying on staged rollout.

@@ -74,6 +74,28 @@ This prints your Worker's URL — note it for provisioning. Optionally set a
 OTA release cataloging; without it you can still sync manually from
 `/admin`'s Firmware panel.
 
+Optionally, have device crashes, OTA rollbacks and OTA download/flash
+failures auto-filed as GitHub issues (they're always shown in `/admin`
+regardless). This uses a GitHub App rather than a PAT — short-lived tokens,
+issues filed as `<app-name>[bot]`:
+
+1. GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**.
+   Untick **Webhook → Active**; **Repository permissions → Issues: Read and
+   write**, nothing else. Create it and note the **App ID**.
+2. **Generate a private key**, then convert it to PKCS#8 (Web Crypto can't
+   read GitHub's PKCS#1 key):
+   `openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in app.private-key.pem -out pkcs8.pem`
+3. **Install App** on this repo only; the trailing number in the resulting
+   `.../installations/<id>` URL is the **Installation ID**.
+4. From `worker/`:
+   ```bash
+   npx wrangler secret put GITHUB_APP_ID
+   npx wrangler secret put GITHUB_APP_INSTALLATION_ID
+   npx wrangler secret put GITHUB_APP_PRIVATE_KEY   # paste pkcs8.pem's contents
+   ```
+   Issues go to `GITHUB_REPO` unless you set a `GITHUB_ISSUES_REPO` var.
+   Optionally `gh label create device-failure --color B60205` for the label.
+
 **2. Create your account** — open your Worker's URL, **Open Admin
 Dashboard** → **Create account**, and follow the passkey prompt. That
 passkey is your account.

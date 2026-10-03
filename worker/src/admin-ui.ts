@@ -120,6 +120,10 @@ export function renderAdminPage(): string {
         <label>Label</label>
         <input type="text" id="new-device-label" placeholder="Kitchen frame" maxlength="80">
       </div>
+      <div class="row checkbox-row" id="new-device-auto-update-row">
+        <input type="checkbox" id="new-device-auto-update" checked>
+        <label for="new-device-auto-update" style="margin-bottom:0;">Automatically install firmware updates</label>
+      </div>
       <button id="register-device-btn">Register device</button>
     </div>
   </div>
@@ -242,7 +246,7 @@ export function renderAdminPage(): string {
       </div>
 
       <h3 style="margin-top:26px;">Crash &amp; rollback reports</h3>
-      <p class="hint hint-block">Filled in automatically when a device panics, watchdog-resets, or an OTA gets rolled back after failing to confirm itself healthy. Backtrace entries are raw program-counter addresses from the on-device core dump &mdash; symbolize them against a matching .elf build for more than the version/reason.</p>
+      <p class="hint hint-block">Filled in automatically when a device panics, watchdog-resets, fails to download/flash an OTA, or an OTA gets rolled back after failing to confirm itself healthy. When the GitHub App is configured, each is also filed (deduped) as a GitHub issue. Backtrace entries are raw program-counter addresses from the on-device core dump &mdash; symbolize them against a matching .elf build for more than the version/reason.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Device</th><th>Version</th><th>Reason</th><th>Rolled back</th><th>Backtrace</th><th>Received</th></tr></thead>

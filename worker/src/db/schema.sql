@@ -7,8 +7,8 @@
 -- 0015_bucket_encryption.sql, 0016_bucket_key_rotation.sql,
 -- 0017_packed_encoding.sql, 0018_public_buckets.sql,
 -- 0019_image_board_variants.sql, 0020_image_content_hash.sql,
--- 0021_rate_limits.sql, 0022_random_rotation.sql, and
--- 0023_user_sessions.sql (wrangler d1 migrations tracks applied state
+-- 0021_rate_limits.sql, 0022_random_rotation.sql,
+-- 0023_user_sessions.sql, and 0024_crash_report_ota_error.sql (wrangler d1 migrations tracks applied state
 -- per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -318,7 +318,10 @@ CREATE TABLE crash_reports (
   crash_cause          INTEGER,
   backtrace            TEXT,    -- JSON array of hex PC strings, or null
   backtrace_corrupted  INTEGER,
-  received_at          INTEGER NOT NULL
+  received_at          INTEGER NOT NULL,
+  -- OTA download/verify/flash failure (see migrations/0024) - null otherwise.
+  ota_target_version   TEXT,
+  ota_error            TEXT
 );
 CREATE INDEX idx_crash_reports_device_mac ON crash_reports(device_mac, received_at DESC);
 

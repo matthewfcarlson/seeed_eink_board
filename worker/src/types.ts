@@ -7,6 +7,14 @@ export interface Env {
   // Optional: raises the unauthenticated GitHub API rate limit (60/hr) and would be
   // required if GITHUB_REPO were ever made private. Set via `wrangler secret put`.
   GITHUB_TOKEN?: string;
+  // Optional GitHub App used to file an issue for each device crash / OTA
+  // failure (see lib/github-issues.ts). All three secrets must be set for
+  // filing to happen; set via `wrangler secret put`.
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_INSTALLATION_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM
+  // "owner/repo" issues are filed against; defaults to GITHUB_REPO.
+  GITHUB_ISSUES_REPO?: string;
 }
 
 /**

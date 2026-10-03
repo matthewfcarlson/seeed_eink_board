@@ -40,6 +40,13 @@ public:
     // what we're attempting so the next boot(s) can tell whether it stuck.
     void recordOtaAttempt(const String& fromVersion, const String& toVersion);
 
+    // Call when an OTA download/verify/flash fails before ever rebooting into the new
+    // image. Queues a report (firmware_version = running version, ota_target_version,
+    // ota_error) unless the exact same (target, error) pair was already queued since the
+    // last successful OTA - a broken release retried every wake is reported once, not
+    // every wake. Never overwrites an already-queued crash/rollback report.
+    void recordOtaFailure(const String& targetVersion, const String& error);
+
     // Call as early as possible in setup(), before anything that could itself crash.
     // Detects a completed rollback (bootloader- or self-triggered), captures crash
     // diagnostics, and forces a rollback if the pending version has failed to confirm
@@ -65,6 +72,7 @@ private:
     uint32_t bootAttempts_ = 0;
     bool hasPendingReport_ = false;
     String pendingReportJson_;
+    String lastOtaFailure_;   // "<target>:<error>" last queued by recordOtaFailure()
 
     void loadFromNVS();
     void savePendingOta();

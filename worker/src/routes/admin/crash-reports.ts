@@ -15,7 +15,7 @@ export function registerAdminCrashReportRoutes(app: Hono<{ Bindings: Env }>) {
     const rows = await c.env.DB.prepare(
       `SELECT cr.id, cr.device_mac, cr.firmware_version, cr.rolled_back, cr.reset_reason,
               cr.boot_attempts, cr.crash_task, cr.crash_pc, cr.crash_cause, cr.backtrace,
-              cr.backtrace_corrupted, cr.received_at
+              cr.backtrace_corrupted, cr.received_at, cr.ota_target_version, cr.ota_error
        FROM crash_reports cr
        JOIN devices d ON d.mac = cr.device_mac
        WHERE d.user_id = ?

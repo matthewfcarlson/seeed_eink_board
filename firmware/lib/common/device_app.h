@@ -507,10 +507,14 @@ inline void addCommonHeaders(HTTPClient& http, const String& path, ConfigManager
 /**
  * Downloads /firmware_bin?version=<version>, verifying its SHA-256 against
  * expectedSha256Hex while streaming — before Update.end() commits to booting it —
- * then flashes it to the inactive OTA partition. Caller reboots on success.
+ * then flashes it to the inactive OTA partition. Caller reboots on success. On
+ * failure, errorOut is set to a short token (e.g. "http_404", "sha256_mismatch")
+ * for OtaHealth::recordOtaFailure() - becomes the report's ota_error and part of
+ * the Worker's GitHub-issue dedup signature, so keep tokens stable.
  */
 inline bool performFirmwareOTA(const String& version, const String& expectedSha256Hex,
-                                ConfigManager& configManager, float batteryVoltage) {
+                                ConfigManager& configManager, float batteryVoltage,
+                                String& errorOut) {
     String url = getBaseURL(configManager) + "/firmware_bin?version=" + version;
     Serial.printf("Firmware update available: %s -> %s\n", FIRMWARE_VERSION, version.c_str());
     Serial.printf("Downloading from: %s\n", url.c_str());
@@ -524,6 +528,7 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
         Serial.printf("Firmware download failed, HTTP code: %d\n", httpCode);
+        errorOut = "http_" + String(httpCode);
         http.end();
         return false;
     }
@@ -531,12 +536,14 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
     int contentLength = http.getSize();
     if (contentLength <= 0) {
         Serial.printf("Invalid firmware content length: %d\n", contentLength);
+        errorOut = "bad_content_length";
         http.end();
         return false;
     }
 
     if (!Update.begin(contentLength, U_FLASH)) {
         Serial.printf("Update.begin() failed: %s\n", Update.errorString());
+        errorOut = "update_begin_" + String(Update.getError());
         http.end();
         return false;
     }
@@ -551,6 +558,7 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
     uint32_t startTime = millis();
     uint32_t lastDataTime = startTime;
     bool writeFailed = false;
+    bool stalled = false;
 
     while (bytesRead < (size_t)contentLength && http.connected()) {
         size_t available = stream->available();
@@ -576,6 +584,7 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
 
         if (millis() - lastDataTime > IMAGE_STALL_TIMEOUT_MS) {
             Serial.printf("Firmware download stalled - no data for %u ms\n", IMAGE_STALL_TIMEOUT_MS);
+            stalled = true;
             break;
         }
     }
@@ -583,6 +592,9 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
 
     if (writeFailed || bytesRead != (size_t)contentLength) {
         Serial.printf("Incomplete/failed firmware download: %d / %d bytes\n", bytesRead, contentLength);
+        errorOut = writeFailed ? "update_write_" + String(Update.getError())
+                 : stalled     ? String("stalled")
+                               : String("disconnected");
         mbedtls_sha256_free(&shaCtx);
         Update.abort();
         return false;
@@ -596,12 +608,14 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
     if (!actualSha256Hex.equalsIgnoreCase(expectedSha256Hex)) {
         Serial.printf("Firmware SHA-256 mismatch! expected=%s actual=%s\n",
                       expectedSha256Hex.c_str(), actualSha256Hex.c_str());
+        errorOut = "sha256_mismatch";
         Update.abort();
         return false;
     }
 
     if (!Update.end(true)) {
         Serial.printf("Update.end() failed: %s\n", Update.errorString());
+        errorOut = "update_end_" + String(Update.getError());
         return false;
     }
 
@@ -612,7 +626,7 @@ inline bool performFirmwareOTA(const String& version, const String& expectedSha2
 /**
  * Uploads whatever crash/rollback report OtaHealth has queued (see ota_health.h) —
  * a boot-time panic/watchdog reset, a bootloader/self-triggered OTA rollback, or
- * both. Only called once WiFi + an authenticated round trip already succeeded this
+ * an OTA download/flash failure. Only called once WiFi + an authenticated round trip already succeeded this
  * wake, so there's nothing new to prove here. Leaves the queued report in place on
  * any failure - NVS storage is cheap and it'll just retry next wake.
  */
@@ -1537,13 +1551,18 @@ NormalModeResult runNormalMode(DisplayT& display, ConfigManager& configManager, 
     // a device-side concept) resolves to a release for THIS board (see
     // syncRemoteConfigAndTime / worker's lib/firmware-target.ts).
     if (run.firmwareTargetVersion.length() > 0 && run.firmwareTargetVersion != FIRMWARE_VERSION) {
-        if (performFirmwareOTA(run.firmwareTargetVersion, run.firmwareTargetSha256, configManager, run.batteryVoltage)) {
+        String otaError;
+        if (performFirmwareOTA(run.firmwareTargetVersion, run.firmwareTargetSha256, configManager, run.batteryVoltage, otaError)) {
             Serial.println("Rebooting into new firmware...");
             otaHealth.recordOtaAttempt(FIRMWARE_VERSION, run.firmwareTargetVersion);
             disconnectWiFi();
             ESP.restart();
         } else {
-            Serial.println("Firmware OTA failed - continuing with current firmware this cycle");
+            Serial.printf("Firmware OTA failed (%s) - continuing with current firmware this cycle\n", otaError.c_str());
+            // Report it now while we're still connected (deduped on-device per
+            // target+error, and server-side into a GitHub issue - see ota_health.h).
+            otaHealth.recordOtaFailure(run.firmwareTargetVersion, otaError);
+            sendCrashReportIfPending(otaHealth, configManager, run.batteryVoltage);
         }
     }
 
