@@ -309,11 +309,27 @@ Worker can't verify it) — a courtesy check, not a security boundary.
 
 ## Device Health Alerts
 
-Owners get told when a frame stops checking in or its battery runs low, via
-webhooks they add in `/admin`'s Alerts card
-(`migrations/0024_device_alerts.sql`, `routes/admin/notifications.ts`).
-Accounts have no email/phone (passkey-only), so a user-supplied URL is the
-first channel that needs no new personal data. Formats: `json` (structured,
+Owners get told when a frame stops checking in or its battery runs low, by
+email and/or webhooks they add in `/admin`'s Alerts card
+(`migrations/0024_device_alerts.sql`, `0025_notification_emails.sql`,
+`routes/admin/notifications.ts`). Web Push was considered and dropped: iOS
+only delivers it to sites added to the Home Screen, too much friction.
+
+**Email** (`lib/email-alerts.ts`, `routes/email-links.ts`): Cloudflare Email
+Service's `send_email` binding (`env.EMAIL`, beta), from `EMAIL_FROM` (must
+be on a domain onboarded for Email Sending), linking back to
+`PUBLIC_BASE_URL` (the cron has no request origin). Missing binding/sender =
+feature reports unavailable, UI hides the form. The first personal contact
+data in the schema, so: addresses start unverified and get nothing but a
+confirmation link (24h, SHA-256-hashed token) until confirmed; the public
+confirm/unsubscribe pages never act on GET (mail scanners pre-fetch links) —
+a button POSTs; every alert carries RFC 8058 one-click `List-Unsubscribe`
+(https only, so local http dev omits it); unsubscribe/removal deletes the
+row outright. Caller-triggered sends (confirm, resend, test) share a tight
+per-user limit. `wrangler dev` simulates the binding — messages are logged
+with paths to their text/html bodies, nothing is sent.
+
+**Webhooks** formats: `json` (structured,
 signed `X-Eink-Signature: sha256=HMAC(signing_secret, "<X-Eink-Timestamp>.<body>")`),
 `slack`, `discord` (mentions disabled), `ntfy`. URLs are https-only and
 treated as secrets (Slack/Discord embed a token): the API only returns a

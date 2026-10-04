@@ -15,6 +15,7 @@ import { registerAdminSessionRoutes } from "./routes/admin/sessions";
 import { registerAdminFirmwareRoutes, syncLatestFirmwareRelease } from "./routes/admin/firmware";
 import { registerAdminCrashReportRoutes } from "./routes/admin/crash-reports";
 import { registerAdminNotificationRoutes } from "./routes/admin/notifications";
+import { registerEmailLinkRoutes } from "./routes/email-links";
 import { runDeviceHealthCheck } from "./lib/health-check";
 import { registerAuthPasskeyRoutes } from "./routes/auth-passkey";
 import { renderAdminPage } from "./admin-ui";
@@ -55,6 +56,8 @@ registerAdminNotificationRoutes(app);
 
 // Public — passkey registration/login. The only way to create an account.
 registerAuthPasskeyRoutes(app);
+// Public — confirm/unsubscribe pages linked from alert emails (token-authenticated).
+registerEmailLinkRoutes(app);
 
 // The cron fires hourly (wrangler.toml); firmware sync only needs every 6h.
 const FIRMWARE_SYNC_EVERY_HOURS = 6;

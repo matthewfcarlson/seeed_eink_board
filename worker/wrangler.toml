@@ -23,6 +23,15 @@ cpu_ms = 30000
 ENVIRONMENT = "development"
 # Source repo for OTA firmware releases — see lib/github-release.ts.
 GITHUB_REPO = "matthewfcarlson/seeed_eink_board"
+# Email alerts (lib/email-alerts.ts): the From address must be on a domain
+# onboarded under Compute > Email Service > Email Sending, and PUBLIC_BASE_URL
+# is the origin the cron's emails link back to (confirm/unsubscribe/admin).
+EMAIL_FROM = "alerts@matthewc.dev"
+PUBLIC_BASE_URL = "https://eink.matthewc.dev"
+
+# Cloudflare Email Service — sends device alert emails (see lib/email-alerts.ts).
+[[send_email]]
+name = "EMAIL"
 
 # Hourly: runs the device health check (offline / low-battery webhook alerts — see
 # lib/health-check.ts), and every 6th hour also catalogs new GitHub firmware
@@ -60,6 +69,12 @@ id = "239dca4bf22e40cd98e0d058b356d145"
 [env.local.vars]
 ENVIRONMENT = "development"
 GITHUB_REPO = "matthewfcarlson/seeed_eink_board"
+EMAIL_FROM = "alerts@example.com"
+PUBLIC_BASE_URL = "http://localhost:8787"
+
+# Simulated locally: wrangler dev logs each email instead of sending it.
+[[env.local.send_email]]
+name = "EMAIL"
 
 [[env.local.d1_databases]]
 binding = "DB"

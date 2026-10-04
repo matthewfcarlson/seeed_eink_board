@@ -2488,6 +2488,98 @@ async function deleteWebhook(id: string) {
 }
 (window as any).deleteWebhook = deleteWebhook;
 
+// ---- Email alerts — see routes/admin/notifications.ts, lib/email-alerts.ts ----
+
+function renderEmailsTable(available: boolean, emails: any[]) {
+  // The add form only makes sense when the server can actually send; existing
+  // rows (e.g. from before email was switched off) stay visible and removable.
+  el("add-email-form").style.display = available ? "" : "none";
+  const tbody = el("emails-table");
+  if (emails.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">' +
+      (available ? "No email addresses yet &mdash; add one below." : "Email alerts aren't configured on this server.") +
+      "</td></tr>";
+    return;
+  }
+  tbody.innerHTML = emails.map((e) => {
+    const status = e.verified_at
+      ? '<span class="pill green">confirmed</span>'
+      : '<span class="pill yellow" title="Confirmation sent ' + escapeHtml(new Date(e.verify_sent_at * 1000).toLocaleString()) + '">check inbox</span>';
+    const delivery = !e.last_attempt_at
+      ? '<span class="hint">never sent</span>'
+      : e.last_error
+      ? '<span class="pill red" title="' + escapeHtml(e.last_error) + '">failed</span> <span class="hint">' + formatRelativeTime(e.last_attempt_at) + "</span>"
+      : '<span class="pill green">ok</span> <span class="hint">' + formatRelativeTime(e.last_attempt_at) + "</span>";
+    const action = e.verified_at
+      ? '<button class="ghost sm" onclick="testEmail(' + jsArg(e.id) + ')">Send test</button> '
+      : '<button class="ghost sm" onclick="resendEmail(' + jsArg(e.id) + ')">Resend</button> ';
+    return "<tr>" +
+      "<td>" + escapeHtml(e.email) + "</td>" +
+      "<td>" + status + "</td>" +
+      "<td>" + delivery + "</td>" +
+      "<td>" + action + '<button class="danger sm" onclick="deleteEmail(' + jsArg(e.id) + ')">Remove</button></td>' +
+      "</tr>";
+  }).join("");
+}
+
+async function loadEmails() {
+  const result = await apiFetch("/admin/notifications/emails");
+  renderEmailsTable(result.available, result.emails);
+}
+
+el("add-email-btn").addEventListener("click", async () => {
+  const email = el<HTMLInputElement>("new-email-address").value.trim();
+  if (!email.includes("@")) {
+    showMessage("app-message", "Enter an email address.", "error");
+    return;
+  }
+  try {
+    await apiFetch("/admin/notifications/emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    el<HTMLInputElement>("new-email-address").value = "";
+    showMessage("app-message", "Confirmation email sent to " + email + ". Click the link in it to start getting alerts.", "success");
+    await loadEmails();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to add email: " + err.message, "error");
+  }
+});
+
+async function resendEmail(id: string) {
+  try {
+    await apiFetch("/admin/notifications/emails/" + encodeURIComponent(id) + "/resend", { method: "POST" });
+    showMessage("app-message", "Confirmation email sent again.", "success");
+  } catch (err: any) {
+    showMessage("app-message", "Couldn't resend: " + err.message, "error");
+  }
+  await loadEmails().catch(() => {});
+}
+(window as any).resendEmail = resendEmail;
+
+async function testEmail(id: string) {
+  try {
+    await apiFetch("/admin/notifications/emails/" + encodeURIComponent(id) + "/test", { method: "POST" });
+    showMessage("app-message", "Test alert email sent.", "success");
+  } catch (err: any) {
+    showMessage("app-message", "Test email failed: " + err.message, "error");
+  }
+  await loadEmails().catch(() => {});
+}
+(window as any).testEmail = testEmail;
+
+async function deleteEmail(id: string) {
+  if (!confirm("Remove this email address? It will stop receiving alerts.")) return;
+  try {
+    await apiFetch("/admin/notifications/emails/" + encodeURIComponent(id), { method: "DELETE" });
+    await loadEmails();
+  } catch (err: any) {
+    showMessage("app-message", "Failed to remove email: " + err.message, "error");
+  }
+}
+(window as any).deleteEmail = deleteEmail;
+
 async function setDeviceAlertsMuted(mac: string, muted: boolean) {
   try {
     await apiFetch("/admin/devices/" + encodeURIComponent(mac), {
@@ -2516,6 +2608,7 @@ async function renderApp() {
   devicesCache = devices;
   renderAlertDevicesList(devices);
   loadWebhooks().catch((err) => showMessage("app-message", "Failed to load webhooks: " + err.message, "error"));
+  loadEmails().catch((err) => showMessage("app-message", "Failed to load email alerts: " + err.message, "error"));
   allBucketsCache = bucketsResult.buckets;
   // Needs devicesCache/allBucketsCache populated (openBucketModal reads both) —
   // unlike renderClaimBanner/renderJoinBucketBanner above, which don't.

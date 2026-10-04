@@ -43,6 +43,12 @@ export const RATE_LIMITS = {
    *  of the caller's choosing, so bound it well below the admin budget.
    *  Per user, 1-hour window. */
   webhookTest: { limit: 20, windowSeconds: 3600 },
+  /** Outbound email the caller triggers (confirmation emails, resends,
+   *  test alerts) — each one lands in a possibly-unverified inbox of the
+   *  caller's choosing, so keep it tight. Per user, 1-hour window. */
+  emailSend: { limit: 10, windowSeconds: 3600 },
+  /** Public confirm/unsubscribe link pages. Per IP, 5-min window. */
+  emailLink: { limit: 30, windowSeconds: 300 },
 } as const;
 
 /** True when the request is within `limit` for this window; false once the

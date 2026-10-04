@@ -353,3 +353,22 @@ CREATE TABLE notification_webhooks (
   last_error      TEXT
 );
 CREATE INDEX idx_notification_webhooks_user ON notification_webhooks(user_id);
+
+-- Email alert recipients (see migrations/0025_notification_emails.sql,
+-- lib/email-alerts.ts). Only verified rows receive alerts; deleted outright on
+-- removal/unsubscribe.
+CREATE TABLE notification_emails (
+  id                TEXT PRIMARY KEY,
+  user_id           TEXT NOT NULL REFERENCES users(id),
+  email             TEXT NOT NULL,       -- trimmed + lowercased
+  verified_at       INTEGER,             -- NULL until the confirmation link is used
+  verify_token_hash TEXT,                -- SHA-256 hex of the one-time confirmation token
+  verify_sent_at    INTEGER,
+  unsubscribe_token TEXT NOT NULL UNIQUE,
+  created_at        INTEGER NOT NULL,
+  last_attempt_at   INTEGER,
+  last_error        TEXT,
+  UNIQUE (user_id, email)
+);
+CREATE INDEX idx_notification_emails_user ON notification_emails(user_id);
+CREATE INDEX idx_notification_emails_verify ON notification_emails(verify_token_hash);

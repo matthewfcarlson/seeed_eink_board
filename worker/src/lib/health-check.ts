@@ -2,6 +2,7 @@ import type { Env } from "../types";
 import { evaluateDeviceHealth, planDeviceAlerts, type DeviceAlert } from "./device-health";
 import { kvKeys } from "./kv-keys";
 import { deliverWebhook, type WebhookRow } from "./notify";
+import { deliverAlertEmail, emailAlertsAvailable, publicBaseUrl, type EmailRecipientRow } from "./email-alerts";
 
 interface DeviceRow {
   mac: string;
@@ -15,8 +16,8 @@ interface DeviceRow {
 
 /**
  * Hourly (index.ts's scheduled()): evaluate every registered, un-muted device,
- * persist alert-state transitions, then POST one batched message per owner to
- * each of their webhooks.
+ * persist alert-state transitions, then send one batched message per owner to
+ * each of their webhooks and verified email addresses.
  *
  * D1's offline_alerted_at is the source of truth for "the owner knows it's
  * offline" (and so owes a recovery message). "Still offline" follow-ups are
@@ -85,19 +86,37 @@ export async function runDeviceHealthCheck(env: Env, now = Math.floor(Date.now()
   await Promise.all(kvOps);
 
   const userIds = [...alertsByUser.keys()];
+  const placeholders = userIds.map(() => "?").join(",");
   const hooks = await env.DB.prepare(
-    `SELECT id, user_id, url, format, signing_secret FROM notification_webhooks
-     WHERE user_id IN (${userIds.map(() => "?").join(",")})`
+    `SELECT id, user_id, url, format, signing_secret FROM notification_webhooks WHERE user_id IN (${placeholders})`
   )
     .bind(...userIds)
     .all<WebhookRow & { user_id: string }>();
 
-  const results = await Promise.allSettled(
-    hooks.results.map((hook) => deliverWebhook(env, hook, alertsByUser.get(hook.user_id)!, now))
-  );
-  const failed = results.filter((r) => r.status === "rejected" || !r.value.ok).length;
+  // Email needs the binding and an origin for its links; without either,
+  // skip it (logged) rather than fail webhook delivery too.
+  const baseUrl = publicBaseUrl(env);
+  const emailReady = emailAlertsAvailable(env) && baseUrl !== null;
+  if (emailAlertsAvailable(env) && !baseUrl) console.error("Email alerts skipped: PUBLIC_BASE_URL is not set");
+  const emails = emailReady
+    ? await env.DB.prepare(
+        `SELECT id, user_id, email, unsubscribe_token FROM notification_emails
+         WHERE verified_at IS NOT NULL AND user_id IN (${placeholders})`
+      )
+        .bind(...userIds)
+        .all<EmailRecipientRow & { user_id: string }>()
+    : { results: [] as (EmailRecipientRow & { user_id: string })[] };
+
+  const results = await Promise.allSettled([
+    ...hooks.results.map(async (hook) => (await deliverWebhook(env, hook, alertsByUser.get(hook.user_id)!, now)).ok),
+    ...emails.results.map(
+      async (r) => (await deliverAlertEmail(env, r, alertsByUser.get(r.user_id)!, now, baseUrl!)) === null
+    ),
+  ]);
+  const failed = results.filter((r) => r.status === "rejected" || !r.value).length;
   const alertCount = [...alertsByUser.values()].reduce((n, list) => n + list.length, 0);
   console.log(
-    `Device health check: ${alertCount} alert(s) for ${alertsByUser.size} owner(s), ${hooks.results.length} webhook(s), ${failed} failed`
+    `Device health check: ${alertCount} alert(s) for ${alertsByUser.size} owner(s), ` +
+      `${hooks.results.length} webhook(s) + ${emails.results.length} email(s), ${failed} failed`
   );
 }

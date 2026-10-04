@@ -107,7 +107,28 @@ export function renderAdminPage(): string {
 
   <div class="card">
     <h2>Alerts</h2>
-    <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. A frame counts as offline after 24 hours without checking in. You get one message when something goes wrong and one when it recovers; a frame that stays offline gets a reminder every week for its first month, then about monthly. Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
+    <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. A frame counts as offline after 24 hours without checking in. You get one message when something goes wrong and one when it recovers; a frame that stays offline gets a reminder every week for its first month, then about monthly.</p>
+
+    <h3 style="margin-top:18px;">Email</h3>
+    <div id="email-alerts-section">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Address</th><th>Status</th><th>Last delivery</th><th></th></tr></thead>
+          <tbody id="emails-table"></tbody>
+        </table>
+      </div>
+      <div class="inline-form" style="margin-top:14px;" id="add-email-form">
+        <div class="row">
+          <label for="new-email-address">Email address</label>
+          <input type="email" id="new-email-address" placeholder="you@example.com" maxlength="254" autocomplete="email" spellcheck="false">
+        </div>
+        <button id="add-email-btn">Add email</button>
+        <span class="hint">We'll send a confirmation link first.</span>
+      </div>
+    </div>
+
+    <h3 style="margin-top:26px;">Webhooks</h3>
+    <p class="hint hint-block">Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Format</th><th>Destination</th><th>Last delivery</th><th></th></tr></thead>
