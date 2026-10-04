@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { DEFAULT_BOARD_ID, isValidBoardId, type Env } from "../../types";
 import { normalizeMac } from "../../lib/mac";
 import { invalidateDeviceCache } from "../../lib/auth-device";
+import { invalidateFirmwareTargetCache, setFirmwareChannel } from "../../lib/firmware-target";
 import { getRotationSnapshot, invalidateRotationCache } from "../../lib/rotation";
 import { getThumbnailCiphertextB64 } from "../../lib/image-store";
 import { requireAdmin } from "../../lib/admin-middleware";
@@ -59,9 +60,12 @@ async function buildCurrentImage(env: Env, deviceKey: string, deviceBoard: strin
 export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
   app.post("/admin/devices", requireAdmin, async (c) => {
     const body = await c.req
-      .json<{ mac?: string; label?: string; secret?: string; sharing_public_key?: string }>()
+      .json<{ mac?: string; label?: string; secret?: string; sharing_public_key?: string; auto_update?: boolean }>()
       .catch(() => ({}) as never);
     if (!body.mac) return c.json({ error: "mac is required" }, 400);
+    if (body.auto_update !== undefined && typeof body.auto_update !== "boolean") {
+      return c.json({ error: "auto_update must be a boolean" }, 400);
+    }
     if (body.secret !== undefined && !SECRET_PATTERN.test(body.secret)) {
       return c.json({ error: "secret must be a hex string" }, 400);
     }
@@ -131,7 +135,19 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       .run();
 
     await invalidateDeviceCache(c.env, mac);
-    return c.json({ mac, label }, 201);
+
+    // A newly claimed device is opted into 'stable' OTA by default (the
+    // provisioning page's "Automatically install firmware updates" box);
+    // auto_update: false opts out. Always written on a new claim — even the
+    // opt-out — so a firmware_targets row left behind by a previous owner
+    // can't carry over. For a device this user already owns, only touched
+    // when auto_update is explicitly sent (e.g. a label-only edit leaves
+    // whatever channel /admin's Firmware panel has set alone).
+    const autoUpdate = body.auto_update ?? (existing ? undefined : true);
+    if (autoUpdate !== undefined) {
+      await setFirmwareChannel(c.env, mac, autoUpdate ? "stable" : null);
+    }
+    return c.json({ mac, label, firmware_channel: autoUpdate === undefined ? undefined : autoUpdate ? "stable" : null }, 201);
   });
 
   app.get("/admin/devices", requireAdmin, async (c) => {
@@ -309,9 +325,11 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     await c.env.DB.batch([
       c.env.DB.prepare("DELETE FROM device_buckets WHERE device_mac = ?").bind(mac),
       c.env.DB.prepare("DELETE FROM bucket_keys WHERE principal_type = 'device' AND principal_id = ?").bind(mac),
+      c.env.DB.prepare("DELETE FROM firmware_targets WHERE target = ?").bind(mac),
       c.env.DB.prepare("DELETE FROM devices WHERE mac = ?").bind(mac),
     ]);
     await invalidateDeviceCache(c.env, mac);
+    await invalidateFirmwareTargetCache(c.env, mac);
     return c.json({ deleted: mac });
   });
 }

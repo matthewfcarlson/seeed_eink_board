@@ -311,7 +311,7 @@ Worker can't verify it) — a courtesy check, not a security boundary.
 
 Owners get told when a frame stops checking in or its battery runs low, by
 email and/or webhooks they add in `/admin`'s Alerts card
-(`migrations/0024_device_alerts.sql`, `0025_notification_emails.sql`,
+(`migrations/0025_device_alerts.sql`, `0026_notification_emails.sql`,
 `routes/admin/notifications.ts`). Web Push was considered and dropped: iOS
 only delivers it to sites added to the Home Screen, too much friction.
 
@@ -351,7 +351,7 @@ fire on transitions only — `devices.offline_alerted_at`/
 message and one recovery message, batched per owner. While a device stays
 offline, `still_offline` reminders go out weekly for its first 30 days
 offline, then about monthly, forever until it recovers or is muted, paced by
-`devices.next_reminder_at` (`0026_offline_reminder_schedule.sql`; NULL on an
+`devices.next_reminder_at` (`0027_offline_reminder_schedule.sql`; NULL on an
 alerted device = due, cleared on recovery). State is written before delivery
 regardless of outcome: a broken webhook shows `last_error` in `/admin` rather
 than retrying every hour, at the cost of a failed alert never being retried.
@@ -383,9 +383,12 @@ Channel-based (`stable`/`beta`), not admin-picked versions
 currently resolves to nothing. `stable` always resolves to the newest
 cataloged release for that device's board (devices self-report board via
 `X-Device-Board`; `firmware_releases` is keyed by `(board, version)`). No
-channel set = never touched. There's deliberately no shared "default" target
-any account could set for every device — removed as a cross-tenant risk
-(2026-07-13 privacy review).
+channel set = never touched. Claiming a new device (`POST /admin/devices`,
+from `/provision` or the `/admin` QR-claim modal) sets it to `stable` unless
+the owner unticks "Automatically install firmware updates" (`auto_update:
+false`); unregistering clears it. There's deliberately no shared "default"
+target any account could set for every device — removed as a cross-tenant
+risk (2026-07-13 privacy review).
 
 **Flow:** bump `FIRMWARE_VERSION` in `lib/common/version.h` (one version for
 every board) -> commit -> `git tag vX.Y.Z` -> push. CI
@@ -415,6 +418,21 @@ default bootloader-rollback + coredump-to-flash support):
 - Either path (or an unrelated core dump in flash) queues a JSON crash report
   (reset reason, crashing task/PC/backtrace) uploaded to `POST /crash_report`
   once connectivity returns; `/admin`'s Firmware panel lists recent reports.
+- An OTA that fails before rebooting (download HTTP error, stall, SHA-256
+  mismatch, `Update` error) is queued the same way via
+  `OtaHealth::recordOtaFailure()` with an `ota_error` token and sent
+  immediately — deduped on-device per `(target, error)` until the next
+  successful flash, so a broken release retried every wake reports once.
+- **GitHub issues** (`worker/src/lib/github-issues.ts`, ported from
+  `~/git/epaper_clock`'s relay Worker): every stored report is also filed via
+  a GitHub App (`GITHUB_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` secrets;
+  unset = skipped) in `waitUntil`, never delaying the device. Deduped by a
+  `<!-- device-failure-signature: ... -->` marker (kind + board + version +
+  PC/error, nothing device-specific) — an open match gets a comment instead of
+  a new issue; the same device+signature touches GitHub at most once/24h;
+  20 issue actions/hour globally. Plain brownouts (no core dump, no rollback)
+  aren't filed. The repo is public, so issues carry only a hashed MAC, never
+  the MAC or owner.
 - This does **not** catch firmware that boots and syncs fine but is otherwise
   broken (e.g. garbled display) — watch a release's first few devices in
   `/admin` after syncing rather than relying on staged rollout.

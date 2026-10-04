@@ -33,6 +33,8 @@ export function renderProvisionPage(): string {
   .brand-link { text-decoration: none; color: inherit; }
   #login-status { font-size: 0.88em; }
   #login-status a { color: inherit; font-weight: 700; }
+  details.advanced { margin: 4px 0 16px; }
+  details.advanced summary { cursor: pointer; color: var(--ink-soft); font-weight: 700; margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -75,6 +77,11 @@ export function renderProvisionPage(): string {
       <label>Label</label>
       <input type="text" id="register-label" placeholder="Kitchen frame" maxlength="80">
     </div>
+    <div class="row checkbox-row">
+      <input type="checkbox" id="register-auto-update" checked>
+      <label for="register-auto-update" style="margin-bottom:0;">Automatically install firmware updates</label>
+    </div>
+    <p class="hint">Installs each new stable release on the device's next wake. You can change this later in the Firmware panel on <a href="/admin">/admin</a>.</p>
     <button id="register-btn">Register device</button>
   </div>
 </div>
@@ -94,22 +101,26 @@ export function renderProvisionPage(): string {
     <input type="password" id="wifi-password" placeholder="Leave blank to keep the current password">
   </div>
 
-  <div class="row">
-    <label>Server Host</label>
-    <input type="text" id="host" placeholder="e.g. eink.example.com">
-  </div>
-  <div class="row">
-    <label>Server Port</label>
-    <input type="number" id="port" min="1" max="65535">
-  </div>
-  <div class="row checkbox-row">
-    <input type="checkbox" id="use_https">
-    <label for="use_https" style="margin-bottom:0;">Use HTTPS</label>
-  </div>
-  <div class="row">
-    <label>Image Endpoint</label>
-    <input type="text" id="endpoint" placeholder="/image_packed">
-  </div>
+  <details class="advanced" id="advanced-settings">
+    <summary>Advanced: server settings</summary>
+    <p class="hint hint-block">Only change these if you run your own server. They're filled in from the device's current settings.</p>
+    <div class="row">
+      <label>Server Host</label>
+      <input type="text" id="host" placeholder="e.g. eink.example.com">
+    </div>
+    <div class="row">
+      <label>Server Port</label>
+      <input type="number" id="port" min="1" max="65535">
+    </div>
+    <div class="row checkbox-row">
+      <input type="checkbox" id="use_https">
+      <label for="use_https" style="margin-bottom:0;">Use HTTPS</label>
+    </div>
+    <div class="row">
+      <label>Image Endpoint</label>
+      <input type="text" id="endpoint" placeholder="/image_packed">
+    </div>
+  </details>
   <div class="row">
     <label>Refresh Interval (minutes)</label>
     <input type="number" id="sleep_minutes" min="1" max="1440">

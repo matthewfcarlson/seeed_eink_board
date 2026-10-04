@@ -16,6 +16,14 @@ export interface Env {
   // Origin used for links in emails sent from the cron (which has no request
   // to take an origin from), e.g. "https://eink.example.com".
   PUBLIC_BASE_URL?: string;
+  // Optional GitHub App used to file an issue for each device crash / OTA
+  // failure (see lib/github-issues.ts). All three secrets must be set for
+  // filing to happen; set via `wrangler secret put`.
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_INSTALLATION_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM
+  // "owner/repo" issues are filed against; defaults to GITHUB_REPO.
+  GITHUB_ISSUES_REPO?: string;
 }
 
 /**

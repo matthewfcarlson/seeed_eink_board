@@ -3,7 +3,7 @@ import type { DeviceAlert } from "./device-health";
 
 /**
  * Owner-registered webhook delivery for device health alerts (see
- * migrations/0024_device_alerts.sql). One POST per webhook per check, listing
+ * migrations/0025_device_alerts.sql). One POST per webhook per check, listing
  * every alert for that owner's devices — never one message per device.
  */
 

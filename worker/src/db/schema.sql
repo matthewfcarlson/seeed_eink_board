@@ -7,8 +7,8 @@
 -- 0015_bucket_encryption.sql, 0016_bucket_key_rotation.sql,
 -- 0017_packed_encoding.sql, 0018_public_buckets.sql,
 -- 0019_image_board_variants.sql, 0020_image_content_hash.sql,
--- 0021_rate_limits.sql, 0022_random_rotation.sql, and
--- 0023_user_sessions.sql (wrangler d1 migrations tracks applied state
+-- 0021_rate_limits.sql, 0022_random_rotation.sql,
+-- 0023_user_sessions.sql, and 0024_crash_report_ota_error.sql (wrangler d1 migrations tracks applied state
 -- per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -56,13 +56,13 @@ CREATE TABLE devices (
   -- Worker at provisioning/claim time — see migrations/0015. Independent of
   -- `board`; the matching private key never leaves the device's NVS.
   sharing_public_key          TEXT,
-  -- Device health alert state (migrations/0024_device_alerts.sql): epoch the
+  -- Device health alert state (migrations/0025_device_alerts.sql): epoch the
   -- offline/low-battery alert fired, NULL once recovered. alerts_muted skips
   -- this device in the hourly check entirely. See lib/device-health.ts.
   offline_alerted_at          INTEGER,
   low_battery_alerted_at      INTEGER,
   alerts_muted                INTEGER NOT NULL DEFAULT 0,
-  -- When the next "still offline" reminder is due (migrations/0026); NULL
+  -- When the next "still offline" reminder is due (migrations/0027); NULL
   -- on an alerted device counts as due, cleared on recovery.
   next_reminder_at            INTEGER
 );
@@ -327,7 +327,10 @@ CREATE TABLE crash_reports (
   crash_cause          INTEGER,
   backtrace            TEXT,    -- JSON array of hex PC strings, or null
   backtrace_corrupted  INTEGER,
-  received_at          INTEGER NOT NULL
+  received_at          INTEGER NOT NULL,
+  -- OTA download/verify/flash failure (see migrations/0024) - null otherwise.
+  ota_target_version   TEXT,
+  ota_error            TEXT
 );
 CREATE INDEX idx_crash_reports_device_mac ON crash_reports(device_mac, received_at DESC);
 
@@ -340,7 +343,7 @@ CREATE TABLE rate_limits (
   count INTEGER NOT NULL
 );
 
--- Owner-registered alert destinations (see migrations/0024_device_alerts.sql,
+-- Owner-registered alert destinations (see migrations/0025_device_alerts.sql,
 -- lib/notify.ts). `url` is a secret (Slack/Discord embed a token in it) — the
 -- admin API only returns a masked preview.
 CREATE TABLE notification_webhooks (
@@ -357,7 +360,7 @@ CREATE TABLE notification_webhooks (
 );
 CREATE INDEX idx_notification_webhooks_user ON notification_webhooks(user_id);
 
--- Email alert recipients (see migrations/0025_notification_emails.sql,
+-- Email alert recipients (see migrations/0026_notification_emails.sql,
 -- lib/email-alerts.ts). Only verified rows receive alerts; deleted outright on
 -- removal/unsubscribe.
 CREATE TABLE notification_emails (

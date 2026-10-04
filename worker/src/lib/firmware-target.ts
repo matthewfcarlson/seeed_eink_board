@@ -64,3 +64,20 @@ export async function resolveFirmwareTarget(env: Env, deviceKey: string, board: 
   if (channel !== "stable") return null; // 'beta' and unset both resolve to nothing for now
   return resolveLatestRelease(env, board);
 }
+
+/** Set (or, with null, clear) `target`'s OTA channel and drop its cached
+ *  value. Used by device claim (routes/admin/devices.ts), which opts a newly
+ *  registered device into 'stable' unless the caller asked otherwise. */
+export async function setFirmwareChannel(env: Env, target: string, channel: FirmwareChannel | null): Promise<void> {
+  if (channel) {
+    await env.DB.prepare(
+      `INSERT INTO firmware_targets (target, channel, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(target) DO UPDATE SET channel = excluded.channel, updated_at = excluded.updated_at`
+    )
+      .bind(target, channel, Math.floor(Date.now() / 1000))
+      .run();
+  } else {
+    await env.DB.prepare("DELETE FROM firmware_targets WHERE target = ?").bind(target).run();
+  }
+  await invalidateFirmwareTargetCache(env, target);
+}

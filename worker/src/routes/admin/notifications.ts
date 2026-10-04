@@ -37,7 +37,7 @@ function sampleAlerts(now: number): DeviceAlert[] {
 export const MAX_WEBHOOK_LABEL = 80;
 
 /**
- * Owner-managed alert webhooks (see migrations/0024_device_alerts.sql). The
+ * Owner-managed alert webhooks (see migrations/0025_device_alerts.sql). The
  * URL itself is write-only from the API's point of view — list responses
  * carry a masked preview, since Slack/Discord URLs embed their own token.
  * signing_secret is returned exactly once, from the create call.
@@ -121,7 +121,7 @@ export function registerAdminNotificationRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json(result, result.ok ? 200 : 502);
   });
 
-  // ---- Email (migrations/0025_notification_emails.sql) ----
+  // ---- Email (migrations/0026_notification_emails.sql) ----
   // Addresses are added unverified and get exactly one kind of email — the
   // confirmation link — until the recipient confirms on the public page
   // (routes/email-links.ts). Every caller-triggered send shares the tight

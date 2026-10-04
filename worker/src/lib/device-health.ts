@@ -1,5 +1,5 @@
 /**
- * Device health detection for owner alerts (see migrations/0024_device_alerts.sql).
+ * Device health detection for owner alerts (see migrations/0025_device_alerts.sql).
  * Pure functions only — lib/health-check.ts (run hourly from index.ts's
  * scheduled()) does the D1 reads and writes, and lib/notify.ts does delivery.
  */
@@ -17,7 +17,7 @@ export const OFFLINE_AFTER_SECONDS = 24 * 3600;
 
 /**
  * Follow-up pacing while a device stays offline (devices.next_reminder_at —
- * see migrations/0026_offline_reminder_schedule.sql): weekly for its first
+ * see migrations/0027_offline_reminder_schedule.sql): weekly for its first
  * month offline, then roughly monthly, until it recovers or is muted.
  */
 export const WEEKLY_REMINDER_SECONDS = 7 * 86400;

@@ -547,6 +547,13 @@ paths:
                     Hex device secret, required when claiming a MAC this
                     account doesn't already own. From the registration QR code
                     or BLE provisioning's INFO characteristic.
+                auto_update:
+                  type: boolean
+                  description: >-
+                    Opt this device into the 'stable' OTA channel (true) or
+                    clear its channel (false). Defaults to true on a new
+                    claim; for a device this account already owns, the
+                    channel is only changed when this is sent explicitly.
               required: [mac]
       responses:
         '201':
@@ -572,7 +579,7 @@ paths:
                   type: boolean
                   description: >-
                     true skips this device in the hourly offline/low-battery
-                    check (e.g. unplugged on purpose). See migrations/0024_device_alerts.sql.
+                    check (e.g. unplugged on purpose). See migrations/0025_device_alerts.sql.
       responses:
         '200': { description: OK }
         '403': { description: Forbidden }
@@ -1594,16 +1601,20 @@ paths:
 
   /crash_report:
     post:
-      summary: "[Device-facing] Report a crash and/or OTA rollback"
+      summary: "[Device-facing] Report a crash, OTA rollback, or OTA download/flash failure"
       description: >-
         Called by firmware/lib/common/ota_health.cpp + device_app.h's
         sendCrashReportIfPending(), at most once per boot, only after a device
         has already proven connectivity via /device_config this wake. Same
         auth as /device_config. An unclaimed device (unresolved X-Device-MAC)
         still gets a 200 so it stops retrying, but nothing is persisted.
+        When the optional GitHub App secrets are configured, each stored
+        report is also filed in the background as a deduped GitHub issue
+        (worker/src/lib/github-issues.ts) — never delays the response.
       security: []
       parameters:
         - $ref: '#/components/parameters/XDeviceMac'
+        - $ref: '#/components/parameters/XDeviceBoard'
         - name: X-Device-Nonce
           in: header
           schema: { type: string }
@@ -1626,6 +1637,12 @@ paths:
                 crash_cause: { type: integer }
                 backtrace: { type: array, items: { type: string } }
                 backtrace_corrupted: { type: boolean }
+                ota_target_version:
+                  type: string
+                  description: Version an OTA download/flash failed for (firmware_version is then the running version).
+                ota_error:
+                  type: string
+                  description: Short failure token, e.g. http_404, sha256_mismatch, stalled.
               required: [firmware_version, reset_reason]
       responses:
         '201': { description: Stored }

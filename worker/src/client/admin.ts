@@ -650,6 +650,10 @@ el("register-device-btn").addEventListener("click", async () => {
     // field after scanning (or types one in by hand).
     if (pendingClaimSecret && mac === new URLSearchParams(location.search).get("claim")) {
       body.secret = pendingClaimSecret;
+      // Only on a real first claim — a label-only edit of an already-owned
+      // device leaves its Firmware-panel channel alone (the server does too
+      // when auto_update is omitted).
+      body.auto_update = el<HTMLInputElement>("new-device-auto-update").checked;
     }
     await apiFetch("/admin/devices", {
       method: "POST",
@@ -2276,7 +2280,9 @@ function renderCrashReportsTable(reports: any[]) {
           "<tr>" +
           "<td><code>" + escapeHtml(r.device_mac) + "</code></td>" +
           "<td><code>" + escapeHtml(r.firmware_version) + "</code></td>" +
-          "<td>" + escapeHtml(r.reset_reason) + (r.crash_task ? " (" + escapeHtml(r.crash_task) + ")" : "") + "</td>" +
+          "<td>" + (r.ota_error
+            ? "OTA to <code>" + escapeHtml(r.ota_target_version || "?") + "</code> failed: " + escapeHtml(r.ota_error)
+            : escapeHtml(r.reset_reason) + (r.crash_task ? " (" + escapeHtml(r.crash_task) + ")" : "")) + "</td>" +
           "<td>" + (r.rolled_back ? "yes (" + r.boot_attempts + " attempts)" : "no") + "</td>" +
           "<td><code style=\"font-size:11px; word-break:break-all;\">" + escapeHtml(backtrace) + "</code></td>" +
           "<td>" + new Date(r.received_at * 1000).toLocaleString() + "</td>" +

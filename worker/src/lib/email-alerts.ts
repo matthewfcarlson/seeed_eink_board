@@ -3,7 +3,7 @@ import type { DeviceAlert } from "./device-health";
 import { alertsText } from "./notify";
 
 /**
- * Email delivery for device health alerts (migrations/0025_notification_emails.sql),
+ * Email delivery for device health alerts (migrations/0026_notification_emails.sql),
  * via Cloudflare Email Service's `send_email` binding (env.EMAIL). Optional:
  * with no binding or no EMAIL_FROM configured, the feature reports itself
  * unavailable and the admin UI hides the add form.

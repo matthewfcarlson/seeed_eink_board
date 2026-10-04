@@ -10,6 +10,7 @@ static const char* KEY_PEND_VER = "pend_ver";
 static const char* KEY_PREV_VER = "prev_ver";
 static const char* KEY_ATTEMPTS = "attempts";
 static const char* KEY_REPORT = "report";
+static const char* KEY_OTA_FAIL = "ota_fail";
 
 static const char* resetReasonToString(esp_reset_reason_t reason) {
     switch (reason) {
@@ -51,6 +52,7 @@ void OtaHealth::loadFromNVS() {
     bootAttempts_ = prefs_.getUInt(KEY_ATTEMPTS, 0);
     pendingReportJson_ = prefs_.getString(KEY_REPORT, "");
     hasPendingReport_ = pendingReportJson_.length() > 0;
+    lastOtaFailure_ = prefs_.getString(KEY_OTA_FAIL, "");
     prefs_.end();
 }
 
@@ -87,6 +89,42 @@ void OtaHealth::recordOtaAttempt(const String& fromVersion, const String& toVers
     previousVersion_ = fromVersion;
     bootAttempts_ = 0;
     savePendingOta();
+    // A fresh successful flash starts a new failure episode - a later failure of the
+    // same (target, error) pair is news again.
+    if (lastOtaFailure_.length() > 0) {
+        lastOtaFailure_ = "";
+        prefs_.begin(NVS_NAMESPACE, false);
+        prefs_.remove(KEY_OTA_FAIL);
+        prefs_.end();
+    }
+}
+
+void OtaHealth::recordOtaFailure(const String& targetVersion, const String& error) {
+    String signature = targetVersion + ":" + error;
+    if (signature == lastOtaFailure_) return;
+    if (hasPendingReport_) {
+        // A crash/rollback report is still waiting to upload; keep it (it carries a
+        // core dump this can't reproduce). The OTA is retried next wake, which will
+        // record this failure again once the queue is clear.
+        Serial.println("OtaHealth: OTA failure not queued - another report is still pending");
+        return;
+    }
+
+    JsonDocument doc;
+    doc["firmware_version"] = FIRMWARE_VERSION;
+    doc["rolled_back"] = false;
+    doc["boot_attempts"] = 0;
+    doc["reset_reason"] = resetReasonToString(esp_reset_reason());
+    doc["ota_target_version"] = targetVersion;
+    doc["ota_error"] = error;
+
+    String json;
+    serializeJson(doc, json);
+    lastOtaFailure_ = signature;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putString(KEY_OTA_FAIL, signature);
+    prefs_.end();
+    saveReport(json);
 }
 
 void OtaHealth::buildAndQueueReport(bool rolledBack, const String& failedVersion) {

@@ -1,4 +1,4 @@
--- Email as a device-alert channel, alongside 0024's webhooks. Sent via
+-- Email as a device-alert channel, alongside 0025's webhooks. Sent via
 -- Cloudflare Email Service's `send_email` binding (see lib/email-alerts.ts).
 --
 -- This is the first column in the schema holding a user's personal contact

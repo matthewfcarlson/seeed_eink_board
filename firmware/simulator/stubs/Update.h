@@ -17,5 +17,6 @@ struct UpdateClass {
     bool   end(bool = false)                                  { return false; }
     void   abort()                                            {}
     const char *errorString()                                 { return "sim: firmware update not supported"; }
+    uint8_t getError()                                        { return 0; }
 };
 inline UpdateClass Update;

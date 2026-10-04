@@ -138,10 +138,16 @@ function applyInfo(info: any) {
   wifiSelect.disabled = !!simOrigin;
   scanBtn.disabled = !!simOrigin;
   wifiSsidInput.value = simOrigin ? "simulator" : (info.wifi_ssid || "");
-  el<HTMLInputElement>("host").value = info.host || "";
-  el<HTMLInputElement>("port").value = info.port || "";
-  el<HTMLInputElement>("use_https").checked = !!info.use_https;
-  el<HTMLInputElement>("endpoint").value = info.endpoint || "";
+  // Server fields live in a collapsed "Advanced" section. The device normally
+  // reports its compiled-in defaults, but if it reports none, fall back to
+  // this page's own origin — the Worker serving /provision is the server the
+  // device should talk to — so hidden fields are never silently blank.
+  const pageIsHttps = window.location.protocol === "https:";
+  const pagePort = window.location.port ? Number(window.location.port) : pageIsHttps ? 443 : 80;
+  el<HTMLInputElement>("host").value = info.host || window.location.hostname;
+  el<HTMLInputElement>("port").value = info.port || String(pagePort);
+  el<HTMLInputElement>("use_https").checked = info.host ? !!info.use_https : pageIsHttps;
+  el<HTMLInputElement>("endpoint").value = info.endpoint || "/image_packed";
   el<HTMLInputElement>("sleep_minutes").value = info.sleep_minutes || "";
   el<HTMLInputElement>("active_start_hour").value = info.active_start_hour ?? "";
   el<HTMLInputElement>("active_end_hour").value = info.active_end_hour ?? "";
@@ -298,7 +304,7 @@ el("register-btn").addEventListener("click", async () => {
   if (!key || !currentDeviceMac) return;
   const label = el<HTMLInputElement>("register-label").value.trim();
   try {
-    const body: any = { mac: currentDeviceMac, label };
+    const body: any = { mac: currentDeviceMac, label, auto_update: el<HTMLInputElement>("register-auto-update").checked };
     // Only present pre-claim (see applyInfo) — omitted entirely once a device
     // is already registered, same as the manual "Claim device" modal on /admin.
     if (currentDeviceSecret) body.secret = currentDeviceSecret;
@@ -343,6 +349,13 @@ el("scan-btn").addEventListener("click", async () => {
   }
 });
 
+/** Validation errors for fields inside the collapsed "Advanced" section —
+ *  expand it so the offending field is actually visible. */
+function showAdvancedError(text: string) {
+  el<HTMLDetailsElement>("advanced-settings").open = true;
+  showMessage(text, "error");
+}
+
 el("save-btn").addEventListener("click", async () => {
   // Client-side mirror of the device's own bounds (config_manager.h's
   // MAX_HOST_LENGTH/MAX_ENDPOINT_LENGTH and its setConfig() range checks):
@@ -386,15 +399,15 @@ el("save-btn").addEventListener("click", async () => {
     return;
   }
   if (!host || host.length > 127) {
-    showMessage("Server host is required and must be at most 127 characters.", "error");
+    showAdvancedError("Server host is required and must be at most 127 characters.");
     return;
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    showMessage("Port must be a whole number between 1 and 65535.", "error");
+    showAdvancedError("Port must be a whole number between 1 and 65535.");
     return;
   }
   if (!endpoint || endpoint.length > 63) {
-    showMessage("Image path is required and must be at most 63 characters (e.g. /image_packed).", "error");
+    showAdvancedError("Image path is required and must be at most 63 characters (e.g. /image_packed).");
     return;
   }
   if (!Number.isInteger(sleepMinutes) || sleepMinutes < 1 || sleepMinutes > 1440) {
