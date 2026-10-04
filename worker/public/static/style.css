@@ -308,6 +308,32 @@ tbody tr:hover { background: var(--surface-2); }
 .message.error { background: var(--red-tint); color: var(--red-dark); }
 .message.info { background: var(--blue-tint); color: var(--blue-dark); }
 
+/* Locked-browser / recovery-code nudge banners (admin.ts's renderLockedBanner,
+   renderRecoveryNudge): a headline sentence, a row of actions, and an
+   optional collapsed "Details" for the technical reason. */
+.locked-banner { font-weight: 500; }
+.locked-banner strong { font-weight: 700; }
+.locked-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.locked-banner details { margin-top: 10px; font-size: 0.92em; }
+.locked-banner details summary { cursor: pointer; font-weight: 700; }
+.locked-banner details p { margin: 6px 0 0; }
+
+/* The recovery code itself: big, monospace, selectable in one tap. */
+.recovery-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.05em;
+  letter-spacing: 0.04em;
+  /* Wrap only at the group dashes, never inside a four-character group. */
+  word-break: normal;
+  overflow-wrap: normal;
+  user-select: all;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
 /* ---------- tabs ---------- */
 
 .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }

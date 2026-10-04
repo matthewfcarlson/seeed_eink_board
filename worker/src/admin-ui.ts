@@ -87,6 +87,8 @@ export function renderAdminPage(): string {
   </div>
 
   <div id="app-message"></div>
+  <div id="locked-banner"></div>
+  <div id="recovery-banner"></div>
   <div id="claim-banner"></div>
   <div id="join-bucket-banner"></div>
   <div id="assign-bucket-banner"></div>
@@ -265,6 +267,19 @@ export function renderAdminPage(): string {
   <div class="card">
     <h3>Account</h3>
     <button class="ghost" id="edit-name-btn">Edit name</button>
+    <h3 style="margin-top:26px;">Recovery code</h3>
+    <p class="hint hint-block" id="recovery-status"></p>
+    <button class="ghost" id="recovery-create-btn">Create recovery code</button>
+  </div>
+
+  <div class="modal-overlay" id="recovery-modal-overlay">
+    <div class="modal">
+      <div class="card-head">
+        <h3 id="recovery-modal-title">Recovery code</h3>
+        <button class="icon-btn" id="recovery-modal-close-btn" aria-label="Close">&#10005;</button>
+      </div>
+      <div id="recovery-modal-body"></div>
+    </div>
   </div>
 </div>
 

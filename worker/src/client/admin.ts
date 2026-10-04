@@ -13,16 +13,21 @@ import {
   aesGcmEncryptBlob,
   aesGcmEncryptToStrings,
   deriveKekFromPrf,
+  deriveKekFromRecoveryCode,
   exportAesKeyRaw,
   exportPrivateKeyPkcs8,
   exportPublicKeyRaw,
   fromBase64,
+  formatRecoveryCode,
   fromBase64Url,
   generateBucketKey,
   generateP256KeyPair,
+  generateRecoveryCodeBytes,
   importAesKeyRaw,
   computeContentHash,
   importPrivateKeyPkcs8,
+  parseRecoveryCode,
+  publicKeyRawFromPrivateKey,
   toBase64,
   toBase64Url,
   unwrapKeyWith,
@@ -35,6 +40,7 @@ import { BOARD_IDS, DEFAULT_BOARD_ID, type DitherAlgorithm } from "../lib/media-
 import { compressPackedForUpload } from "./compress";
 import { makeThumbnailJpeg } from "./thumbnail";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
+import { computeSharingKeyProof, type SharingKeyProofPurpose } from "../lib/sharing-key-proof";
 
 const KEY_STORAGE = "eink_admin_api_key";
 const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
@@ -57,6 +63,10 @@ let bucketModalMac: string | null = null;
 // local key was ever established.
 let sharingPrivateKey: CryptoKey | null = null;
 let sharingPublicKeyRaw: Uint8Array | null = null;
+// Why the last passkey attempt couldn't unlock this browser (a
+// SharingKeyLockedError's message), shown under "Details" in the locked
+// banner — null when there's no failed attempt to explain yet.
+let sharingKeyLockedDetail: string | null = null;
 // bucketId -> that bucket's unwrapped AES-256-GCM content key, populated by
 // renderApp() from each bucket's caller-specific WrappedKey.
 const bucketAesKeys = new Map<string, CryptoKey>();
@@ -311,7 +321,7 @@ class SharingKeyLockedError extends Error {}
 async function completeLoginSharingKey(
   credential: any,
   loginResult: any
-): Promise<Partial<{ sharing_public_key: string; wrapped_sharing_key: string; wrap_nonce: string }>> {
+): Promise<Partial<{ sharing_public_key: string; wrapped_sharing_key: string; wrap_nonce: string; repair: boolean }>> {
   const prfOutput = readPrfOutput(credential);
 
   // Set when this ceremony DID produce PRF output but it didn't open this
@@ -368,6 +378,18 @@ async function completeLoginSharingKey(
       // from any browser would "successfully" recover a mismatched key.
       return {};
     }
+    if (prfOutput && prfUnwrapFailed) {
+      // This browser holds the account's real key, but the wrap on file
+      // doesn't open with the PRF output this passkey returns now — seen
+      // with iCloud Keychain, whose create()-time PRF result (what the wrap
+      // was made from at signup) differs from its get()-time result. Every
+      // other browser on this passkey would be locked out, so replace the
+      // wrap with one made from this get()'s output. Needs a possession
+      // proof server-side (see repairCredentialWrap) since it overwrites.
+      const kek = await deriveKekFromPrf(prfOutput);
+      const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, local.privateKeyPkcs8);
+      return { sharing_public_key: toBase64(local.publicKeyRaw), wrapped_sharing_key: ciphertext, wrap_nonce: nonce, repair: true };
+    }
     if (prfOutput && !loginResult.wrapped_sharing_key) {
       // First time this credential has produced PRF output — backfill the
       // server with our existing local key instead of generating a new one.
@@ -396,19 +418,15 @@ async function completeLoginSharingKey(
     // produced no PRF result at all (cross-device QR/hybrid auth and some
     // platform authenticators commonly don't), or it did but that output
     // couldn't open the wrap on file. Different causes, different advice.
-    const reason = prfUnwrapFailed
-      ? "the passkey returned a PRF result, but it didn't unlock the key stored for this passkey"
-      : "the passkey didn't return a PRF result";
-    const hint = prfUnwrapFailed
-      ? "If this keeps happening, note which browser/authenticator you're using — the stored wrap may need to be recreated from a browser that can unlock it."
-      : "Common cause: signing in via the QR/one-time-code cross-device flow instead of this device's own passkey. " +
-        "Platform passkeys also sometimes return PRF on a second attempt.";
-    throw new SharingKeyLockedError(
-      `Logged in, but this browser can't unlock your account's encrypted buckets: ${reason}, ` +
-      "and this browser has no locally cached key. You can still use everything except viewing/deleting existing images. " +
-      "To unlock: log in from the browser where the account was set up (or any browser that has logged in before). " +
-      hint
-    );
+    //
+    // The message is the "Details" text under the locked banner (see
+    // renderLockedBanner), not the headline — keep it technical but short.
+    const detail = prfUnwrapFailed
+      ? "Your passkey returned a PRF result, but it didn't open the key stored for this passkey. " +
+        "Logging in once with your passkey from a browser that's already unlocked repairs this automatically."
+      : "Your passkey didn't return a PRF result (common when signing in with a QR code from another device). " +
+        "Trying again with this device's own passkey sometimes works.";
+    throw new SharingKeyLockedError(detail);
   }
 
   // No server key and no local key either — a genuinely brand new identity
@@ -452,6 +470,28 @@ el("passkey-signup-btn").addEventListener("click", async () => {
   }
 });
 
+type SharingKeyWrapFields = { sharing_public_key: string; wrapped_sharing_key: string; wrap_nonce: string };
+
+/** Proves to the Worker that this browser holds the account's sharing private
+ *  key (lib/sharing-key-proof.ts) — required by the endpoints that overwrite
+ *  a wrap, so a session token alone can't. */
+async function proveSharingKeyPossession(purpose: SharingKeyProofPurpose): Promise<{ challenge_id: string; proof: string }> {
+  if (!sharingPrivateKey) throw new Error("This browser isn't unlocked");
+  const challenge = await apiFetch("/admin/me/sharing-key/challenge", { method: "POST" });
+  const proof = await computeSharingKeyProof(sharingPrivateKey, fromBase64(challenge.server_public_key), challenge.challenge_id, purpose);
+  return { challenge_id: challenge.challenge_id, proof: toBase64(proof) };
+}
+
+async function repairCredentialWrap(credentialId: string, fields: SharingKeyWrapFields): Promise<void> {
+  const proof = await proveSharingKeyPossession("repair-credential-wrap");
+  await apiFetch("/admin/me/sharing-key/repair", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credential_id: credentialId, ...fields, ...proof }),
+  });
+  console.info("Repaired this passkey's stored sharing-key wrap — other browsers using this passkey can now unlock.");
+}
+
 // The actual WebAuthn login ceremony, shared by the pre-login "Log in with
 // passkey" button and unlockSharingKey() below — the latter runs it again
 // for an already-logged-in-via-cached-API-key session that never got a
@@ -467,8 +507,15 @@ async function performPasskeyLoginCeremony(): Promise<void> {
   const credential: any = await navigator.credentials.get({ publicKey: requestOptions });
   const loginResult = await publicFetch("/auth/login/verify", { attemptId, response: credential.toJSON() });
   setSessionToken(loginResult.session_token);
-  const backfillFields = await completeLoginSharingKey(credential, loginResult);
-  if (Object.keys(backfillFields).length > 0) {
+  sharingKeyLockedDetail = null;
+  const { repair, ...backfillFields } = await completeLoginSharingKey(credential, loginResult);
+  if (repair) {
+    // Best-effort like the backfill below: if it fails, this browser is
+    // still unlocked from its local cache and the next login retries.
+    repairCredentialWrap(credential.id, backfillFields as SharingKeyWrapFields).catch((err) =>
+      console.warn("Couldn't repair this passkey's stored sharing-key wrap:", err)
+    );
+  } else if (Object.keys(backfillFields).length > 0) {
     // Separate authenticated call, not another /auth/login/verify — that
     // ceremony's challenge is single-use and was already consumed by the
     // call above. Best-effort: a failure here just means we try again next
@@ -491,9 +538,10 @@ el("passkey-login-btn").addEventListener("click", async () => {
     await tryLogin(true);
   } catch (err: any) {
     if (err instanceof SharingKeyLockedError) {
-      // The session token is already set — enter the app with buckets locked,
-      // and show why after renderApp() (which clears app-message on entry).
-      if (await tryLogin(true)) showMessage("app-message", err.message, "error");
+      // The session token is already set — enter the app with buckets locked.
+      // renderApp() shows the locked banner, with this as its details.
+      sharingKeyLockedDetail = err.message;
+      await tryLogin(true);
       return;
     }
     showMessage("login-message", "Failed to log in: " + err.message, "error");
@@ -515,10 +563,233 @@ async function unlockSharingKey() {
     await performPasskeyLoginCeremony();
     await renderApp();
   } catch (err: any) {
-    showMessage("app-message", (err instanceof SharingKeyLockedError ? "" : "Failed to unlock: ") + err.message, "error");
+    sharingKeyLockedDetail = err instanceof SharingKeyLockedError ? err.message : "Passkey sign-in failed: " + err.message;
+    renderLockedBanner();
   }
 }
 (window as any).unlockSharingKey = unlockSharingKey;
+
+/** The "this browser isn't unlocked yet" banner: shown when the account has
+ *  encrypted buckets but this session has no sharing key. A plain reload
+ *  only resumes the cached API key (see tryLogin) — it can't recover a
+ *  PRF-backed sharing key on its own, so unlocking needs either an actual
+ *  passkey ceremony or the account's recovery code. Built as raw HTML (not
+ *  showMessage, which escapes) since its buttons need to stay clickable;
+ *  the only interpolated text is escaped. */
+function renderLockedBanner() {
+  const banner = el("locked-banner");
+  if (sharingPrivateKey || !allBucketsCache.some((b) => b.key)) {
+    banner.innerHTML = "";
+    return;
+  }
+  const detail = sharingKeyLockedDetail ??
+    "Your photos are encrypted in your browser before upload, and each browser needs to unlock your key once. " +
+    "A plain page reload can't do that on its own.";
+  banner.innerHTML =
+    '<div class="message info locked-banner">' +
+    "<strong>This browser isn't unlocked yet.</strong> " +
+    "Your photos are end-to-end encrypted, so you'll need to unlock them here before you can view or delete them." +
+    '<div class="locked-actions">' +
+    '<button class="sm" onclick="unlockSharingKey()">Unlock with passkey</button>' +
+    '<button class="sm subtle" onclick="openRecoveryUnlockModal()">Use recovery code</button>' +
+    "</div>" +
+    "<details><summary>Details</summary><p>" + escapeHtml(detail) + "</p></details>" +
+    "</div>";
+}
+
+function recoveryNudgeDismissKey(): string {
+  return "eink_recovery_nudge_dismissed:" + (currentUser?.id ?? "");
+}
+
+/** Nudges an unlocked account with no recovery code to make one — the only
+ *  moment one CAN be made, since the code wraps the private key this browser
+ *  holds. Dismissal is per-browser (localStorage); the Account card keeps
+ *  the button either way. */
+function renderRecoveryNudge() {
+  renderRecoveryStatus();
+  const banner = el("recovery-banner");
+  let dismissed = false;
+  try {
+    dismissed = localStorage.getItem(recoveryNudgeDismissKey()) === "1";
+  } catch {}
+  if (!sharingPrivateKey || !currentUser || currentUser.has_recovery_code || !currentUser.sharing_public_key || dismissed) {
+    banner.innerHTML = "";
+    return;
+  }
+  banner.innerHTML =
+    '<div class="message info locked-banner">' +
+    "<strong>Create a recovery code.</strong> " +
+    "If your passkey can't unlock your photos on another device, a recovery code can." +
+    '<div class="locked-actions">' +
+    '<button class="sm" onclick="openRecoveryCreateModal()">Create recovery code</button>' +
+    '<button class="sm ghost" onclick="dismissRecoveryNudge()">Not now</button>' +
+    "</div></div>";
+}
+
+function dismissRecoveryNudge() {
+  try {
+    localStorage.setItem(recoveryNudgeDismissKey(), "1");
+  } catch {}
+  el("recovery-banner").innerHTML = "";
+}
+(window as any).dismissRecoveryNudge = dismissRecoveryNudge;
+
+/** The Account card's recovery-code line + button. */
+function renderRecoveryStatus() {
+  const status = el("recovery-status");
+  const btn = el<HTMLButtonElement>("recovery-create-btn");
+  if (!currentUser) return;
+  btn.textContent = currentUser.has_recovery_code ? "Replace recovery code" : "Create recovery code";
+  btn.disabled = !sharingPrivateKey;
+  status.textContent = !sharingPrivateKey
+    ? "Unlock this browser first to create or replace a recovery code."
+    : currentUser.has_recovery_code
+      ? "A recovery code is set up. Replacing it makes the old one stop working."
+      : "No recovery code yet. It lets you unlock your photos on a device where your passkey can't.";
+}
+
+let pendingRecoveryCodeBytes: Uint8Array | null = null;
+
+function closeRecoveryModal() {
+  pendingRecoveryCodeBytes = null;
+  el("recovery-modal-overlay").classList.remove("open");
+  el("recovery-modal-body").innerHTML = "";
+}
+el("recovery-modal-close-btn").addEventListener("click", closeRecoveryModal);
+
+/** Generates a code and shows it, but only uploads its wrap once the user
+ *  confirms they saved it — so backing out never replaces a working code. */
+function openRecoveryCreateModal() {
+  if (!sharingPrivateKey) {
+    showMessage("app-message", "Unlock this browser first to create a recovery code.", "error");
+    return;
+  }
+  pendingRecoveryCodeBytes = generateRecoveryCodeBytes();
+  const code = formatRecoveryCode(pendingRecoveryCodeBytes);
+  el("recovery-modal-title").textContent = currentUser?.has_recovery_code ? "Replace recovery code" : "Your recovery code";
+  el("recovery-modal-body").innerHTML =
+    '<p class="hint hint-block">Save this somewhere safe, like a password manager. Anyone with this code and access to your account can see your photos. ' +
+    "We can't show it again or recover it for you.</p>" +
+    (currentUser?.has_recovery_code ? '<p class="hint hint-block">Saving this replaces your current recovery code, which will stop working.</p>' : "") +
+    '<div class="recovery-code" id="recovery-code-text">' + escapeHtml(code) + "</div>" +
+    '<button class="subtle sm" id="recovery-copy-btn">Copy</button>' +
+    '<div class="row checkbox-row" style="margin-top:14px;">' +
+    '<input type="checkbox" id="recovery-saved-checkbox"><label for="recovery-saved-checkbox">I\'ve saved this code somewhere safe</label></div>' +
+    '<div id="recovery-modal-message"></div>' +
+    '<div class="inline-form" style="margin-top:16px;">' +
+    '<button id="recovery-save-btn" disabled>Save recovery code</button>' +
+    '<button class="ghost" id="recovery-cancel-btn">Cancel</button></div>';
+  el("recovery-copy-btn").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      el("recovery-copy-btn").textContent = "Copied";
+    } catch {
+      // Clipboard can be blocked (permissions, non-secure context) — fall
+      // back to selecting the text so a manual copy is one keystroke.
+      const range = document.createRange();
+      range.selectNodeContents(el("recovery-code-text"));
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+  });
+  el<HTMLInputElement>("recovery-saved-checkbox").addEventListener("change", (e) => {
+    el<HTMLButtonElement>("recovery-save-btn").disabled = !(e.target as HTMLInputElement).checked;
+  });
+  el("recovery-cancel-btn").addEventListener("click", closeRecoveryModal);
+  el("recovery-save-btn").addEventListener("click", saveRecoveryCode);
+  el("recovery-modal-overlay").classList.add("open");
+}
+(window as any).openRecoveryCreateModal = openRecoveryCreateModal;
+el("recovery-create-btn").addEventListener("click", openRecoveryCreateModal);
+
+async function saveRecoveryCode() {
+  if (!pendingRecoveryCodeBytes || !sharingPrivateKey) return;
+  const btn = el<HTMLButtonElement>("recovery-save-btn");
+  btn.disabled = true;
+  try {
+    const kek = await deriveKekFromRecoveryCode(pendingRecoveryCodeBytes);
+    const { nonce, ciphertext } = await aesGcmEncryptToStrings(kek, await exportPrivateKeyPkcs8(sharingPrivateKey));
+    const proof = await proveSharingKeyPossession("set-recovery-wrap");
+    await apiFetch("/admin/me/recovery-wrap", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wrapped_sharing_key: ciphertext, wrap_nonce: nonce, ...proof }),
+    });
+    currentUser.has_recovery_code = true;
+    closeRecoveryModal();
+    renderRecoveryNudge();
+    showMessage("app-message", "Recovery code saved.", "success");
+  } catch (err: any) {
+    btn.disabled = false;
+    const message = err.status === 403
+      ? "This browser's key doesn't match your account's, so it can't set a recovery code. Try from the browser where you created your account."
+      : "Couldn't save the recovery code: " + err.message;
+    showMessage("recovery-modal-message", message, "error");
+  }
+}
+
+function openRecoveryUnlockModal() {
+  el("recovery-modal-title").textContent = "Unlock with recovery code";
+  el("recovery-modal-body").innerHTML =
+    '<p class="hint hint-block">Paste the recovery code you saved (it starts with RC1-).</p>' +
+    '<input type="text" id="recovery-code-input" placeholder="RC1-XXXX-XXXX-…" autocomplete="off" autocapitalize="characters" spellcheck="false">' +
+    '<div id="recovery-modal-message" style="margin-top:12px;"></div>' +
+    '<div class="inline-form" style="margin-top:16px;">' +
+    '<button id="recovery-unlock-btn">Unlock</button>' +
+    '<button class="ghost" id="recovery-cancel-btn">Cancel</button></div>';
+  el("recovery-cancel-btn").addEventListener("click", closeRecoveryModal);
+  el("recovery-unlock-btn").addEventListener("click", unlockWithRecoveryCode);
+  el<HTMLInputElement>("recovery-code-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") unlockWithRecoveryCode();
+  });
+  el("recovery-modal-overlay").classList.add("open");
+  el<HTMLInputElement>("recovery-code-input").focus();
+}
+(window as any).openRecoveryUnlockModal = openRecoveryUnlockModal;
+
+async function unlockWithRecoveryCode() {
+  const codeBytes = parseRecoveryCode(el<HTMLInputElement>("recovery-code-input").value);
+  if (!codeBytes) {
+    showMessage("recovery-modal-message", "That doesn't look like a recovery code. It should be RC1- followed by 32 letters and numbers.", "error");
+    return;
+  }
+  const btn = el<HTMLButtonElement>("recovery-unlock-btn");
+  btn.disabled = true;
+  try {
+    let wrap: any;
+    try {
+      wrap = await apiFetch("/admin/me/recovery-wrap");
+    } catch (err: any) {
+      if (err.status === 404) throw new Error("This account doesn't have a recovery code set up yet.");
+      throw err;
+    }
+    let privateKeyPkcs8: Uint8Array;
+    try {
+      privateKeyPkcs8 = await aesGcmDecryptFromStrings(await deriveKekFromRecoveryCode(codeBytes), wrap.wrap_nonce, wrap.wrapped_sharing_key);
+    } catch {
+      throw new Error("That recovery code doesn't match this account. Check for typos, or use your newest code if you've replaced it.");
+    }
+    const privateKey = await importPrivateKeyPkcs8(privateKeyPkcs8);
+    const publicKeyRaw = await publicKeyRawFromPrivateKey(privateKey);
+    if (currentUser?.sharing_public_key && toBase64(publicKeyRaw) !== currentUser.sharing_public_key) {
+      throw new Error("That recovery code unlocked a key that isn't this account's current key — it may be from before a reset.");
+    }
+    sharingPrivateKey = privateKey;
+    sharingPublicKeyRaw = publicKeyRaw;
+    sharingKeyLockedDetail = null;
+    // Cache it like every other recovery path (see completeLoginSharingKey),
+    // so reloads stay unlocked — and so the next passkey login here can
+    // repair this passkey's PRF wrap from it if that's what was broken.
+    await localKeystoreSet({ publicKeyRaw, privateKeyPkcs8 });
+    closeRecoveryModal();
+    await renderApp();
+    showMessage("app-message", "Unlocked with your recovery code.", "success");
+  } catch (err: any) {
+    btn.disabled = false;
+    showMessage("recovery-modal-message", err.message, "error");
+  }
+}
 
 function renderWhoami() {
   el("whoami").textContent = currentUser.display_name
@@ -2426,18 +2697,9 @@ async function renderApp() {
         console.error(`Failed to unwrap bucket ${b.id}'s key with the current session key:`, err);
       }
     }));
-  } else if (allBucketsCache.some((b) => b.key)) {
-    // A plain reload only resumes the cached API key (see tryLogin) — it
-    // can't recover a PRF-backed sharing key on its own, so this needs an
-    // actual passkey ceremony rather than just a login/reload retry. Build
-    // the button directly (not via showMessage, which escapes its text)
-    // since it needs to stay clickable.
-    el("app-message").innerHTML =
-      '<div class="message error">' +
-      "Encrypted bucket contents are locked. " +
-      '<button class="sm" onclick="unlockSharingKey()">Unlock with passkey</button>' +
-      "</div>";
   }
+  renderLockedBanner();
+  renderRecoveryNudge();
 
   // Old object URLs point at Blobs from the previous render — revoke before
   // repopulating so repeated renderApp() calls (every action re-renders)

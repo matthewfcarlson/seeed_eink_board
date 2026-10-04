@@ -162,6 +162,15 @@ export async function registerTestAccount(baseUrl: string): Promise<{ apiKey: st
  *  the sign counter increments per assertion since
  *  verifyAuthenticationResponse rejects a non-increasing one. */
 export async function loginTestSession(baseUrl: string, credentialIdB64: string): Promise<string> {
+  return (await loginTestSessionWithWrap(baseUrl, credentialIdB64)).session_token;
+}
+
+/** Same ceremony as loginTestSession, but returns the whole /auth/login/verify
+ *  body — including whatever sharing-key wrap is on file for the credential. */
+export async function loginTestSessionWithWrap(
+  baseUrl: string,
+  credentialIdB64: string
+): Promise<{ session_token: string; sharing_public_key: string | null; wrapped_sharing_key: string | null; wrap_nonce: string | null }> {
   const cred = virtualCredentials.get(credentialIdB64);
   if (!cred) throw new Error(`loginTestSession: credential ${credentialIdB64} was never registered here`);
 
@@ -212,6 +221,10 @@ export async function loginTestSession(baseUrl: string, credentialIdB64: string)
   if (!verifyRes.ok) {
     throw new Error(`POST /auth/login/verify failed: ${verifyRes.status} ${await verifyRes.text()}`);
   }
-  const { session_token: sessionToken } = (await verifyRes.json()) as { session_token: string };
-  return sessionToken;
+  return verifyRes.json() as Promise<{
+    session_token: string;
+    sharing_public_key: string | null;
+    wrapped_sharing_key: string | null;
+    wrap_nonce: string | null;
+  }>;
 }

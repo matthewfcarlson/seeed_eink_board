@@ -20,6 +20,7 @@
 export const HKDF_INFO_BUCKET_WRAP = "eink-bucket-wrap-v1";
 export const HKDF_INFO_SHARING_KEY_WRAP = "eink-sharing-key-wrap-v1";
 export const HKDF_INFO_CONTENT_HASH = "eink-content-hash-v1";
+export const HKDF_INFO_RECOVERY_WRAP = "eink-recovery-wrap-v1";
 
 const ECDH_PARAMS: EcKeyImportParams & EcKeyGenParams = { name: "ECDH", namedCurve: "P-256" };
 const AES_GCM_KEY_LEN = 256;
@@ -82,6 +83,21 @@ export async function exportPrivateKeyPkcs8(privateKey: CryptoKey): Promise<Uint
 
 export async function importPrivateKeyPkcs8(pkcs8: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey("pkcs8", new Uint8Array(pkcs8), ECDH_PARAMS, true, ["deriveBits"]);
+}
+
+/** Raw uncompressed public point (0x04 || x || y) of a P-256 private key,
+ *  recomputed from the key itself (its JWK carries x/y) rather than taken on
+ *  the server's word — used to confirm a key recovered from a wrap is really
+ *  the account's registered identity. */
+export async function publicKeyRawFromPrivateKey(privateKey: CryptoKey): Promise<Uint8Array> {
+  const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+  const x = fromBase64Url(jwk.x!);
+  const y = fromBase64Url(jwk.y!);
+  const raw = new Uint8Array(1 + x.length + y.length);
+  raw[0] = 0x04;
+  raw.set(x, 1);
+  raw.set(y, 1 + x.length);
+  return raw;
 }
 
 /** HKDF-SHA256(sharedSecret, info) -> AES-256-GCM key. `salt` is deliberately
@@ -229,4 +245,68 @@ export async function aesGcmDecryptFromStrings(key: CryptoKey, nonce: string, ci
  *  responsible for wrapping/unwrapping per-credential, not per-user. */
 export async function deriveKekFromPrf(prfOutput: ArrayBuffer): Promise<CryptoKey> {
   return hkdfDeriveAesKey(prfOutput, HKDF_INFO_SHARING_KEY_WRAP);
+}
+
+// --- Recovery codes (migrations/0025_recovery_code.sql) --------------------
+//
+// 20 random bytes (160 bits) shown as 32 Crockford base32 characters in
+// groups of four behind an "RC1-" version tag. Full-entropy random, so a
+// plain HKDF is enough — no password-hashing work factor to tune, and
+// nothing to brute-force even with the ciphertext in hand.
+
+const RECOVERY_CODE_BYTES = 20;
+const RECOVERY_CODE_PREFIX = "RC1";
+const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+export function generateRecoveryCodeBytes(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(RECOVERY_CODE_BYTES));
+}
+
+export function formatRecoveryCode(bytes: Uint8Array): string {
+  let bits = 0;
+  let value = 0;
+  let chars = "";
+  for (const byte of bytes) {
+    value = ((value << 8) | byte) & 0xfff; // never more than 12 live bits
+    bits += 8;
+    while (bits >= 5) {
+      chars += CROCKFORD_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  // 160 bits is an exact multiple of 5, so there's never a partial group left.
+  const groups = chars.match(/.{4}/g) ?? [];
+  return [RECOVERY_CODE_PREFIX, ...groups].join("-");
+}
+
+/** Lenient parse of a pasted/typed code: case, spaces, and dashes don't
+ *  matter, the "RC1" tag is optional, and Crockford's look-alikes (O->0,
+ *  I/L->1) are folded. Returns null for anything that isn't exactly 160 bits. */
+export function parseRecoveryCode(input: string): Uint8Array | null {
+  let chars = input.toUpperCase().replace(/[\s-]/g, "").replace(/O/g, "0").replace(/[IL]/g, "1");
+  const expectedLen = (RECOVERY_CODE_BYTES * 8) / 5;
+  if (chars.length === expectedLen + RECOVERY_CODE_PREFIX.length && chars.startsWith(RECOVERY_CODE_PREFIX)) {
+    chars = chars.slice(RECOVERY_CODE_PREFIX.length);
+  }
+  if (chars.length !== expectedLen) return null;
+  const out = new Uint8Array(RECOVERY_CODE_BYTES);
+  let bits = 0;
+  let value = 0;
+  let i = 0;
+  for (const ch of chars) {
+    const idx = CROCKFORD_ALPHABET.indexOf(ch);
+    if (idx < 0) return null;
+    value = ((value << 5) | idx) & 0xffff;
+    bits += 5;
+    if (bits >= 8) {
+      out[i++] = (value >>> (bits - 8)) & 0xff;
+      bits -= 8;
+    }
+  }
+  return out;
+}
+
+/** KEK that wraps the sharing private key for users.recovery_wrapped_sharing_key. */
+export async function deriveKekFromRecoveryCode(codeBytes: Uint8Array): Promise<CryptoKey> {
+  return hkdfDeriveAesKey(new Uint8Array(codeBytes).buffer, HKDF_INFO_RECOVERY_WRAP);
 }
