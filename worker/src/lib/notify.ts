@@ -200,9 +200,8 @@ export interface DeliveryResult {
   error: string | null;
 }
 
-/** Sends one webhook and records the outcome on its row. Never throws. */
-export async function deliverWebhook(
-  env: Env,
+/** Sends one webhook without recording anything. Never throws. */
+export async function sendWebhook(
   hook: WebhookRow,
   alerts: DeviceAlert[],
   now: number,
@@ -223,11 +222,27 @@ export async function deliverWebhook(
   } catch (err) {
     result = { ok: false, status: 0, error: String((err as Error)?.message ?? err).slice(0, MAX_ERROR_LENGTH) };
   }
+  return result;
+}
 
-  await env.DB.prepare(
+/** The statement recording a delivery outcome on the webhook's row — the
+ *  cron batches these into one D1 call instead of a query per delivery. */
+export function webhookResultStatement(env: Env, hookId: string, now: number, result: DeliveryResult): D1PreparedStatement {
+  return env.DB.prepare(
     "UPDATE notification_webhooks SET last_attempt_at = ?, last_status = ?, last_error = ? WHERE id = ?"
-  )
-    .bind(now, result.status, result.error, hook.id)
+  ).bind(now, result.status, result.error, hookId);
+}
+
+/** Sends one webhook and records the outcome on its row. Never throws. */
+export async function deliverWebhook(
+  env: Env,
+  hook: WebhookRow,
+  alerts: DeviceAlert[],
+  now: number,
+  opts: { test?: boolean } = {}
+): Promise<DeliveryResult> {
+  const result = await sendWebhook(hook, alerts, now, opts);
+  await webhookResultStatement(env, hook.id, now, result)
     .run()
     .catch((err) => console.error("Failed to record webhook delivery result:", err));
   return result;

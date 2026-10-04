@@ -19,8 +19,4 @@ export const kvKeys = {
   // FIRMWARE_VERSION — see firmware/lib/common/version.h), so keying on
   // version alone would let one board's sync overwrite another's binary.
   firmwareBin: (board: string, version: string) => `firmware:bin:${board}:${version}`,
-  // Paces "still offline" alert reminders: armed with a TTL (weekly, then
-  // monthly) each time one is sent; its expiry means the next is due. See
-  // lib/health-check.ts. Deleted when the device recovers.
-  offlineReminder: (mac: string) => `offline_reminder:${mac}`,
 };

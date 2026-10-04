@@ -61,7 +61,10 @@ CREATE TABLE devices (
   -- this device in the hourly check entirely. See lib/device-health.ts.
   offline_alerted_at          INTEGER,
   low_battery_alerted_at      INTEGER,
-  alerts_muted                INTEGER NOT NULL DEFAULT 0
+  alerts_muted                INTEGER NOT NULL DEFAULT 0,
+  -- When the next "still offline" reminder is due (migrations/0026); NULL
+  -- on an alerted device counts as due, cleared on recovery.
+  next_reminder_at            INTEGER
 );
 
 -- Image buckets: independently-owned, shareable entities a device subscribes to

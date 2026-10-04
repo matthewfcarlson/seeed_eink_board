@@ -6,6 +6,7 @@ import {
   OFFLINE_AFTER_SECONDS,
   WEEKLY_REMINDER_SECONDS,
   evaluateDeviceHealth,
+  isFleetOutage,
   planDeviceAlerts,
   reminderIntervalSeconds,
   type DeviceHealthInput,
@@ -23,6 +24,7 @@ function device(overrides: Partial<DeviceHealthInput> = {}): DeviceHealthInput {
     batteryVoltage: 3.9,
     offlineAlertedAt: null,
     lowBatteryAlertedAt: null,
+    nextReminderAt: null,
     ...overrides,
   };
 }
@@ -70,38 +72,45 @@ describe("reminderIntervalSeconds", () => {
 describe("planDeviceAlerts", () => {
   const late = T0 + 25 * H;
 
-  it("alerts once when a device goes offline and arms a weekly reminder", () => {
+  it("alerts once when a device goes offline and schedules a weekly reminder", () => {
     const plan = planDeviceAlerts(device(), late);
     expect(plan.alerts.map((a) => a.kind)).toEqual(["offline"]);
     expect(plan.offlineAlertedAt).toBe(late);
-    expect(plan.armReminderSeconds).toBe(WEEKLY_REMINDER_SECONDS);
+    expect(plan.nextReminderAt).toBe(late + WEEKLY_REMINDER_SECONDS);
   });
 
-  it("stays quiet while the reminder key is still live", () => {
-    const plan = planDeviceAlerts(device({ offlineAlertedAt: late }), late + 3 * DAY, false);
+  it("stays quiet until the reminder is due", () => {
+    const plan = planDeviceAlerts(device({ offlineAlertedAt: late, nextReminderAt: late + 7 * DAY }), late + 3 * DAY);
     expect(plan.alerts).toEqual([]);
-    expect(plan.armReminderSeconds).toBeNull();
+    expect(plan.nextReminderAt).toBe(late + 7 * DAY);
     expect(plan.offlineAlertedAt).toBe(late);
   });
 
-  it("sends a still_offline reminder once the key expires, keeping the original alert time", () => {
-    const plan = planDeviceAlerts(device({ offlineAlertedAt: late }), late + 7 * DAY, true);
+  it("sends a still_offline reminder once due, keeping the original alert time", () => {
+    const now = late + 7 * DAY;
+    const plan = planDeviceAlerts(device({ offlineAlertedAt: late, nextReminderAt: now }), now);
     expect(plan.alerts.map((a) => a.kind)).toEqual(["still_offline"]);
     expect(plan.offlineAlertedAt).toBe(late);
-    expect(plan.armReminderSeconds).toBe(WEEKLY_REMINDER_SECONDS);
+    expect(plan.nextReminderAt).toBe(now + WEEKLY_REMINDER_SECONDS);
+  });
+
+  it("treats a missing reminder time on an alerted device as due", () => {
+    const plan = planDeviceAlerts(device({ offlineAlertedAt: late, nextReminderAt: null }), late + H);
+    expect(plan.alerts.map((a) => a.kind)).toEqual(["still_offline"]);
   });
 
   it("switches to monthly reminders after 30 days offline", () => {
-    const plan = planDeviceAlerts(device({ offlineAlertedAt: late }), T0 + 36 * DAY, true);
+    const now = T0 + 36 * DAY;
+    const plan = planDeviceAlerts(device({ offlineAlertedAt: late, nextReminderAt: now - H }), now);
     expect(plan.alerts.map((a) => a.kind)).toEqual(["still_offline"]);
-    expect(plan.armReminderSeconds).toBe(MONTHLY_REMINDER_SECONDS);
+    expect(plan.nextReminderAt).toBe(now + MONTHLY_REMINDER_SECONDS);
   });
 
   it("sends a recovery alert and clears the reminder when the device checks in again", () => {
-    const plan = planDeviceAlerts(device({ lastSeenAt: late, offlineAlertedAt: late - H }), late + 60, true);
+    const plan = planDeviceAlerts(device({ lastSeenAt: late, offlineAlertedAt: late - H, nextReminderAt: late + DAY }), late + 60);
     expect(plan.alerts.map((a) => a.kind)).toEqual(["back_online"]);
     expect(plan.offlineAlertedAt).toBeNull();
-    expect(plan.clearReminder).toBe(true);
+    expect(plan.nextReminderAt).toBeNull();
   });
 
   it("handles battery transitions independently of connectivity", () => {
@@ -114,13 +123,36 @@ describe("planDeviceAlerts", () => {
     expect(charged.lowBatteryAlertedAt).toBeNull();
   });
 
+  it("withholds a first offline alert during a fleet outage, but not reminders or battery alerts", () => {
+    const opts = { suppressNewOfflineSince: late - 2 * DAY };
+    expect(planDeviceAlerts(device(), late, opts).alerts).toEqual([]);
+    expect(planDeviceAlerts(device(), late, opts).offlineAlertedAt).toBeNull();
+    expect(planDeviceAlerts(device({ batteryVoltage: 3.4 }), late, opts).alerts.map((a) => a.kind)).toEqual(["low_battery"]);
+    expect(
+      planDeviceAlerts(device({ offlineAlertedAt: late - DAY, nextReminderAt: late }), late, opts).alerts.map((a) => a.kind)
+    ).toEqual(["still_offline"]);
+    // Silent since before the window: not part of this spike, alerts normally.
+    expect(planDeviceAlerts(device({ lastSeenAt: late - 3 * DAY }), late, opts).alerts.map((a) => a.kind)).toEqual([
+      "offline",
+    ]);
+  });
+
   it("is a no-op for a healthy device", () => {
     expect(planDeviceAlerts(device(), T0 + H)).toEqual({
       alerts: [],
       offlineAlertedAt: null,
       lowBatteryAlertedAt: null,
-      armReminderSeconds: null,
-      clearReminder: false,
+      nextReminderAt: null,
     });
+  });
+});
+
+describe("isFleetOutage", () => {
+  it("needs both a minimum count and a large share of recently active devices", () => {
+    expect(isFleetOutage(6000, 60)).toBe(false); // 1% — ordinary daily churn
+    expect(isFleetOutage(6000, 1500)).toBe(true); // 25%
+    expect(isFleetOutage(10, 10)).toBe(false); // one household's WiFi — below the minimum
+    expect(isFleetOutage(80, 20)).toBe(true);
+    expect(isFleetOutage(200, 20)).toBe(false);
   });
 });

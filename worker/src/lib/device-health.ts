@@ -1,7 +1,7 @@
 /**
  * Device health detection for owner alerts (see migrations/0024_device_alerts.sql).
  * Pure functions only — lib/health-check.ts (run hourly from index.ts's
- * scheduled()) does the D1/KV reads and writes, and lib/notify.ts does delivery.
+ * scheduled()) does the D1 reads and writes, and lib/notify.ts does delivery.
  */
 
 /**
@@ -16,9 +16,9 @@
 export const OFFLINE_AFTER_SECONDS = 24 * 3600;
 
 /**
- * Follow-up pacing while a device stays offline (paced by a KV key's TTL —
- * see health-check.ts): weekly for its first month offline, then roughly
- * monthly, until it recovers or its owner mutes it.
+ * Follow-up pacing while a device stays offline (devices.next_reminder_at —
+ * see migrations/0026_offline_reminder_schedule.sql): weekly for its first
+ * month offline, then roughly monthly, until it recovers or is muted.
  */
 export const WEEKLY_REMINDER_SECONDS = 7 * 86400;
 export const MONTHLY_REMINDER_AFTER_SECONDS = 30 * 86400;
@@ -40,6 +40,9 @@ export interface DeviceHealthInput {
   batteryVoltage: number | null;
   offlineAlertedAt: number | null;
   lowBatteryAlertedAt: number | null;
+  /** When the next "still_offline" reminder is due (only meaningful while
+   *  offlineAlertedAt is set; evaluateDeviceHealth ignores it). */
+  nextReminderAt?: number | null;
 }
 
 export interface DeviceHealth {
@@ -80,37 +83,52 @@ export interface DeviceAlertPlan {
   /** New alert-state columns to persist (unchanged values when nothing fired). */
   offlineAlertedAt: number | null;
   lowBatteryAlertedAt: number | null;
-  /** Arm the reminder key with this TTL (seconds), or null to leave it alone. */
-  armReminderSeconds: number | null;
-  /** Delete the reminder key (device recovered). */
-  clearReminder: boolean;
+  nextReminderAt: number | null;
+}
+
+export interface PlanOptions {
+  /**
+   * Fleet-outage guard (see isFleetOutage): withhold the first "offline"
+   * alert for devices last seen at/after this epoch — the ones that just
+   * crossed the 24h line together. They stay un-alerted, so they're
+   * reconsidered next run; once they fall out of the window (another day of
+   * silence) they alert normally, and if they come back nothing was sent.
+   */
+  suppressNewOfflineSince?: number | null;
 }
 
 /**
- * State transitions for one device. `reminderDue` is whether this device's
- * reminder key has expired from KV — only consulted while it's already
- * alerted as offline. Alerts fire when health differs from what was last
- * alerted, plus a "still_offline" follow-up each time the reminder lapses.
+ * State transitions for one device. Alerts fire when health differs from
+ * what was last alerted, plus a "still_offline" follow-up whenever
+ * `nextReminderAt` has passed (weekly for the first 30 days offline, then
+ * monthly — see reminderIntervalSeconds). A NULL nextReminderAt on an
+ * alerted device counts as due.
+ *
+ * lib/health-check.ts's candidate query mirrors these conditions in SQL so
+ * only devices with something to do are loaded — keep the two in sync
+ * (test/unit/health-check.test.ts checks them against each other).
  */
-export function planDeviceAlerts(d: DeviceHealthInput, now: number, reminderDue = false): DeviceAlertPlan {
+export function planDeviceAlerts(d: DeviceHealthInput, now: number, opts: PlanOptions = {}): DeviceAlertPlan {
   const health = evaluateDeviceHealth(d, now);
   const alerts: DeviceAlert[] = [];
   const base = { mac: d.mac, label: d.label, lastSeenAt: d.lastSeenAt, batteryVoltage: d.batteryVoltage };
   let offlineAlertedAt = d.offlineAlertedAt;
   let lowBatteryAlertedAt = d.lowBatteryAlertedAt;
-  let armReminderSeconds: number | null = null;
-  let clearReminder = false;
+  let nextReminderAt = d.nextReminderAt ?? null;
 
   if (health.offline) {
-    if (offlineAlertedAt == null || reminderDue) {
+    const suppressed =
+      offlineAlertedAt == null && opts.suppressNewOfflineSince != null && d.lastSeenAt! >= opts.suppressNewOfflineSince;
+    const reminderDue = offlineAlertedAt != null && (nextReminderAt == null || nextReminderAt <= now);
+    if ((offlineAlertedAt == null && !suppressed) || reminderDue) {
       alerts.push({ kind: offlineAlertedAt == null ? "offline" : "still_offline", ...base });
       offlineAlertedAt ??= now;
-      armReminderSeconds = reminderIntervalSeconds(d.lastSeenAt!, now);
+      nextReminderAt = now + reminderIntervalSeconds(d.lastSeenAt!, now);
     }
   } else if (offlineAlertedAt != null) {
     alerts.push({ kind: "back_online", ...base });
     offlineAlertedAt = null;
-    clearReminder = true;
+    nextReminderAt = null;
   }
 
   if (health.lowBattery && lowBatteryAlertedAt == null) {
@@ -121,5 +139,22 @@ export function planDeviceAlerts(d: DeviceHealthInput, now: number, reminderDue 
     lowBatteryAlertedAt = null;
   }
 
-  return { alerts, offlineAlertedAt, lowBatteryAlertedAt, armReminderSeconds, clearReminder };
+  return { alerts, offlineAlertedAt, lowBatteryAlertedAt, nextReminderAt };
+}
+
+/** A spike only counts as an outage at this size — a household's 3 frames
+ *  losing the same WiFi is a real alert, not our outage. */
+export const OUTAGE_MIN_DEVICES = 20;
+/** ...and when at least this share of recently active devices went silent
+ *  in the same day. A handful of frames dying daily stays far below it. */
+export const OUTAGE_FRACTION = 0.2;
+
+/**
+ * Whether this run looks like *our* outage (a bad deploy, a firmware bug,
+ * a Cloudflare incident) rather than many owners' frames independently
+ * dying: `justOffline` devices crossed the 24h line within the last day, out
+ * of `recentlyActive` seen within the last two days (which includes them).
+ */
+export function isFleetOutage(recentlyActive: number, justOffline: number): boolean {
+  return justOffline >= OUTAGE_MIN_DEVICES && justOffline >= OUTAGE_FRACTION * recentlyActive;
 }

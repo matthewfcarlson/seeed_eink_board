@@ -1,8 +1,33 @@
 import type { Env } from "../types";
-import { evaluateDeviceHealth, planDeviceAlerts, type DeviceAlert } from "./device-health";
-import { kvKeys } from "./kv-keys";
-import { deliverWebhook, type WebhookRow } from "./notify";
-import { deliverAlertEmail, emailAlertsAvailable, publicBaseUrl, type EmailRecipientRow } from "./email-alerts";
+import {
+  LOW_BATTERY_RECOVER_VOLTAGE,
+  LOW_BATTERY_VOLTAGE,
+  OFFLINE_AFTER_SECONDS,
+  isFleetOutage,
+  planDeviceAlerts,
+  type DeviceAlert,
+  type DeviceHealthInput,
+} from "./device-health";
+import { sendWebhook, webhookResultStatement, type WebhookRow } from "./notify";
+import {
+  emailAlertsAvailable,
+  emailResultStatement,
+  publicBaseUrl,
+  sendAlertEmail,
+  type EmailRecipientRow,
+} from "./email-alerts";
+
+/**
+ * Most devices whose alert state can change in one run. The rest stay in the
+ * candidate set (their state isn't written) and are picked up next hour.
+ * Bounds one invocation's work — Workers allow 1,000 D1 queries and 10,000
+ * subrequests per invocation — even if thousands of frames change state at
+ * once and the outage guard doesn't catch it.
+ */
+export const MAX_DEVICES_PER_RUN = 200;
+
+/** Devices the check covers at all. */
+const ELIGIBLE = "user_id IS NOT NULL AND secret IS NOT NULL AND last_seen_at IS NOT NULL AND alerts_muted = 0";
 
 interface DeviceRow {
   mac: string;
@@ -12,78 +37,144 @@ interface DeviceRow {
   last_battery_voltage: number | null;
   offline_alerted_at: number | null;
   low_battery_alerted_at: number | null;
+  next_reminder_at: number | null;
+}
+
+export function toHealthInput(row: DeviceRow): DeviceHealthInput {
+  return {
+    mac: row.mac,
+    label: row.label,
+    lastSeenAt: row.last_seen_at,
+    batteryVoltage: row.last_battery_voltage,
+    offlineAlertedAt: row.offline_alerted_at,
+    lowBatteryAlertedAt: row.low_battery_alerted_at,
+    nextReminderAt: row.next_reminder_at,
+  };
+}
+
+/** One aggregate over the eligible fleet: how many devices were seen in the
+ *  last two days, and how many of those crossed the 24h offline line within
+ *  the last day without being alerted yet. See isFleetOutage. */
+export async function detectFleetOutage(env: Env, now: number): Promise<{ outage: boolean; recentlyActive: number; justOffline: number }> {
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(SUM(last_seen_at >= ?1), 0) AS recently_active,
+            COALESCE(SUM(last_seen_at >= ?1 AND last_seen_at < ?2 AND offline_alerted_at IS NULL), 0) AS just_offline
+     FROM devices WHERE ${ELIGIBLE}`
+  )
+    .bind(now - 2 * OFFLINE_AFTER_SECONDS, now - OFFLINE_AFTER_SECONDS)
+    .first<{ recently_active: number; just_offline: number }>();
+  const recentlyActive = row?.recently_active ?? 0;
+  const justOffline = row?.just_offline ?? 0;
+  return { outage: isFleetOutage(recentlyActive, justOffline), recentlyActive, justOffline };
 }
 
 /**
- * Hourly (index.ts's scheduled()): evaluate every registered, un-muted device,
- * persist alert-state transitions, then send one batched message per owner to
- * each of their webhooks and verified email addresses.
+ * Only the devices that have something to send this run — the SQL form of
+ * device-health.ts's planDeviceAlerts conditions (keep them in sync; the
+ * health-check unit test checks one against the other). On a normal hour
+ * this is a handful of rows, not the whole fleet.
  *
- * D1's offline_alerted_at is the source of truth for "the owner knows it's
- * offline" (and so owes a recovery message). "Still offline" follow-ups are
- * paced by a KV key armed with a TTL (weekly, then monthly — see
- * device-health.ts's reminderIntervalSeconds): once it expires, the next
- * hourly run sends a reminder and re-arms it. Losing the key early costs at
- * most one extra reminder.
+ * `suppressNewOfflineSince`: during a fleet outage, first-time offline
+ * alerts for devices last seen at/after this are withheld — and those
+ * devices are left out here entirely (unless their battery state changed),
+ * so they can't use up MAX_DEVICES_PER_RUN while they wait.
+ */
+export async function selectAlertCandidates(
+  env: Env,
+  now: number,
+  opts: { suppressNewOfflineSince?: number | null; limit?: number } = {}
+): Promise<DeviceRow[]> {
+  const cutoff = now - OFFLINE_AFTER_SECONDS;
+  const suppressSince = opts.suppressNewOfflineSince ?? null;
+  const rows = await env.DB.prepare(
+    `SELECT mac, user_id, label, last_seen_at, last_battery_voltage,
+            offline_alerted_at, low_battery_alerted_at, next_reminder_at
+     FROM devices
+     WHERE ${ELIGIBLE} AND (
+       -- went offline, not alerted yet (and not held back by the outage guard)
+       (last_seen_at < ?1 AND offline_alerted_at IS NULL AND NOT (?5 IS NOT NULL AND last_seen_at >= ?5))
+       -- still offline, reminder due
+       OR (last_seen_at < ?1 AND offline_alerted_at IS NOT NULL AND (next_reminder_at IS NULL OR next_reminder_at <= ?2))
+       -- back online after an alert
+       OR (last_seen_at >= ?1 AND offline_alerted_at IS NOT NULL)
+       -- battery went low
+       OR (low_battery_alerted_at IS NULL AND last_battery_voltage > 0 AND last_battery_voltage < ?3)
+       -- battery recovered (no usable reading also clears it, like evaluateDeviceHealth)
+       OR (low_battery_alerted_at IS NOT NULL AND NOT (COALESCE(last_battery_voltage, 0) > 0 AND last_battery_voltage < ?4))
+     )
+     ORDER BY last_seen_at DESC
+     LIMIT ?6`
+  )
+    .bind(cutoff, now, LOW_BATTERY_VOLTAGE, LOW_BATTERY_RECOVER_VOLTAGE, suppressSince, opts.limit ?? MAX_DEVICES_PER_RUN)
+    .all<DeviceRow>();
+  return rows.results;
+}
+
+export interface HealthCheckSummary {
+  outage: boolean;
+  candidates: number;
+  alerts: number;
+  owners: number;
+  deliveries: number;
+  failed: number;
+  /** The candidate query hit MAX_DEVICES_PER_RUN — more remain for next run. */
+  capped: boolean;
+}
+
+/**
+ * Hourly (index.ts's scheduled()). Per run: one aggregate query (outage
+ * guard), one candidate query, one batched state write, one webhook + one
+ * email lookup, the sends, and one batched write of delivery results — a
+ * fixed number of D1 calls however large the fleet, and no KV at all.
  *
  * State is written *before* delivery and regardless of its outcome: a broken
- * webhook URL shows up as last_error in /admin rather than re-sending the same
- * alert every hour forever. The tradeoff is that an alert whose delivery
- * failed isn't retried — the next reminder or recovery is still sent.
+ * webhook URL shows up as last_error in /admin rather than re-sending the
+ * same alert every hour forever. The tradeoff is that an alert whose
+ * delivery failed isn't retried — the next reminder or recovery still is.
  */
-export async function runDeviceHealthCheck(env: Env, now = Math.floor(Date.now() / 1000)): Promise<void> {
-  const rows = await env.DB.prepare(
-    `SELECT mac, user_id, label, last_seen_at, last_battery_voltage, offline_alerted_at, low_battery_alerted_at
-     FROM devices
-     WHERE user_id IS NOT NULL AND secret IS NOT NULL
-       AND last_seen_at IS NOT NULL AND alerts_muted = 0`
-  ).all<DeviceRow>();
+export async function runDeviceHealthCheck(env: Env, now = Math.floor(Date.now() / 1000)): Promise<HealthCheckSummary> {
+  const fleet = await detectFleetOutage(env, now);
+  const suppressNewOfflineSince = fleet.outage ? now - 2 * OFFLINE_AFTER_SECONDS : null;
+  if (fleet.outage) {
+    console.error(
+      `Device health check: ${fleet.justOffline} of ${fleet.recentlyActive} recently active devices went silent ` +
+        `in the last day — treating it as a service outage and holding their offline alerts`
+    );
+  }
+
+  const rows = await selectAlertCandidates(env, now, { suppressNewOfflineSince });
+  const summary: HealthCheckSummary = {
+    outage: fleet.outage,
+    candidates: rows.length,
+    alerts: 0,
+    owners: 0,
+    deliveries: 0,
+    failed: 0,
+    capped: rows.length >= MAX_DEVICES_PER_RUN,
+  };
 
   const alertsByUser = new Map<string, DeviceAlert[]>();
   const updates: D1PreparedStatement[] = [];
-  const kvOps: Promise<void>[] = [];
-  for (const row of rows.results) {
-    const input = {
-      mac: row.mac,
-      label: row.label,
-      lastSeenAt: row.last_seen_at,
-      batteryVoltage: row.last_battery_voltage,
-      offlineAlertedAt: row.offline_alerted_at,
-      lowBatteryAlertedAt: row.low_battery_alerted_at,
-    };
-    // Only devices already alerted as offline and still offline need their
-    // reminder key — skip the KV read for everything else.
-    const reminderDue =
-      row.offline_alerted_at != null && evaluateDeviceHealth(input, now).offline
-        ? (await env.KV.get(kvKeys.offlineReminder(row.mac))) === null
-        : false;
-    const plan = planDeviceAlerts(input, now, reminderDue);
-    if (plan.alerts.length === 0) continue;
-
-    if (plan.offlineAlertedAt !== row.offline_alerted_at || plan.lowBatteryAlertedAt !== row.low_battery_alerted_at) {
-      updates.push(
-        env.DB.prepare("UPDATE devices SET offline_alerted_at = ?, low_battery_alerted_at = ? WHERE mac = ?").bind(
-          plan.offlineAlertedAt,
-          plan.lowBatteryAlertedAt,
-          row.mac
-        )
-      );
+  for (const row of rows) {
+    const plan = planDeviceAlerts(toHealthInput(row), now, { suppressNewOfflineSince });
+    if (plan.alerts.length === 0) {
+      // The SQL matched but the plan didn't — they've drifted apart.
+      console.error(`Device health check: candidate ${row.mac} produced no alert`);
+      continue;
     }
-    if (plan.armReminderSeconds !== null) {
-      kvOps.push(
-        env.KV.put(kvKeys.offlineReminder(row.mac), String(now), { expirationTtl: plan.armReminderSeconds })
-      );
-    } else if (plan.clearReminder) {
-      kvOps.push(env.KV.delete(kvKeys.offlineReminder(row.mac)));
-    }
+    updates.push(
+      env.DB.prepare(
+        "UPDATE devices SET offline_alerted_at = ?, low_battery_alerted_at = ?, next_reminder_at = ? WHERE mac = ?"
+      ).bind(plan.offlineAlertedAt, plan.lowBatteryAlertedAt, plan.nextReminderAt, row.mac)
+    );
     const list = alertsByUser.get(row.user_id) ?? [];
     list.push(...plan.alerts);
     alertsByUser.set(row.user_id, list);
+    summary.alerts += plan.alerts.length;
   }
-
-  if (alertsByUser.size === 0) return;
-  if (updates.length > 0) await env.DB.batch(updates);
-  await Promise.all(kvOps);
+  summary.owners = alertsByUser.size;
+  if (alertsByUser.size === 0) return summary;
+  await env.DB.batch(updates);
 
   const userIds = [...alertsByUser.keys()];
   const placeholders = userIds.map(() => "?").join(",");
@@ -107,16 +198,28 @@ export async function runDeviceHealthCheck(env: Env, now = Math.floor(Date.now()
         .all<EmailRecipientRow & { user_id: string }>()
     : { results: [] as (EmailRecipientRow & { user_id: string })[] };
 
-  const results = await Promise.allSettled([
-    ...hooks.results.map(async (hook) => (await deliverWebhook(env, hook, alertsByUser.get(hook.user_id)!, now)).ok),
-    ...emails.results.map(
-      async (r) => (await deliverAlertEmail(env, r, alertsByUser.get(r.user_id)!, now, baseUrl!)) === null
-    ),
+  const outcomes = await Promise.all([
+    ...hooks.results.map(async (hook) => {
+      const result = await sendWebhook(hook, alertsByUser.get(hook.user_id)!, now);
+      return { ok: result.ok, record: webhookResultStatement(env, hook.id, now, result) };
+    }),
+    ...emails.results.map(async (r) => {
+      const error = await sendAlertEmail(env, r, alertsByUser.get(r.user_id)!, now, baseUrl!);
+      return { ok: error === null, record: emailResultStatement(env, r.id, now, error) };
+    }),
   ]);
-  const failed = results.filter((r) => r.status === "rejected" || !r.value).length;
-  const alertCount = [...alertsByUser.values()].reduce((n, list) => n + list.length, 0);
+  summary.deliveries = outcomes.length;
+  summary.failed = outcomes.filter((o) => !o.ok).length;
+  if (outcomes.length > 0) {
+    await env.DB.batch(outcomes.map((o) => o.record)).catch((err) =>
+      console.error("Failed to record delivery results:", err)
+    );
+  }
+
   console.log(
-    `Device health check: ${alertCount} alert(s) for ${alertsByUser.size} owner(s), ` +
-      `${hooks.results.length} webhook(s) + ${emails.results.length} email(s), ${failed} failed`
+    `Device health check: ${summary.alerts} alert(s) for ${summary.owners} owner(s), ` +
+      `${hooks.results.length} webhook(s) + ${emails.results.length} email(s), ${summary.failed} failed` +
+      (summary.capped ? ` — hit the ${MAX_DEVICES_PER_RUN}-device cap, more next run` : "")
   );
+  return summary;
 }

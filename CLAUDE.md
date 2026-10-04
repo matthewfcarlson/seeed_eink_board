@@ -350,16 +350,31 @@ fire on transitions only — `devices.offline_alerted_at`/
 `low_battery_alerted_at` record what was sent, so each problem gets one
 message and one recovery message, batched per owner. While a device stays
 offline, `still_offline` reminders go out weekly for its first 30 days
-offline, then about monthly, forever until it recovers or is muted — paced
-by a KV key (`kvKeys.offlineReminder`) armed with that TTL at each alert;
-its expiry is what makes the next hourly run send one. D1's
-`offline_alerted_at` stays the source of truth (losing the KV key costs at
-most one extra reminder); recovery deletes the key. State is written before
-delivery regardless of outcome: a broken webhook shows `last_error` in
-`/admin` rather than retrying every hour, at the cost of a failed alert never
-being retried. `devices.alerts_muted` (the "Watched frames" checkboxes) skips
-a device entirely. `GET /admin/devices` returns the same `health` evaluation,
-shown as an "overdue" badge.
+offline, then about monthly, forever until it recovers or is muted, paced by
+`devices.next_reminder_at` (`0026_offline_reminder_schedule.sql`; NULL on an
+alerted device = due, cleared on recovery). State is written before delivery
+regardless of outcome: a broken webhook shows `last_error` in `/admin` rather
+than retrying every hour, at the cost of a failed alert never being retried.
+`devices.alerts_muted` (the "Watched frames" checkboxes) skips a device
+entirely. `GET /admin/devices` returns the same `health` evaluation, shown as
+an "overdue" badge.
+
+**Scale** (designed for thousands of frames; per-invocation caps are 1,000
+KV ops, 1,000 D1 queries, 10,000 subrequests): a run is a fixed number of D1
+calls regardless of fleet size — one aggregate, one candidate query, one
+batched state write, two recipient lookups, one batched delivery-result
+write — and no KV. The candidate query (`selectAlertCandidates`) is the SQL
+form of `planDeviceAlerts`, returning only devices with something to send
+(normally a handful), capped at `MAX_DEVICES_PER_RUN` (200); the rest stay
+candidates for the next hour. Keep the two in sync —
+`test/unit/health-check.test.ts` runs every migration in `node:sqlite` and
+checks the query against the TS rules on a randomized fleet, plus 6,000-frame
+scenarios. Outage guard (`isFleetOutage`): if >= 20 devices and >= 20% of
+those seen in the last 2 days crossed the 24h line within the same day, it's
+treated as our outage (bad deploy, firmware bug, Cloudflare incident) and
+their first offline alerts are held; frames that come back cost nothing, and
+ones still silent once out of that window (~a day later) alert normally.
+Reminders, recoveries, and battery alerts are never held.
 
 ## OTA Firmware Updates
 

@@ -159,6 +159,29 @@ export interface EmailRecipientRow {
   unsubscribe_token: string;
 }
 
+/** Sends one alert email to a verified recipient without recording anything.
+ *  Never throws; returns an error message on failure. */
+export function sendAlertEmail(
+  env: Env,
+  recipient: EmailRecipientRow,
+  alerts: DeviceAlert[],
+  now: number,
+  baseUrl: string,
+  opts: { test?: boolean } = {}
+): Promise<string | null> {
+  return sendEmail(env, recipient.email, buildAlertEmail(alerts, now, baseUrl, recipient.unsubscribe_token, opts));
+}
+
+/** The statement recording a delivery outcome on the recipient's row — the
+ *  cron batches these into one D1 call instead of a query per delivery. */
+export function emailResultStatement(env: Env, recipientId: string, now: number, error: string | null): D1PreparedStatement {
+  return env.DB.prepare("UPDATE notification_emails SET last_attempt_at = ?, last_error = ? WHERE id = ?").bind(
+    now,
+    error,
+    recipientId
+  );
+}
+
 /** Sends one alert email to a verified recipient and records the outcome. */
 export async function deliverAlertEmail(
   env: Env,
@@ -168,9 +191,8 @@ export async function deliverAlertEmail(
   baseUrl: string,
   opts: { test?: boolean } = {}
 ): Promise<string | null> {
-  const error = await sendEmail(env, recipient.email, buildAlertEmail(alerts, now, baseUrl, recipient.unsubscribe_token, opts));
-  await env.DB.prepare("UPDATE notification_emails SET last_attempt_at = ?, last_error = ? WHERE id = ?")
-    .bind(now, error, recipient.id)
+  const error = await sendAlertEmail(env, recipient, alerts, now, baseUrl, opts);
+  await emailResultStatement(env, recipient.id, now, error)
     .run()
     .catch((err) => console.error("Failed to record email delivery result:", err));
   return error;
