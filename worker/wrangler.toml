@@ -26,7 +26,7 @@ GITHUB_REPO = "matthewfcarlson/seeed_eink_board"
 # Email alerts (lib/email-alerts.ts): the From address must be on a domain
 # onboarded under Compute > Email Service > Email Sending, and PUBLIC_BASE_URL
 # is the origin the cron's emails link back to (confirm/unsubscribe/admin).
-EMAIL_FROM = "alerts@matthewc.dev"
+EMAIL_FROM = "alerts@eink.matthewc.dev"
 PUBLIC_BASE_URL = "https://eink.matthewc.dev"
 
 # Cloudflare Email Service — sends device alert emails (see lib/email-alerts.ts).
