@@ -197,6 +197,19 @@ components:
             X-Device-Sharing-Public-Key the same way as board. Required before
             a bucket can be assigned to this device (see
             PATCH /admin/devices/{mac}/buckets).
+        alerts_muted:
+          type: boolean
+          description: Skipped by the hourly offline/low-battery alert check.
+        health:
+          type: object
+          description: >-
+            Same evaluation the hourly alert check runs (lib/device-health.ts).
+            `offline_after` is when a silent device counts as offline:
+            last_seen_at + 24h.
+          properties:
+            offline: { type: boolean }
+            low_battery: { type: boolean }
+            offline_after: { type: integer, nullable: true }
         bucket_ids:
           type: array
           items:
@@ -558,7 +571,7 @@ paths:
 
   /admin/devices/{mac}:
     patch:
-      summary: Rename a device
+      summary: Rename a device, or mute/unmute its health alerts
       parameters:
         - $ref: '#/components/parameters/MacPath'
       requestBody:
@@ -568,6 +581,11 @@ paths:
               type: object
               properties:
                 label: { type: string, maxLength: 80 }
+                alerts_muted:
+                  type: boolean
+                  description: >-
+                    true skips this device in the hourly offline/low-battery
+                    check (e.g. unplugged on purpose). See migrations/0025_device_alerts.sql.
       responses:
         '200': { description: OK }
         '403': { description: Forbidden }
@@ -1240,6 +1258,192 @@ paths:
       responses:
         '200': { description: OK }
         '403': { description: Forbidden }
+
+  /admin/notifications/webhooks:
+    get:
+      summary: List the caller's alert webhooks
+      description: >-
+        Device health alerts (offline / low battery — see lib/device-health.ts)
+        are POSTed hourly to every webhook, one batched message per check, and
+        only on state transitions. The URL itself is never returned (Slack and
+        Discord embed a token in it) — only `url_preview`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        format: { type: string, enum: [json, slack, discord, ntfy] }
+                        label: { type: string, nullable: true }
+                        url_preview: { type: string }
+                        created_at: { type: integer }
+                        last_attempt_at: { type: integer, nullable: true }
+                        last_status: { type: integer, nullable: true, description: 'HTTP status; 0 = network error' }
+                        last_error: { type: string, nullable: true }
+    post:
+      summary: Add an alert webhook (max 5 per account)
+      description: >-
+        `json` bodies are `{type, sent_at, text, alerts: [{kind, device: {mac,
+        label}, last_seen_at, battery_voltage}]}` with `kind` one of offline,
+        still_offline (weekly reminder for the first 30 days offline, then
+        about monthly), back_online, low_battery, battery_ok; signed via `X-Eink-Timestamp` and
+        `X-Eink-Signature: sha256=<hex HMAC-SHA256(signing_secret,
+        timestamp + "." + raw body)>`. `slack`/`discord` send `{text}`/`{content}`,
+        `ntfy` a plain-text body. `signing_secret` is only ever returned here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri, maxLength: 2048, description: 'https only, no embedded credentials' }
+                format: { type: string, enum: [json, slack, discord, ntfy] }
+                label: { type: string, maxLength: 80 }
+              required: [url, format]
+      responses:
+        '201': { description: Created — includes the one-time `signing_secret` }
+        '400': { description: Invalid url/format/label }
+        '409': { description: Webhook limit reached }
+
+  /admin/notifications/webhooks/{id}:
+    delete:
+      summary: Remove an alert webhook
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted }
+        '404': { description: Not found }
+
+  /admin/notifications/webhooks/{id}/test:
+    post:
+      summary: Send a sample alert to one webhook
+      description: Rate-limited to 20 per user per hour.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'Delivered — `{ok, status, error}`' }
+        '404': { description: Not found }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502': { description: 'The webhook endpoint failed or was unreachable — `{ok, status, error}`' }
+
+  /admin/notifications/emails:
+    get:
+      summary: List the caller's alert email addresses
+      description: >-
+        `available` is false when the server has no Email Service binding /
+        EMAIL_FROM configured (the add call then returns 503). Only addresses
+        with `verified_at` set receive alerts.
+      responses:
+        '200': { description: 'OK — `{available, emails: [{id, email, verified_at, verify_sent_at, created_at, last_attempt_at, last_error}]}`' }
+    post:
+      summary: Add an alert email address (max 3 per account)
+      description: >-
+        Stored unverified and sent a confirmation link (valid 24h) to
+        /notifications/email/verify. Shares the `emailSend` rate limit (10 per
+        user per hour) with resend and test.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, maxLength: 254 }
+              required: [email]
+      responses:
+        '201': { description: Added; confirmation email sent }
+        '400': { description: Not an email address }
+        '409': { description: Already added, or the per-account limit is reached }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502': { description: The confirmation email couldn't be sent (nothing is stored) }
+        '503': { description: Email alerts aren't configured on this server }
+
+  /admin/notifications/emails/{id}:
+    delete:
+      summary: Remove an alert email address
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted }
+        '404': { description: Not found }
+
+  /admin/notifications/emails/{id}/resend:
+    post:
+      summary: Re-send the confirmation link (invalidates the previous one)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Sent }
+        '404': { description: Not found }
+        '409': { description: Already confirmed }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502': { description: Send failed }
+
+  /admin/notifications/emails/{id}/test:
+    post:
+      summary: Send a sample alert email to a confirmed address
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Sent }
+        '404': { description: Not found }
+        '409': { description: Address not confirmed yet }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502': { description: Send failed }
+
+  /notifications/email/verify:
+    get:
+      summary: Confirmation page (HTML) linked from the confirmation email
+      description: >-
+        Changes nothing — renders a button that POSTs, so mail scanners that
+        pre-fetch links can't confirm an address on the recipient's behalf.
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: HTML page }
+    post:
+      summary: Confirm an alert email address
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Confirmed (HTML) }
+        '400': { description: Invalid, used, or expired token (HTML) }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /notifications/email/unsubscribe:
+    get:
+      summary: Unsubscribe page (HTML) linked from every alert email
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: HTML page }
+    post:
+      summary: Unsubscribe — the page's button, or RFC 8058 one-click from the mail client
+      description: Deletes the address. Same response whether or not the token matched.
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Unsubscribed (HTML) }
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /admin/crash-reports:
     get:

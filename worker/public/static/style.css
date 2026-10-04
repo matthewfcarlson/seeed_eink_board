@@ -227,7 +227,7 @@ button.xs, .btn.xs { padding: 4px 9px; font-size: 0.74em; }
 .row { margin-bottom: 14px; }
 label { display: block; font-weight: 700; margin-bottom: 6px; font-size: 0.85em; color: var(--ink-soft); }
 
-input[type="text"], input[type="number"], input[type="password"], input[type="file"], select, textarea {
+input[type="text"], input[type="url"], input[type="email"], input[type="number"], input[type="password"], input[type="file"], select, textarea {
   width: 100%;
   box-sizing: border-box;
   padding: 9px 12px;

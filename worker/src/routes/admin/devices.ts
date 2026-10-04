@@ -9,6 +9,19 @@ import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketReadAccess } from "../../lib/bucket-access";
 import { deleteBucketKey, parseWrappedBucketKey, upsertBucketKey } from "../../lib/bucket-keys";
 import { MAX_DEVICE_LABEL, isValidMac, isValidP256PublicKeyB64, validateLabel } from "../../lib/validate";
+import { evaluateDeviceHealth, type DeviceHealth } from "../../lib/device-health";
+
+/** snake_case like the rest of this API's JSON. */
+function toHealthJson(h: DeviceHealth) {
+  return { offline: h.offline, low_battery: h.lowBattery, offline_after: h.offlineAfter };
+}
+
+type DeviceHealthColumns = {
+  mac: string;
+  alerts_muted: number;
+  offline_alerted_at: number | null;
+  low_battery_alerted_at: number | null;
+};
 
 // The device's self-generated HMAC key (hex), scanned off its own display via the
 // registration QR — see lib/device-signature.ts. Loose length bound since the
@@ -139,10 +152,13 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
 
   app.get("/admin/devices", requireAdmin, async (c) => {
     const rows = await c.env.DB.prepare(
-      "SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at, running_firmware_version, board, sharing_public_key FROM devices WHERE user_id = ?"
+      `SELECT mac, label, created_at, last_seen_at, last_seen_ip, last_battery_voltage, last_battery_at,
+              running_firmware_version, board, sharing_public_key,
+              alerts_muted, offline_alerted_at, low_battery_alerted_at
+       FROM devices WHERE user_id = ?`
     )
       .bind(c.var.user.id)
-      .all<Record<string, unknown> & { mac: string }>();
+      .all<Record<string, unknown> & DeviceHealthColumns>();
 
     // One extra query, grouped in JS, rather than N+1 per device.
     const bucketRows =
@@ -160,9 +176,24 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       bucketIdsByMac.set(row.device_mac, list);
     }
 
+    const now = Math.floor(Date.now() / 1000);
     const devices = await Promise.all(
-      rows.results.map(async (row) => ({
+      rows.results.map(async ({ offline_alerted_at, low_battery_alerted_at, alerts_muted, ...row }) => ({
         ...row,
+        alerts_muted: !!alerts_muted,
+        // Same evaluation the hourly alert check runs (lib/health-check.ts), so the
+        // dashboard's "overdue"/"low" badges always agree with what gets alerted.
+        health: toHealthJson(evaluateDeviceHealth(
+          {
+            mac: row.mac,
+            label: (row.label as string | null) ?? null,
+            lastSeenAt: (row.last_seen_at as number | null) ?? null,
+            batteryVoltage: (row.last_battery_voltage as number | null) ?? null,
+            offlineAlertedAt: offline_alerted_at,
+            lowBatteryAlertedAt: low_battery_alerted_at,
+          },
+          now
+        )),
         bucket_ids: bucketIdsByMac.get(row.mac) ?? [],
         current_image: await buildCurrentImage(c.env, row.mac, (row.board as string | null) ?? null),
       }))
@@ -175,9 +206,12 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     if (!macParam) return c.json({ error: "mac is required" }, 400);
     const mac = normalizeMac(macParam);
     if (!isValidMac(mac)) return c.json({ error: "mac must normalize to exactly 12 hex characters" }, 400);
-    const body = await c.req.json<{ label?: string }>().catch(() => ({}) as never);
+    const body = await c.req.json<{ label?: string; alerts_muted?: boolean }>().catch(() => ({}) as never);
     if (body.label !== undefined && body.label !== null && typeof body.label !== "string") {
       return c.json({ error: "label must be a string" }, 400);
+    }
+    if (body.alerts_muted !== undefined && typeof body.alerts_muted !== "boolean") {
+      return c.json({ error: "alerts_muted must be a boolean" }, 400);
     }
     // Empty/null clears the label; a value must be within the display limit.
     if (body.label && body.label.length > MAX_DEVICE_LABEL) {
@@ -193,8 +227,13 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
     if (body.label !== undefined) {
       await c.env.DB.prepare("UPDATE devices SET label = ? WHERE mac = ?").bind(body.label, mac).run();
     }
+    if (body.alerts_muted !== undefined) {
+      await c.env.DB.prepare("UPDATE devices SET alerts_muted = ? WHERE mac = ?")
+        .bind(body.alerts_muted ? 1 : 0, mac)
+        .run();
+    }
 
-    return c.json({ mac, label: body.label });
+    return c.json({ mac, label: body.label, alerts_muted: body.alerts_muted });
   });
 
   // Replaces this device's full bucket subscription set. Every id must be

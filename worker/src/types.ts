@@ -7,6 +7,15 @@ export interface Env {
   // Optional: raises the unauthenticated GitHub API rate limit (60/hr) and would be
   // required if GITHUB_REPO were ever made private. Set via `wrangler secret put`.
   GITHUB_TOKEN?: string;
+  // Cloudflare Email Service `send_email` binding + the address alerts come
+  // from (must be on a domain onboarded for Email Sending). Both optional:
+  // email alerts report themselves unavailable without them — see
+  // lib/email-alerts.ts.
+  EMAIL?: SendEmail;
+  EMAIL_FROM?: string;
+  // Origin used for links in emails sent from the cron (which has no request
+  // to take an origin from), e.g. "https://eink.example.com".
+  PUBLIC_BASE_URL?: string;
   // Optional GitHub App used to file an issue for each device crash / OTA
   // failure (see lib/github-issues.ts). All three secrets must be set for
   // filing to happen; set via `wrangler secret put`.

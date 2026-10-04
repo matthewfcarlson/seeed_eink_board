@@ -330,6 +330,75 @@ correlation of identical photos. Bucket-key rotation recomputes every image's
 hash under the new key via the reencrypt path. Trusted client metadata (the
 Worker can't verify it) — a courtesy check, not a security boundary.
 
+## Device Health Alerts
+
+Owners get told when a frame stops checking in or its battery runs low, by
+email and/or webhooks they add in `/admin`'s Alerts card
+(`migrations/0025_device_alerts.sql`, `0026_notification_emails.sql`,
+`routes/admin/notifications.ts`). Web Push was considered and dropped: iOS
+only delivers it to sites added to the Home Screen, too much friction.
+
+**Email** (`lib/email-alerts.ts`, `routes/email-links.ts`): Cloudflare Email
+Service's `send_email` binding (`env.EMAIL`, beta), from `EMAIL_FROM` (must
+be on a domain onboarded for Email Sending), linking back to
+`PUBLIC_BASE_URL` (the cron has no request origin). Missing binding/sender =
+feature reports unavailable, UI hides the form. The first personal contact
+data in the schema, so: addresses start unverified and get nothing but a
+confirmation link (24h, SHA-256-hashed token) until confirmed; the public
+confirm/unsubscribe pages never act on GET (mail scanners pre-fetch links) —
+a button POSTs; every alert carries RFC 8058 one-click `List-Unsubscribe`
+(https only, so local http dev omits it); unsubscribe/removal deletes the
+row outright. Caller-triggered sends (confirm, resend, test) share a tight
+per-user limit. `wrangler dev` simulates the binding — messages are logged
+with paths to their text/html bodies, nothing is sent.
+
+**Webhooks** formats: `json` (structured,
+signed `X-Eink-Signature: sha256=HMAC(signing_secret, "<X-Eink-Timestamp>.<body>")`),
+`slack`, `discord` (mentions disabled), `ntfy`. URLs are https-only and
+treated as secrets (Slack/Discord embed a token): the API only returns a
+masked `url_preview`, and `signing_secret` is shown once at creation.
+
+**Detection** (`lib/device-health.ts`, pure): a dead frame can't report it's
+dead, so offline is inferred: no authenticated request for 24h
+(`OFFLINE_AFTER_SECONDS`). Deliberately schedule-agnostic — firmware never
+sleeps > 24h whatever its schedule, and a BLE-provisioned schedule isn't
+reported to the Worker anyway. Edge: a device on a full 1440-minute interval
+sleeps right up to that line and can alert/recover if a wake runs long. Low
+battery: < 3.5V, recovers at >= 3.7V (hysteresis). The offline message uses
+the last voltage to guess dead battery (< 3.6V) vs WiFi/power.
+
+**Delivery** (`lib/health-check.ts`, `lib/notify.ts`): the cron is now hourly
+(`index.ts`'s `scheduled()`; firmware sync still only every 6th hour). Alerts
+fire on transitions only — `devices.offline_alerted_at`/
+`low_battery_alerted_at` record what was sent, so each problem gets one
+message and one recovery message, batched per owner. While a device stays
+offline, `still_offline` reminders go out weekly for its first 30 days
+offline, then about monthly, forever until it recovers or is muted, paced by
+`devices.next_reminder_at` (`0027_offline_reminder_schedule.sql`; NULL on an
+alerted device = due, cleared on recovery). State is written before delivery
+regardless of outcome: a broken webhook shows `last_error` in `/admin` rather
+than retrying every hour, at the cost of a failed alert never being retried.
+`devices.alerts_muted` (the "Watched frames" checkboxes) skips a device
+entirely. `GET /admin/devices` returns the same `health` evaluation, shown as
+an "overdue" badge.
+
+**Scale** (designed for thousands of frames; per-invocation caps are 1,000
+KV ops, 1,000 D1 queries, 10,000 subrequests): a run is a fixed number of D1
+calls regardless of fleet size — one aggregate, one candidate query, one
+batched state write, two recipient lookups, one batched delivery-result
+write — and no KV. The candidate query (`selectAlertCandidates`) is the SQL
+form of `planDeviceAlerts`, returning only devices with something to send
+(normally a handful), capped at `MAX_DEVICES_PER_RUN` (200); the rest stay
+candidates for the next hour. Keep the two in sync —
+`test/unit/health-check.test.ts` runs every migration in `node:sqlite` and
+checks the query against the TS rules on a randomized fleet, plus 6,000-frame
+scenarios. Outage guard (`isFleetOutage`): if >= 20 devices and >= 20% of
+those seen in the last 2 days crossed the 24h line within the same day, it's
+treated as our outage (bad deploy, firmware bug, Cloudflare incident) and
+their first offline alerts are held; frames that come back cost nothing, and
+ones still silent once out of that window (~a day later) alert normally.
+Reminders, recoveries, and battery alerts are never held.
+
 ## OTA Firmware Updates
 
 Channel-based (`stable`/`beta`), not admin-picked versions
