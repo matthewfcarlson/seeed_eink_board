@@ -34,6 +34,18 @@ export interface SharingKeyWrap {
   wrap_nonce: string;
 }
 
+/** Wire-format check for an AES-GCM-wrapped sharing private key: a base64
+ *  PKCS#8-sized ciphertext and a 12-byte GCM nonce. Shared by the per-credential
+ *  PRF wrap and the account's recovery-code wrap (migrations/0025), which
+ *  wrap the same plaintext the same way under different KEKs. */
+export function isValidWrappedPrivateKeyFields(wrapped: unknown, nonce: unknown): boolean {
+  if (typeof wrapped !== "string" || typeof nonce !== "string") return false;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(wrapped) || wrapped.length % 4 !== 0 || wrapped.length < 100 || wrapped.length > 400) {
+    return false;
+  }
+  return /^[A-Za-z0-9+/]{16}$/.test(nonce);
+}
+
 export function readSharingKeyWrap(body: Partial<SharingKeyWrap>): SharingKeyWrap | null {
   if (!body.sharing_public_key || !body.wrapped_sharing_key || !body.wrap_nonce) return null;
   // The public half has a protocol-fixed size (raw 65-byte P-256 point → 88
@@ -43,11 +55,7 @@ export function readSharingKeyWrap(body: Partial<SharingKeyWrap>): SharingKeyWra
   // These fields gate the entire bucket-decryption identity, so a malformed
   // upload should be rejected, not stored.
   if (!isValidP256PublicKeyB64(body.sharing_public_key)) return null;
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(body.wrapped_sharing_key) || body.wrapped_sharing_key.length % 4 !== 0 ||
-      body.wrapped_sharing_key.length < 100 || body.wrapped_sharing_key.length > 400) {
-    return null;
-  }
-  if (!/^[A-Za-z0-9+/]{16}$/.test(body.wrap_nonce)) return null;
+  if (!isValidWrappedPrivateKeyFields(body.wrapped_sharing_key, body.wrap_nonce)) return null;
   return {
     sharing_public_key: body.sharing_public_key,
     wrapped_sharing_key: body.wrapped_sharing_key,

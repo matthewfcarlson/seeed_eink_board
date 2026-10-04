@@ -393,6 +393,12 @@ paths:
                       whether this account may mark a bucket it owns
                       is_public; the client uses it to decide whether to show
                       the "Make this public" checkbox at all.
+                  has_recovery_code:
+                    type: boolean
+                    description: >-
+                      Whether a recovery-code wrap is on file
+                      (migrations/0025_recovery_code.sql) — drives the admin
+                      UI's "create a recovery code" nudge.
                   sharing_public_key:
                     type: string
                     nullable: true
@@ -1359,6 +1365,98 @@ paths:
         '200': { description: OK (written, or already had a wrap on file) }
         '400': { description: Missing a required field }
         '404': { description: Unknown credential, or not this account's }
+
+  /admin/me/sharing-key/challenge:
+    post:
+      summary: Mint a single-use sharing-key possession challenge
+      description: >-
+        Returns a fresh ephemeral P-256 public key and a challenge id (5-minute
+        TTL, scoped to the calling account). The client proves it holds the
+        account's sharing private key by sending
+        HMAC(HKDF(ECDH(sharing private key, server_public_key)), "<purpose>:<challenge_id>")
+        — see lib/sharing-key-proof.ts. Required by the two endpoints below
+        that overwrite a wrap, so a session token alone can't.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  challenge_id: { type: string }
+                  server_public_key: { type: string, description: Raw P-256 point, base64. }
+
+  /admin/me/sharing-key/repair:
+    put:
+      summary: Replace this credential's PRF-wrapped sharing key
+      description: >-
+        Unlike PATCH /admin/me/sharing-key (backfill only), this overwrites an
+        existing wrap — for a credential whose stored wrap doesn't open with
+        the PRF output its authenticator now returns (seen with iCloud
+        Keychain: create()-time PRF differs from get()-time). The client
+        must already hold the right key locally. sharing_public_key must equal
+        the account's registered key (it can't be changed here).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                credential_id: { type: string }
+                sharing_public_key: { type: string }
+                wrapped_sharing_key: { type: string }
+                wrap_nonce: { type: string }
+                challenge_id: { type: string }
+                proof: { type: string, description: "base64 HMAC, purpose \"repair-credential-wrap\"" }
+              required: [credential_id, sharing_public_key, wrapped_sharing_key, wrap_nonce, challenge_id, proof]
+      responses:
+        '200': { description: Wrap replaced }
+        '400': { description: Missing/malformed field }
+        '403': { description: Missing, expired, reused, or invalid proof }
+        '404': { description: Unknown credential, or not this account's }
+        '409': { description: sharing_public_key doesn't match the account's registered key }
+
+  /admin/me/recovery-wrap:
+    get:
+      summary: Fetch the account's recovery-code wrap
+      description: >-
+        The sharing private key, AES-256-GCM-wrapped under a key HKDF'd from
+        the user's recovery code (migrations/0025_recovery_code.sql). The
+        Worker never sees the code and can't decrypt this.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sharing_public_key: { type: string, nullable: true }
+                  wrapped_sharing_key: { type: string }
+                  wrap_nonce: { type: string }
+                  created_at: { type: integer }
+        '404': { description: No recovery code set up }
+    put:
+      summary: Set or replace the account's recovery-code wrap
+      description: Replacing invalidates the previous code. Requires a possession proof.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                wrapped_sharing_key: { type: string }
+                wrap_nonce: { type: string }
+                challenge_id: { type: string }
+                proof: { type: string, description: "base64 HMAC, purpose \"set-recovery-wrap\"" }
+              required: [wrapped_sharing_key, wrap_nonce, challenge_id, proof]
+      responses:
+        '200': { description: Stored }
+        '400': { description: Missing/malformed field }
+        '403': { description: Missing, expired, reused, or invalid proof }
 
   /device_config:
     get:

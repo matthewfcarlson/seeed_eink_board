@@ -8,7 +8,8 @@
 -- 0017_packed_encoding.sql, 0018_public_buckets.sql,
 -- 0019_image_board_variants.sql, 0020_image_content_hash.sql,
 -- 0021_rate_limits.sql, 0022_random_rotation.sql,
--- 0023_user_sessions.sql, and 0024_crash_report_ota_error.sql (wrangler d1 migrations tracks applied state
+-- 0023_user_sessions.sql, 0024_crash_report_ota_error.sql, and
+-- 0025_recovery_code.sql (wrangler d1 migrations tracks applied state
 -- per-database).
 
 -- No email/username — passkey registration (see routes/auth-passkey.ts) is the only
@@ -23,6 +24,11 @@ CREATE TABLE users (
   -- migrations/0015). The matching private key is never stored in the clear —
   -- see credentials.wrapped_sharing_key below.
   sharing_public_key TEXT,
+  -- Recovery-code wrap of the same private key (see migrations/0025) — NULL
+  -- until the user generates a recovery code from an unlocked browser.
+  recovery_wrapped_sharing_key TEXT,
+  recovery_wrap_nonce          TEXT,
+  recovery_created_at          INTEGER,
   -- Manually flipped in D1 by the project owner (no API sets this - see
   -- migrations/0018_public_buckets.sql for the exact command). Gates only
   -- whether this account may mark a bucket it owns `is_public` - nothing else.

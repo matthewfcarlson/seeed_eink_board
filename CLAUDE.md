@@ -216,6 +216,26 @@ ceremony can't recover an *already-established* server identity, the client
 now throws rather than silently minting a new, unrecognized keypair; it only
 auto-generates when the server has no identity yet.
 
+A locked browser shows a "This browser isn't unlocked yet" banner
+(`renderLockedBanner`) with two ways out:
+- **Wrap repair:** iCloud Keychain's PRF output at `create()` (what the
+  signup wrap is made from) can differ from its later `get()` output, which
+  leaves every other browser on that passkey locked. When a passkey login's
+  PRF output fails to open the stored wrap but the browser's cached key
+  matches the account, the client re-wraps under the new output via
+  `PUT /admin/me/sharing-key/repair`. One passkey login from an
+  already-unlocked browser fixes every other browser.
+- **Recovery code** (`0025_recovery_code.sql`): 160 random bits shown as
+  `RC1-XXXX-…` (Crockford base32, `client/crypto.ts`). It wraps the sharing
+  private key into `users.recovery_wrapped_sharing_key` and can only be
+  created from an unlocked browser (Account card, plus a dismissible nudge).
+  The server can't create one, so existing accounts get a code only when
+  their owner makes one. Pasting it unlocks any browser without PRF.
+Both endpoints that overwrite a wrap require proof that the caller holds the
+sharing private key, not just a session token: ECDH against a single-use
+server key from `POST /admin/me/sharing-key/challenge`, HMAC over purpose +
+challenge id (`lib/sharing-key-proof.ts`).
+
 Sharing a bucket: the invite link carries the raw key in a `#key=` URL
 fragment (never sent to the server/logs); the invitee's browser reads it,
 re-wraps a durable copy for their own key, then drops the fragment.
@@ -252,8 +272,11 @@ alongside GCM decryption. EE04 static RAM is ~78% used after this feature —
 tight, worth watching before adding more.
 
 **Known gaps:**
-- No way to add a second passkey — losing your one passkey permanently loses
-  access to every bucket you own or were shared (operator can't recover it).
+- No way to add a second passkey. Losing your only passkey loses every bucket
+  unless you made a recovery code (the operator can't recover it either way).
+  Even with a code you still need a session, and a session needs a passkey,
+  so in practice the code helps on a new browser more than after a lost
+  passkey.
 - No ESP32 flash encryption — a stolen device's on-device private key (and
   every bucket key wrapped for it) isn't protected at rest.
 - Rotating a bucket's key re-derives images from the stored raw original with

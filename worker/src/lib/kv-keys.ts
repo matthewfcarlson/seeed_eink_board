@@ -13,6 +13,10 @@ export const kvKeys = {
   // credential) too. Short TTL (see lib/webauthn.ts) — these never need to outlive a
   // single browser round trip.
   passkeyAttempt: (attemptId: string) => `passkey_attempt:${attemptId}`,
+  // Pending sharing-key possession challenges (lib/sharing-key-proof.ts) —
+  // the server's ephemeral ECDH private key for one challenge, scoped to the
+  // user that minted it. Single-use and short-lived like passkeyAttempt.
+  sharingKeyChallenge: (challengeId: string) => `sharing_key_challenge:${challengeId}`,
   firmwareTarget: (target: string) => `firmware_target:${target}`,
   // Board-scoped: firmware_releases' key is (board, version), and a release
   // deliberately reuses the same version tag across boards (one shared
