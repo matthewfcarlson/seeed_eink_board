@@ -190,8 +190,21 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
   return contentType.includes("application/json") ? res.json() : res.text();
 }
 
+// #app-message is a fixed toast (style.css), so a failure from a form far down
+// the page is still seen. Errors stay until dismissed; anything else fades.
+const messageTimers: Record<string, number> = {};
 function showMessage(elId: string, text: string, kind: string) {
-  el(elId).innerHTML = text ? '<div class="message ' + kind + '">' + escapeHtml(text) + "</div>" : "";
+  const target = el(elId);
+  clearTimeout(messageTimers[elId]);
+  target.innerHTML = text
+    ? '<div class="message ' + kind + '" role="' + (kind === "error" ? "alert" : "status") + '">' +
+      '<span class="message-text">' + escapeHtml(text) + "</span>" +
+      '<button type="button" class="message-close" aria-label="Dismiss">&times;</button></div>'
+    : "";
+  target.querySelector(".message-close")?.addEventListener("click", () => showMessage(elId, "", ""));
+  if (text && elId === "app-message" && kind !== "error") {
+    messageTimers[elId] = window.setTimeout(() => showMessage(elId, "", ""), 8000);
+  }
 }
 
 async function publicFetch(path: string, body: any): Promise<any> {

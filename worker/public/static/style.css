@@ -307,6 +307,27 @@ tbody tr:hover { background: var(--surface-2); }
 .message.success { background: var(--green-tint); color: var(--green); }
 .message.error { background: var(--red-tint); color: var(--red-dark); }
 .message.info { background: var(--blue-tint); color: var(--blue-dark); }
+.message { display: flex; align-items: flex-start; gap: 10px; }
+.message-text { flex: 1; overflow-wrap: anywhere; }
+.message-close {
+  background: none; border: none; box-shadow: none; padding: 0 2px;
+  color: inherit; font: inherit; font-size: 1.2em; line-height: 1;
+  cursor: pointer; opacity: 0.6;
+}
+.message-close:hover { opacity: 1; background: none; }
+
+/* The admin page's shared message slot is a toast pinned to the viewport, so
+   a result from a form far down the page isn't rendered off-screen. */
+#app-message .message {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 32px));
+  margin: 0;
+  z-index: 60;
+  box-shadow: var(--shadow-lg);
+}
 
 /* Locked-browser / recovery-code nudge banners (admin.ts's renderLockedBanner,
    renderRecoveryNudge): a headline sentence, a row of actions, and an
