@@ -107,62 +107,6 @@ export function renderAdminPage(): string {
     </div>
   </div>
 
-  <div class="card">
-    <h2>Alerts</h2>
-    <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. A frame counts as offline after 24 hours without checking in. You get one message when something goes wrong and one when it recovers; a frame that stays offline gets a reminder every week for its first month, then about monthly.</p>
-
-    <h3 style="margin-top:18px;">Email</h3>
-    <div id="email-alerts-section">
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Address</th><th>Status</th><th>Last delivery</th><th></th></tr></thead>
-          <tbody id="emails-table"></tbody>
-        </table>
-      </div>
-      <div class="inline-form" style="margin-top:14px;" id="add-email-form">
-        <div class="row">
-          <label for="new-email-address">Email address</label>
-          <input type="email" id="new-email-address" placeholder="you@example.com" maxlength="254" autocomplete="email" spellcheck="false">
-        </div>
-        <button id="add-email-btn">Add email</button>
-        <span class="hint">We'll send a confirmation link first.</span>
-      </div>
-    </div>
-
-    <h3 style="margin-top:26px;">Webhooks</h3>
-    <p class="hint hint-block">Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Name</th><th>Format</th><th>Destination</th><th>Last delivery</th><th></th></tr></thead>
-        <tbody id="webhooks-table"></tbody>
-      </table>
-    </div>
-    <div class="inline-form" style="margin-top:14px;">
-      <div class="row">
-        <label for="new-webhook-url">Webhook URL</label>
-        <input type="url" id="new-webhook-url" placeholder="https://ntfy.sh/your-secret-topic" maxlength="2048" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="row">
-        <label for="new-webhook-format">Format</label>
-        <select id="new-webhook-format">
-          <option value="json">JSON (custom)</option>
-          <option value="discord">Discord</option>
-          <option value="slack">Slack</option>
-          <option value="ntfy">ntfy</option>
-        </select>
-      </div>
-      <div class="row">
-        <label for="new-webhook-label">Name</label>
-        <input type="text" id="new-webhook-label" placeholder="My phone" maxlength="80">
-      </div>
-      <button id="add-webhook-btn">Add webhook</button>
-    </div>
-    <div id="webhook-secret"></div>
-    <h3 style="margin-top:22px;">Watched frames</h3>
-    <p class="hint hint-block">Untick a frame you've unplugged on purpose so it doesn't alert.</p>
-    <div id="alert-devices-list"></div>
-  </div>
-
   <div class="modal-overlay" id="register-modal-overlay">
     <div class="modal">
       <div class="card-head">
@@ -326,6 +270,70 @@ export function renderAdminPage(): string {
     <h3 style="margin-top:26px;">Recovery code</h3>
     <p class="hint hint-block" id="recovery-status"></p>
     <button class="ghost" id="recovery-create-btn">Create recovery code</button>
+  </div>
+
+  <div class="card accordion" id="alerts-accordion">
+    <div class="card-head accordion-toggle" onclick="toggleAccordion('alerts-accordion')">
+      <div>
+        <h2>Alerts</h2>
+        <p class="hint" style="margin:2px 0 0;">Email or webhook notifications when a frame goes offline or runs low on battery</p>
+      </div>
+      <span class="chevron">&#9662;</span>
+    </div>
+    <div class="accordion-body" id="alerts-accordion-body">
+      <p class="hint hint-block">Get a message when a frame stops checking in or its battery runs low. A frame counts as offline after 24 hours without checking in. You get one message when something goes wrong and one when it recovers; a frame that stays offline gets a reminder every week for its first month, then about monthly.</p>
+
+      <h3 style="margin-top:18px;">Email</h3>
+      <div id="email-alerts-section">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Address</th><th>Status</th><th>Last delivery</th><th></th></tr></thead>
+            <tbody id="emails-table"></tbody>
+          </table>
+        </div>
+        <div class="inline-form" style="margin-top:14px;" id="add-email-form">
+          <div class="row">
+            <label for="new-email-address">Email address</label>
+            <input type="email" id="new-email-address" placeholder="you@example.com" maxlength="254" autocomplete="email" spellcheck="false">
+          </div>
+          <button id="add-email-btn">Add email</button>
+          <span class="hint">We'll send a confirmation link first.</span>
+        </div>
+      </div>
+
+      <h3 style="margin-top:26px;">Webhooks</h3>
+      <p class="hint hint-block">Paste an incoming-webhook URL from Discord, Slack, <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> (a free phone-notification app: any hard-to-guess topic name works), or your own service (Home Assistant, n8n&hellip;), which gets signed JSON.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Format</th><th>Destination</th><th>Last delivery</th><th></th></tr></thead>
+          <tbody id="webhooks-table"></tbody>
+        </table>
+      </div>
+      <div class="inline-form" style="margin-top:14px;">
+        <div class="row">
+          <label for="new-webhook-url">Webhook URL</label>
+          <input type="url" id="new-webhook-url" placeholder="https://ntfy.sh/your-secret-topic" maxlength="2048" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="row">
+          <label for="new-webhook-format">Format</label>
+          <select id="new-webhook-format">
+            <option value="json">JSON (custom)</option>
+            <option value="discord">Discord</option>
+            <option value="slack">Slack</option>
+            <option value="ntfy">ntfy</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="new-webhook-label">Name</label>
+          <input type="text" id="new-webhook-label" placeholder="My phone" maxlength="80">
+        </div>
+        <button id="add-webhook-btn">Add webhook</button>
+      </div>
+      <div id="webhook-secret"></div>
+      <h3 style="margin-top:22px;">Watched frames</h3>
+      <p class="hint hint-block">Untick a frame you've unplugged on purpose so it doesn't alert.</p>
+      <div id="alert-devices-list"></div>
+    </div>
   </div>
 
   <div class="modal-overlay" id="recovery-modal-overlay">
