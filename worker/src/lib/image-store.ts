@@ -2,13 +2,16 @@ import type { Env } from "../types";
 import { BOARD_IDS, type BoardId, type PackedEncoding } from "./media-constants";
 
 /** KV keys for the blobs kept per catalog image — see plan §Storage (KV-only).
- *  `packed`/`thumb` are per-board (migrations/0019_image_board_variants.sql -
+ *  `packed`/`thumb`/`cropped` are per-board (migrations/0019_image_board_variants.sql -
  *  a bucket can mix EE02/EE04 devices, so each image needs one rendition per
- *  board); `raw` is the single as-uploaded original, shared by every variant. */
+ *  board); `raw` is the single as-uploaded original, shared by every variant.
+ *  `cropped` is that board's undithered upright crop (migrations/
+ *  0028_image_cropped_source.sql) - optional, absent on older images. */
 export const imageStoreKeys = {
   raw: (deviceKey: string, imageId: string) => `img:raw:${deviceKey}:${imageId}`,
   packed: (deviceKey: string, imageId: string, board: BoardId) => `img:packed:${deviceKey}:${imageId}:${board}`,
   thumb: (deviceKey: string, imageId: string, board: BoardId) => `img:thumb:${deviceKey}:${imageId}:${board}`,
+  cropped: (deviceKey: string, imageId: string, board: BoardId) => `img:cropped:${deviceKey}:${imageId}:${board}`,
 };
 
 /**
@@ -50,6 +53,27 @@ export async function getThumbnail(env: Env, deviceKey: string, imageId: string,
   return env.KV.get(imageStoreKeys.thumb(deviceKey, imageId, board), "arrayBuffer");
 }
 
+/** Writes this board's cropped-source ciphertext, or deletes any existing one
+ *  when `ciphertext` is null — a re-upload or rotation that didn't send one
+ *  must not leave a stale crop (or one under a revoked key version) behind. */
+export async function putOrDeleteCroppedSource(
+  env: Env,
+  deviceKey: string,
+  imageId: string,
+  board: BoardId,
+  ciphertext: Uint8Array | null
+): Promise<void> {
+  const key = imageStoreKeys.cropped(deviceKey, imageId, board);
+  if (ciphertext) await env.KV.put(key, ciphertext);
+  else await env.KV.delete(key);
+}
+
+/** Ciphertext of one board's undithered upright crop (a JPEG once
+ *  decrypted), or null if none was ever stored for this (image, board). */
+export async function getCroppedSource(env: Env, deviceKey: string, imageId: string, board: BoardId): Promise<ArrayBuffer | null> {
+  return env.KV.get(imageStoreKeys.cropped(deviceKey, imageId, board), "arrayBuffer");
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunkSize = 0x8000;
@@ -74,6 +98,7 @@ export async function deleteImageBlobs(env: Env, deviceKey: string, imageId: str
     ...BOARD_IDS.flatMap((board) => [
       env.KV.delete(imageStoreKeys.packed(deviceKey, imageId, board)),
       env.KV.delete(imageStoreKeys.thumb(deviceKey, imageId, board)),
+      env.KV.delete(imageStoreKeys.cropped(deviceKey, imageId, board)),
     ]),
   ]);
 }

@@ -414,7 +414,8 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .device-thumb-wrap { flex: none; }
 .device-thumb {
-  width: 64px; height: 85px;
+  /* Height follows the thumbnail's own aspect (EE02 3:4, EE04 3:5). */
+  width: 64px; height: auto;
   border-radius: var(--r-md);
   object-fit: cover;
   box-shadow: var(--shadow-sm);
@@ -423,6 +424,7 @@ tbody tr:hover { background: var(--surface-2); }
   display: block;
 }
 .device-thumb.placeholder {
+  height: 85px;
   display: flex; align-items: center; justify-content: center;
   color: var(--ink-faint); font-size: 1.4em;
 }

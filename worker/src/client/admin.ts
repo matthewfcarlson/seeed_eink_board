@@ -36,9 +36,9 @@ import {
 } from "./crypto";
 import { DEFAULT_CROP, decodeToBoardBuffer, resizeForStorage, type CropParams } from "./decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
-import { BOARD_IDS, DEFAULT_BOARD_ID, type DitherAlgorithm } from "../lib/media-constants";
+import { BOARD_IDS, DEFAULT_BOARD_ID, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
-import { makeThumbnailJpeg } from "./thumbnail";
+import { makeCroppedSourceJpeg, makeThumbnailJpeg } from "./thumbnail";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
 import { computeSharingKeyProof, type SharingKeyProofPurpose } from "../lib/sharing-key-proof";
 
@@ -1963,13 +1963,21 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
   await Promise.all(
     BOARD_IDS.map(async (board) => {
       const landscape = await decodeToBoardBuffer(file, crop, board);
+      // Both come from the upright crop BEFORE enhance() touches anything:
+      // the cropped source (migrations/0028_image_cropped_source.sql) is what
+      // a later re-render or key rotation starts from, so it must hold the
+      // user's framing without this pipeline's color tweaks baked in.
+      const { upright } = landscape;
+      const [thumbnail, croppedSource] = await Promise.all([
+        makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
+        makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
+      ]);
       enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
       const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
       const packed = packToNibbles(indices);
       if (board === DEFAULT_BOARD_ID) {
         contentHash.value = await computeContentHash(bucketKey, packed);
       }
-      const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
 
       // Compress the plaintext packed buffer BEFORE encrypting it -
       // ciphertext doesn't compress meaningfully (see compress.ts's doc
@@ -1977,9 +1985,10 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
       // meaningfully smaller.
       const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
 
-      const [packedCiphertext, thumbCiphertext] = await Promise.all([
+      const [packedCiphertext, thumbCiphertext, croppedCiphertext] = await Promise.all([
         aesGcmEncryptBlob(bucketKey, packedForUpload),
         aesGcmEncryptBlob(bucketKey, thumbnail),
+        aesGcmEncryptBlob(bucketKey, croppedSource),
       ]);
       const packedHash = await computeHash16(packedCiphertext);
 
@@ -1987,6 +1996,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
       formData.set(`packed_hash__${board}`, packedHash);
       formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
       formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+      formData.set(`cropped__${board}`, new Blob([new Uint8Array(croppedCiphertext)]), `cropped-${board}.bin`);
     })
   );
 
@@ -2187,18 +2197,29 @@ function rotateModalClose() {
 }
 el("rotate-modal-close-btn").addEventListener("click", rotateModalClose);
 
+/** Fetches and decrypts one board's stored cropped source (a JPEG), or null
+ *  when the image has none - see GET /admin/images/:id/cropped/:board. */
+async function fetchCroppedSource(imageId: string, board: BoardId, key: CryptoKey): Promise<Uint8Array | null> {
+  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/cropped/" + encodeURIComponent(board), {
+    headers: { Authorization: "Bearer " + getApiKey() },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  return aesGcmDecryptBlob(key, new Uint8Array(await res.arrayBuffer()));
+}
+
 /**
  * Re-encrypts one image under `newKey`: fetches and decrypts its raw original
- * (the only ciphertext an admin route exposes — there is no route to fetch an
- * image's already-processed packed/thumb blobs) under `oldKey`, then re-runs
+ * and per-board cropped sources (there is no route to fetch an image's
+ * already-processed packed/thumb blobs) under `oldKey`, then re-runs
  * the exact decode -> enhance -> dither -> pack -> thumbnail pipeline
  * processAndUploadImage() uses, so the result is the same processing applied again,
- * not a copy of bytes that happen to already exist. Note this re-crops with
- * the DEFAULT_CROP framing (centered, no zoom): per-image pan/zoom choices
- * made at original upload time aren't persisted anywhere server-side (they're
- * baked directly into the packed pixels, never stored as separate metadata),
- * so there's no way to reproduce a custom crop here — only the pixels for a
- * previously-default-cropped image are guaranteed to come out identical.
+ * not a copy of bytes that happen to already exist. Each board starts from
+ * that board's stored cropped source when there is one (migrations/
+ * 0028_image_cropped_source.sql), which keeps the user's original pan/zoom.
+ * An image uploaded before cropped sources existed has none, so it's
+ * re-cropped from the raw original with DEFAULT_CROP (centered, no zoom) and
+ * that crop is stored as its cropped source from here on.
  */
 async function reencryptOneImage(
   bucketId: string,
@@ -2226,7 +2247,19 @@ async function reencryptOneImage(
   // bucket key anyway).
   await Promise.all(
     BOARD_IDS.map(async (board) => {
-      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(rawBytes)]), DEFAULT_CROP, board);
+      // The stored crop is already exactly this board's upright size, so
+      // decodeToBoardBuffer's cover-fit is a 1:1 draw - DEFAULT_CROP only
+      // matters on the raw-original fallback.
+      const storedCrop = await fetchCroppedSource(imageId, board, oldKey);
+      const source = storedCrop ?? rawBytes;
+      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(source)]), DEFAULT_CROP, board);
+      const { upright } = landscape;
+      const [thumbnail, croppedSource] = await Promise.all([
+        makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
+        // Re-encrypt the stored crop's exact bytes rather than re-encoding
+        // it - no generational JPEG loss on every rotation.
+        storedCrop ?? makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
+      ]);
       enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
       const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
       const packed = packToNibbles(indices);
@@ -2237,13 +2270,13 @@ async function reencryptOneImage(
       if (board === DEFAULT_BOARD_ID) {
         formData.set("content_hash", await computeContentHash(newKey, packed));
       }
-      const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
 
       const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
 
-      const [newPackedCiphertext, newThumbCiphertext] = await Promise.all([
+      const [newPackedCiphertext, newThumbCiphertext, newCroppedCiphertext] = await Promise.all([
         aesGcmEncryptBlob(newKey, packedForUpload),
         aesGcmEncryptBlob(newKey, thumbnail),
+        aesGcmEncryptBlob(newKey, croppedSource),
       ]);
       const packedHash = await computeHash16(newPackedCiphertext);
 
@@ -2251,6 +2284,7 @@ async function reencryptOneImage(
       formData.set(`packed_hash__${board}`, packedHash);
       formData.set(`packed__${board}`, new Blob([new Uint8Array(newPackedCiphertext)]), `packed-${board}.bin`);
       formData.set(`thumb__${board}`, new Blob([new Uint8Array(newThumbCiphertext)]), `thumb-${board}.bin`);
+      formData.set(`cropped__${board}`, new Blob([new Uint8Array(newCroppedCiphertext)]), `cropped-${board}.bin`);
     })
   );
 

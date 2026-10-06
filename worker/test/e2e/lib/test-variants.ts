@@ -12,7 +12,10 @@ import { buildDummyBlob, buildEe04TestPackedImage, buildTestPackedImage } from "
  * boards' variants (migrations/0019_image_board_variants.sql), so this is
  * the shared "just give me something valid for both" fixture.
  */
-export async function buildBothBoardVariants(bucketKey: CryptoKey): Promise<Record<BoardId, CiphertextVariant>> {
+export async function buildBothBoardVariants(
+  bucketKey: CryptoKey,
+  opts: { croppedLabel?: string } = {}
+): Promise<Record<BoardId, CiphertextVariant>> {
   const ee02 = buildTestPackedImage();
   const ee04 = buildEe04TestPackedImage();
   const [ee02Packed, ee04Packed, thumb] = await Promise.all([
@@ -20,8 +23,12 @@ export async function buildBothBoardVariants(bucketKey: CryptoKey): Promise<Reco
     aesGcmEncryptBlob(bucketKey, ee04.packed),
     aesGcmEncryptBlob(bucketKey, buildDummyBlob("thumb")),
   ]);
+  // With `croppedLabel`, each board also gets a cropped source whose
+  // plaintext is "e2e-test-<croppedLabel>-<board>".
+  const cropped = async (board: BoardId) =>
+    opts.croppedLabel ? { cropped: await aesGcmEncryptBlob(bucketKey, buildDummyBlob(`${opts.croppedLabel}-${board}`)) } : {};
   return {
-    "ee02-13in3": { packedHash: ee02.packedHash, packed: ee02Packed, thumb },
-    "ee04-7in3": { packedHash: ee04.packedHash, packed: ee04Packed, thumb },
+    "ee02-13in3": { packedHash: ee02.packedHash, packed: ee02Packed, thumb, ...(await cropped("ee02-13in3")) },
+    "ee04-7in3": { packedHash: ee04.packedHash, packed: ee04Packed, thumb, ...(await cropped("ee04-7in3")) },
   };
 }

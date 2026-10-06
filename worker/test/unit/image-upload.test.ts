@@ -119,3 +119,33 @@ describe("readCiphertextUploadBytes", () => {
     expect(await readCiphertextUploadBytes(fields)).toEqual({ error: expect.stringContaining("Empty") });
   });
 });
+
+describe("cropped__<board> (optional cropped source)", () => {
+  it("is null for every board when absent (older callers)", async () => {
+    const fields = validateCiphertextUploadFields(validBody());
+    if ("error" in fields) throw new Error(fields.error);
+    const result = await readCiphertextUploadBytes(fields);
+    if ("error" in result) throw new Error(result.error);
+    for (const board of BOARD_IDS) expect(result.variants[board].croppedBytes).toBeNull();
+  });
+
+  it("reads a board's cropped bytes when present", async () => {
+    const fields = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: file([4, 4, 4, 4]) }));
+    if ("error" in fields) throw new Error(fields.error);
+    const result = await readCiphertextUploadBytes(fields);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.variants[BOARD_IDS[0]!]!.croppedBytes).toEqual(new Uint8Array([4, 4, 4, 4]));
+    expect(result.variants[BOARD_IDS[1]!]!.croppedBytes).toBeNull();
+  });
+
+  it("rejects a non-File cropped value", () => {
+    const result = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: "not-a-file" }));
+    expect(result).toEqual({ error: expect.stringContaining("cropped__") });
+  });
+
+  it("rejects an empty cropped file", async () => {
+    const fields = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: file([]) }));
+    if ("error" in fields) throw new Error(fields.error);
+    expect(await readCiphertextUploadBytes(fields)).toEqual({ error: expect.stringContaining("Empty") });
+  });
+});

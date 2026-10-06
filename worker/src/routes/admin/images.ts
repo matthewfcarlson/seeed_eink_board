@@ -1,14 +1,16 @@
 import type { Hono } from "hono";
-import { BOARD_IDS, DEFAULT_BOARD_ID, DITHER_ALGORITHMS, type BoardId, type DitherAlgorithm, type Env } from "../../types";
+import { BOARD_IDS, DEFAULT_BOARD_ID, DITHER_ALGORITHMS, isValidBoardId, type BoardId, type DitherAlgorithm, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketAccess, assertBucketReadAccess } from "../../lib/bucket-access";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
 import {
   deleteImageBlobs,
+  getCroppedSource,
   getRawImage,
   getThumbnailCiphertextB64,
   putPackedImage,
   putRawImage,
+  putOrDeleteCroppedSource,
   putThumbnail,
 } from "../../lib/image-store";
 import { readCiphertextUploadBytes, validateCiphertextUploadFields } from "../../lib/image-upload";
@@ -121,6 +123,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       ...BOARD_IDS.flatMap((board) => [
         putPackedImage(c.env, deviceKey, id, board, variants[board].packedBytes),
         putThumbnail(c.env, deviceKey, id, board, variants[board].thumbBytes),
+        putOrDeleteCroppedSource(c.env, deviceKey, id, board, variants[board].croppedBytes),
       ]),
     ]);
 
@@ -138,13 +141,14 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion, fields.contentHash ?? null),
       ...BOARD_IDS.map((board) =>
         c.env.DB.prepare(
-          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes, cropped_bytes)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(image_id, board) DO UPDATE SET
              packed_encoding = excluded.packed_encoding,
              packed_hash = excluded.packed_hash,
-             packed_bytes = excluded.packed_bytes`
-        ).bind(id, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength)
+             packed_bytes = excluded.packed_bytes,
+             cropped_bytes = excluded.cropped_bytes`
+        ).bind(id, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength, variants[board].croppedBytes?.byteLength ?? null)
       ),
     ]);
 
@@ -197,16 +201,29 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     if (rows.results.length === 0) return c.json({ images: [] });
 
     const variantRows = await c.env.DB.prepare(
-      `SELECT image_id, board, packed_hash, packed_bytes, packed_encoding FROM image_variants
+      `SELECT image_id, board, packed_hash, packed_bytes, packed_encoding, cropped_bytes FROM image_variants
        WHERE image_id IN (${rows.results.map(() => "?").join(",")})`
     )
       .bind(...rows.results.map((r) => r.id))
-      .all<{ image_id: string; board: BoardId; packed_hash: string; packed_bytes: number; packed_encoding: string }>();
+      .all<{
+        image_id: string;
+        board: BoardId;
+        packed_hash: string;
+        packed_bytes: number;
+        packed_encoding: string;
+        cropped_bytes: number | null;
+      }>();
 
-    const variantsByImage = new Map<string, Record<string, { packed_hash: string; packed_bytes: number; packed_encoding: string }>>();
+    type VariantSummary = { packed_hash: string; packed_bytes: number; packed_encoding: string; cropped_bytes: number | null };
+    const variantsByImage = new Map<string, Record<string, VariantSummary>>();
     for (const v of variantRows.results) {
       const entry = variantsByImage.get(v.image_id) ?? {};
-      entry[v.board] = { packed_hash: v.packed_hash, packed_bytes: v.packed_bytes, packed_encoding: v.packed_encoding };
+      entry[v.board] = {
+        packed_hash: v.packed_hash,
+        packed_bytes: v.packed_bytes,
+        packed_encoding: v.packed_encoding,
+        cropped_bytes: v.cropped_bytes,
+      };
       variantsByImage.set(v.image_id, entry);
     }
 
@@ -271,6 +288,33 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     // Not long-cacheable: re-uploading the same filename reuses this id (see the
     // upload handler above), so the bytes at this URL can change over time.
     return new Response(new Uint8Array(raw), {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Cache-Control": "private, no-cache",
+      },
+    });
+  });
+
+  // One board's undithered upright crop (migrations/0028_image_cropped_source.sql),
+  // as ciphertext. 404 when this image has none (it predates the column, or
+  // was uploaded by an older client) - callers fall back to re-cropping the
+  // raw original. Same access/caching rules as /raw above.
+  app.get("/admin/images/:id/cropped/:board", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    const board = c.req.param("board");
+    if (!id || !board) return c.json({ error: "id and board are required" }, 400);
+    if (!isValidBoardId(board)) return c.json({ error: `board must be one of: ${BOARD_IDS.join(", ")}` }, 400);
+
+    const deviceKey = await findImageDeviceKey(c.env, id);
+    if (!deviceKey) return c.json({ error: "Not found" }, 404);
+    if (!(await assertBucketReadAccess(c.env, deviceKey, c.var.user.id))) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+
+    const cropped = await getCroppedSource(c.env, deviceKey, id, board);
+    if (!cropped) return c.json({ error: "Not found" }, 404);
+
+    return new Response(new Uint8Array(cropped), {
       headers: {
         "Content-Type": "application/octet-stream",
         "Cache-Control": "private, no-cache",

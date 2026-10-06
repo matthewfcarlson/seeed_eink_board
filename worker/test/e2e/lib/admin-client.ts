@@ -9,6 +9,8 @@ export interface CiphertextVariant {
   packedHash: string;
   packed: Uint8Array;
   thumb: Uint8Array;
+  /** Optional cropped source (migrations/0028_image_cropped_source.sql). */
+  cropped?: Uint8Array;
   packedEncoding?: PackedEncoding;
 }
 
@@ -182,7 +184,22 @@ export class AdminClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  async listImages(bucketId: string): Promise<Array<{ id: string; filename: string; dither_algorithm: string }>> {
+  /** One board's cropped-source ciphertext, or null on 404 (none stored). */
+  async getCroppedSourceCiphertext(imageId: string, board: BoardId): Promise<Uint8Array | null> {
+    const res = await fetch(`${this.baseUrl}/admin/images/${imageId}/cropped/${board}`, { headers: this.authHeaders() });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`GET cropped source failed: ${res.status} ${await res.text()}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  async listImages(bucketId: string): Promise<
+    Array<{
+      id: string;
+      filename: string;
+      dither_algorithm: string;
+      variants: Record<string, { cropped_bytes: number | null }>;
+    }>
+  > {
     const { images } = await this.json<{ images: any[] }>(`/admin/images?device_key=${encodeURIComponent(bucketId)}`, {
       method: "GET",
     });
@@ -334,6 +351,7 @@ function buildVariantFormData(opts: { raw: Uint8Array; variants: Record<BoardId,
     form.set(`packed_encoding__${board}`, variant.packedEncoding ?? "identity");
     form.set(`packed__${board}`, new Blob([new Uint8Array(variant.packed)]), `packed-${board}.bin`);
     form.set(`thumb__${board}`, new Blob([new Uint8Array(variant.thumb)]), `thumb-${board}.bin`);
+    if (variant.cropped) form.set(`cropped__${board}`, new Blob([new Uint8Array(variant.cropped)]), `cropped-${board}.bin`);
   }
   return form;
 }

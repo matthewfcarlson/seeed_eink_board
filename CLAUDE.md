@@ -279,9 +279,11 @@ tight, worth watching before adding more.
   passkey.
 - No ESP32 flash encryption — a stolen device's on-device private key (and
   every bucket key wrapped for it) isn't protected at rest.
-- Rotating a bucket's key re-derives images from the stored raw original with
-  a centered/no-zoom crop — per-image crop/pan/zoom isn't persisted, so a
-  custom crop resets on rotation. Cosmetic, not a security issue.
+- Rotating a bucket's key re-derives each board's variant from that board's
+  stored **cropped source** (below), so a custom crop survives. Images
+  uploaded before cropped sources existed have none and are re-cropped
+  centered/no-zoom from the raw original (that crop is then stored). Cosmetic,
+  not a security issue.
 - The upload crop UI shows one reference board's aspect ratio (EE02's
   portrait 3:4); the other board's variant is derived from the same
   `panX`/`panY`/`zoom` fractions applied to its own aspect ratio, not a
@@ -316,6 +318,17 @@ is tracked per-device, and two devices sharing the same buckets are seeded
 with their own MAC so they don't march in lockstep. Uploading/deleting takes
 effect on the device's next `/image_packed` request, which also records what
 was served.
+
+**Cropped source** (`migrations/0028_image_cropped_source.sql`): alongside
+each board's packed variant the client stores `img:cropped:<bucket>:<id>:<board>`
+— an encrypted JPEG (q0.92) of the user's upright crop at that board's full
+resolution, *before* enhance/dither. It's the input for any future re-render
+(e.g. a color-pipeline change) or key rotation, so the user's framing is
+never lost, and the dashboard thumbnail is derived from the same crop at its
+true aspect (EE02 3:4 -> 120x160, EE04 3:5 -> 96x160; it used to be forced to
+120x160 for both). Optional on the wire (`cropped__<board>`); a re-upload or
+rotation that omits it deletes the old one, and `image_variants.cropped_bytes`
+is NULL. Fetched via `GET /admin/images/:id/cropped/:board` (404 = none).
 
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default

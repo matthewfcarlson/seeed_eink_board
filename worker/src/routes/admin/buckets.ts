@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { BOARD_IDS, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { deleteImageBlobs, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
+import { deleteImageBlobs, putOrDeleteCroppedSource, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
 import {
   bucketKeyUpsertStatement,
@@ -542,6 +542,7 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
       ...BOARD_IDS.flatMap((board) => [
         putPackedImage(c.env, id, imageId, board, variants[board].packedBytes),
         putThumbnail(c.env, id, imageId, board, variants[board].thumbBytes),
+        putOrDeleteCroppedSource(c.env, id, imageId, board, variants[board].croppedBytes),
       ]),
     ]);
 
@@ -550,13 +551,14 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
         .bind(rawBytes.byteLength, rotation.new_key_version, imageId),
       ...BOARD_IDS.map((board) =>
         c.env.DB.prepare(
-          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes, cropped_bytes)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(image_id, board) DO UPDATE SET
              packed_encoding = excluded.packed_encoding,
              packed_hash = excluded.packed_hash,
-             packed_bytes = excluded.packed_bytes`
-        ).bind(imageId, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength)
+             packed_bytes = excluded.packed_bytes,
+             cropped_bytes = excluded.cropped_bytes`
+        ).bind(imageId, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength, variants[board].croppedBytes?.byteLength ?? null)
       ),
     ]);
 

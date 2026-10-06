@@ -12,6 +12,11 @@
  * confirmUpload/reencryptOneImage) always generates all of them, and only
  * two boards exist today, so there's no partial-upload case worth supporting.
  *
+ * `cropped__<board>` is optional per board: the encrypted undithered upright
+ * crop (migrations/0028_image_cropped_source.sql). Optional so an older
+ * client (or scripts/upload-images.ts run from an old checkout) still
+ * uploads; the routes delete any previously stored crop when it's absent.
+ *
  * `content_hash` is optional (present only from clients new enough to send
  * it): the upload route uses it for duplicate rejection, the rotation
  * reencrypt-image route just refreshes the stored column (the rotation
@@ -23,6 +28,7 @@ import { BOARD_IDS, isValidPackedEncoding, type BoardId, type PackedEncoding } f
 export interface CiphertextUploadVariantFields {
   packed: File;
   thumb: File;
+  cropped: File | null;
   packedHash: string;
   packedEncoding: PackedEncoding;
 }
@@ -47,6 +53,7 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
   for (const board of BOARD_IDS) {
     const packed = body[`packed__${board}`];
     const thumb = body[`thumb__${board}`];
+    const cropped = body[`cropped__${board}`];
     const packedHash = body[`packed_hash__${board}`];
     const packedEncoding = body[`packed_encoding__${board}`] ?? "identity";
 
@@ -59,7 +66,10 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
     if (typeof packedEncoding !== "string" || !isValidPackedEncoding(packedEncoding)) {
       return { error: `packed_encoding__${board} must be one of the known PackedEncoding values` };
     }
-    variants[board] = { packed, thumb, packedHash, packedEncoding };
+    if (cropped !== undefined && !(cropped instanceof File)) {
+      return { error: `cropped__${board} must be a ciphertext file when present` };
+    }
+    variants[board] = { packed, thumb, cropped: cropped ?? null, packedHash, packedEncoding };
   }
 
   const contentHash = body.content_hash;
@@ -73,6 +83,7 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
 export interface CiphertextUploadVariantBytes {
   packedBytes: Uint8Array;
   thumbBytes: Uint8Array;
+  croppedBytes: Uint8Array | null;
 }
 
 export interface CiphertextUploadBytes {
@@ -90,14 +101,15 @@ export async function readCiphertextUploadBytes(fields: CiphertextUploadFields):
   const variants = {} as Record<BoardId, CiphertextUploadVariantBytes>;
   for (const board of BOARD_IDS) {
     const variant = fields.variants[board];
-    const [packedBytes, thumbBytes] = await Promise.all([
+    const [packedBytes, thumbBytes, croppedBytes] = await Promise.all([
       variant.packed.arrayBuffer().then((b) => new Uint8Array(b)),
       variant.thumb.arrayBuffer().then((b) => new Uint8Array(b)),
+      variant.cropped ? variant.cropped.arrayBuffer().then((b) => new Uint8Array(b)) : null,
     ]);
-    if (packedBytes.byteLength === 0 || thumbBytes.byteLength === 0) {
+    if (packedBytes.byteLength === 0 || thumbBytes.byteLength === 0 || croppedBytes?.byteLength === 0) {
       return { error: `Empty ciphertext body for board ${board}` };
     }
-    variants[board] = { packedBytes, thumbBytes };
+    variants[board] = { packedBytes, thumbBytes, croppedBytes };
   }
 
   return { rawBytes, variants };
