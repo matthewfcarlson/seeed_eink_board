@@ -134,6 +134,12 @@ components:
             now — see migrations/0016_bucket_key_rotation.sql. Lags the
             bucket's own key_version between a rotation's start and this
             image's reencrypt-image call.
+        pipeline_version:
+          type: integer
+          description: >-
+            Which client image-pipeline version produced this image's variants
+            (migrations/0029_image_pipeline_version.sql). Below the client's
+            IMAGE_PIPELINE_VERSION = rendered by an older pipeline.
         variants:
           type: object
           description: >-
@@ -958,6 +964,7 @@ paths:
                 packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
                 cropped__ee02-13in3: { type: string, format: binary, description: Optional EE02 cropped source re-encrypted under the new key (see /admin/images/upload). Omitting it deletes the old one. }
                 cropped__ee04-7in3: { type: string, format: binary, description: Optional EE04 cropped source re-encrypted under the new key. Omitting it deletes the old one. }
+                pipeline_version: { type: integer, minimum: 1, default: 1, description: "IMAGE_PIPELINE_VERSION (lib/media-constants.ts) of the client that produced these variants (migrations/0029_image_pipeline_version.sql). Absent = 1. The dashboard flags images below the current version." }
                 content_hash: { type: string, description: Optional refreshed 16-char hex content hash under the NEW bucket key (see /admin/images/upload); recomputed because the rotation re-derives the packed pixels. }
       responses:
         '200':
@@ -1134,6 +1141,7 @@ paths:
                     re-render or key rotation keeps the user's framing.
                     Omitting it on a re-upload deletes any previously stored one.
                 cropped__ee04-7in3: { type: string, format: binary, description: Optional EE04 cropped source (480x800); same rules as cropped__ee02-13in3. }
+                pipeline_version: { type: integer, minimum: 1, default: 1, description: "IMAGE_PIPELINE_VERSION (lib/media-constants.ts) of the client that produced these variants (migrations/0029_image_pipeline_version.sql). Absent = 1. The dashboard flags images below the current version." }
                 content_hash:
                   type: string
                   description: >-

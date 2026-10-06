@@ -130,15 +130,16 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     const now = Math.floor(Date.now() / 1000);
     await c.env.DB.batch([
       c.env.DB.prepare(
-        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version, content_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version, content_hash, pipeline_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(device_key, filename) DO UPDATE SET
            dither_algorithm = excluded.dither_algorithm,
            raw_bytes = excluded.raw_bytes,
            created_at = excluded.created_at,
            key_version = excluded.key_version,
-           content_hash = excluded.content_hash`
-      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion, fields.contentHash ?? null),
+           content_hash = excluded.content_hash,
+           pipeline_version = excluded.pipeline_version`
+      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion, fields.contentHash ?? null, fields.pipelineVersion),
       ...BOARD_IDS.map((board) =>
         c.env.DB.prepare(
           `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes, cropped_bytes)
@@ -161,6 +162,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
         device_key: deviceKey,
         filename,
         dither_algorithm: ditherParam,
+        pipeline_version: fields.pipelineVersion,
         variants: Object.fromEntries(
           BOARD_IDS.map((board) => [
             board,
@@ -186,7 +188,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     }
 
     const rows = await c.env.DB.prepare(
-      "SELECT id, filename, dither_algorithm, raw_bytes, created_at, key_version FROM images WHERE device_key = ? ORDER BY filename ASC"
+      "SELECT id, filename, dither_algorithm, raw_bytes, created_at, key_version, pipeline_version FROM images WHERE device_key = ? ORDER BY filename ASC"
     )
       .bind(deviceKey)
       .all<{
@@ -196,6 +198,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
         raw_bytes: number;
         created_at: number;
         key_version: number;
+        pipeline_version: number;
       }>();
 
     if (rows.results.length === 0) return c.json({ images: [] });

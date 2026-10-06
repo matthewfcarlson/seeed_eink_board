@@ -547,8 +547,11 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     ]);
 
     await c.env.DB.batch([
-      c.env.DB.prepare("UPDATE images SET raw_bytes = ?, key_version = ? WHERE id = ?")
-        .bind(rawBytes.byteLength, rotation.new_key_version, imageId),
+      // A rotation re-renders every variant, so it also brings the image up
+      // to whatever pipeline version the rotating client runs
+      // (migrations/0029_image_pipeline_version.sql).
+      c.env.DB.prepare("UPDATE images SET raw_bytes = ?, key_version = ?, pipeline_version = ? WHERE id = ?")
+        .bind(rawBytes.byteLength, rotation.new_key_version, fields.pipelineVersion, imageId),
       ...BOARD_IDS.map((board) =>
         c.env.DB.prepare(
           `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes, cropped_bytes)

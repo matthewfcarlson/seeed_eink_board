@@ -40,6 +40,7 @@ import {
   type BoardId,
   type DitherAlgorithm,
   DITHER_ALGORITHMS,
+  IMAGE_PIPELINE_VERSION,
 } from "../src/lib/media-constants";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../src/lib/dither";
 import { rotate90CW } from "../src/lib/decode";
@@ -481,6 +482,7 @@ async function buildUploadForm(
   const form = new FormData();
   form.set("dither_algorithm", dither);
   form.set("raw", new Blob([rawCiphertext]), "raw.bin");
+  form.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
   for (const board of BOARD_IDS) {
     const geometry = BOARD_GEOMETRY[board];

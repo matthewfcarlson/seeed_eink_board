@@ -36,7 +36,7 @@ import {
 } from "./crypto";
 import { DEFAULT_CROP, decodeToBoardBuffer, resizeForStorage, type CropParams } from "./decode";
 import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
-import { BOARD_IDS, DEFAULT_BOARD_ID, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
+import { BOARD_IDS, DEFAULT_BOARD_ID, IMAGE_PIPELINE_VERSION, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
 import { makeCroppedSourceJpeg, makeThumbnailJpeg } from "./thumbnail";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
@@ -1349,6 +1349,20 @@ function bucketHasWriteAccess(bucket: any): boolean {
   return !!bucket.key;
 }
 
+// Small badge on a photo tile whose variants came from an older version of
+// the image pipeline (migrations/0029_image_pipeline_version.sql). The
+// title says what re-uploading would gain; version 1 is the only old one so
+// far, and what it lacks is a saved crop.
+function outdatedPipelineBadge(img: any): string {
+  const version = Number(img.pipeline_version ?? 1);
+  if (version >= IMAGE_PIPELINE_VERSION) return "";
+  const title =
+    "Processed by an older version of the image pipeline (v" + version + ", current v" + IMAGE_PIPELINE_VERSION + "). " +
+    (version < 2 ? "Its crop wasn't saved and its preview may be the wrong shape. " : "") +
+    "Re-upload it to use the latest processing.";
+  return '<span class="photo-tile-outdated" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">&#8635;</span>';
+}
+
 function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotation: any | null): string {
   const canWrite = bucketHasWriteAccess(bucket);
   const tiles = images
@@ -1362,7 +1376,10 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
       return (
         '<div class="photo-tile" onclick="openLightbox(' + jsArg(img.id) + ', ' + jsArg(bucket.id) + ', ' + jsArg(img.filename) + ')">' +
           thumb +
-          '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
+          '<div class="photo-tile-badges">' +
+            '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
+            outdatedPipelineBadge(img) +
+          "</div>" +
           deleteBtn +
           '<div class="photo-tile-caption">' + escapeHtml(img.filename) + "</div>" +
         "</div>"
@@ -1946,6 +1963,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
   const formData = new FormData();
   formData.set("dither_algorithm", dither);
   formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
+  formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
   // Bucket-key-keyed hash of the default board's PLAINTEXT packed buffer
   // (see crypto.ts's computeContentHash) — the Worker compares it against
@@ -2239,6 +2257,7 @@ async function reencryptOneImage(
 
   const formData = new FormData();
   formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
+  formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
   // Every board's variant gets re-derived and re-uploaded together, same as
   // processAndUploadImage() - this does NOT try to preserve whatever packed_encoding

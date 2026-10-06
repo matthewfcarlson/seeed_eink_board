@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readCiphertextUploadBytes, validateCiphertextUploadFields } from "../../src/lib/image-upload";
-import { BOARD_IDS } from "../../src/lib/media-constants";
+import { BOARD_IDS, IMAGE_PIPELINE_VERSION } from "../../src/lib/media-constants";
 
 function file(bytes: number[] = [1, 2, 3]): File {
   return new File([new Uint8Array(bytes)], "blob");
@@ -147,5 +147,28 @@ describe("cropped__<board> (optional cropped source)", () => {
     const fields = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: file([]) }));
     if ("error" in fields) throw new Error(fields.error);
     expect(await readCiphertextUploadBytes(fields)).toEqual({ error: expect.stringContaining("Empty") });
+  });
+});
+
+describe("pipeline_version", () => {
+  it("defaults to 1 when absent (clients from before the field existed)", () => {
+    const result = validateCiphertextUploadFields(validBody());
+    if ("error" in result) throw new Error(result.error);
+    expect(result.pipelineVersion).toBe(1);
+  });
+
+  it("accepts every version up to the current one", () => {
+    for (let v = 1; v <= IMAGE_PIPELINE_VERSION; v++) {
+      const result = validateCiphertextUploadFields(validBody({ pipeline_version: String(v) }));
+      if ("error" in result) throw new Error(result.error);
+      expect(result.pipelineVersion).toBe(v);
+    }
+  });
+
+  it("rejects zero, future, non-integer and non-string values", () => {
+    for (const bad of ["0", String(IMAGE_PIPELINE_VERSION + 1), "1.5", "-1", "abc", "", 2]) {
+      const result = validateCiphertextUploadFields(validBody({ pipeline_version: bad }));
+      expect(result).toEqual({ error: expect.stringContaining("pipeline_version") });
+    }
   });
 });

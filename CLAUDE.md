@@ -330,6 +330,17 @@ true aspect (EE02 3:4 -> 120x160, EE04 3:5 -> 96x160; it used to be forced to
 rotation that omits it deletes the old one, and `image_variants.cropped_bytes`
 is NULL. Fetched via `GET /admin/images/:id/cropped/:board` (404 = none).
 
+**Pipeline version** (`migrations/0029_image_pipeline_version.sql`):
+`images.pipeline_version` records which `IMAGE_PIPELINE_VERSION`
+(`lib/media-constants.ts`, with a history comment) produced an image's
+variants; the client sends it as `pipeline_version` on upload and
+reencrypt-image (absent = 1). The gallery shows a small yellow ↻ badge on
+any tile below the current version (`outdatedPipelineBadge`). Bump the
+constant whenever a pipeline change alters output (tone curve, palette,
+dither), and every older photo gets flagged. Currently 2; everything
+uploaded before cropped sources is 1. A key rotation re-renders, so it
+brings images up to the rotating client's version.
+
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default
 board's *plaintext* packed buffer, computed client-side before

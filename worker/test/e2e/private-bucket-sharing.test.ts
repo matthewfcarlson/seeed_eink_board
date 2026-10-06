@@ -17,7 +17,7 @@ import {
   unwrapKeyWith,
   wrapKeyFor,
 } from "../../src/client/crypto";
-import { BOARD_IDS } from "../../src/lib/media-constants";
+import { BOARD_IDS, IMAGE_PIPELINE_VERSION } from "../../src/lib/media-constants";
 import { AdminClient } from "./lib/admin-client";
 import { buildDummyBlob } from "./lib/test-image";
 import { buildBothBoardVariants } from "./lib/test-variants";
@@ -241,6 +241,7 @@ describe("e2e: private bucket sharing", () => {
       await adminA.reencryptImage(bucketId, started.rotation_id, imageId, {
         raw: await aesGcmEncryptBlob(newBucketKey, buildDummyBlob("raw-v2")),
         variants: await buildBothBoardVariants(newBucketKey, { croppedLabel: "cropped-v2" }),
+        pipelineVersion: IMAGE_PIPELINE_VERSION,
       });
     }
 
@@ -266,6 +267,9 @@ describe("e2e: private bucket sharing", () => {
     const unwrappedForAAfter = await unwrapKeyWith(aKeyPair.privateKey, bucketForAAfter.key!, HKDF_INFO_BUCKET_WRAP);
     expect(unwrappedForAAfter).toEqual(newBucketKeyRaw);
     const imagesForAAfter = await adminA.listImages(bucketId);
+    // Uploaded without pipeline_version (an older client = v1); the rotation
+    // re-rendered it with the current pipeline, so it's no longer flagged.
+    expect(imagesForAAfter[0]!.pipeline_version).toBe(IMAGE_PIPELINE_VERSION);
     const rawForAAfter = await adminA.getRawImageCiphertext(imagesForAAfter[0]!.id);
     const decryptedForAAfter = await aesGcmDecryptBlob(await importAesKeyRaw(unwrappedForAAfter), rawForAAfter);
     expect(new TextDecoder().decode(decryptedForAAfter)).toBe("e2e-test-raw-v2");
@@ -336,6 +340,7 @@ describe("e2e: private bucket sharing", () => {
       variants: await buildBothBoardVariants(bucketKey, { croppedLabel: "cropped" }),
     });
     const [withCrop] = await admin.listImages(bucketId);
+    expect(withCrop!.pipeline_version, "no pipeline_version sent = legacy v1").toBe(1);
     for (const board of BOARD_IDS) {
       expect(withCrop!.variants[board]!.cropped_bytes).toBeGreaterThan(0);
       const ciphertext = await admin.getCroppedSourceCiphertext(withCrop!.id, board);
@@ -346,8 +351,10 @@ describe("e2e: private bucket sharing", () => {
     await admin.uploadImage(bucketId, "crop-me.bin", {
       raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
       variants: await buildBothBoardVariants(bucketKey),
+      pipelineVersion: IMAGE_PIPELINE_VERSION,
     });
     const [withoutCrop] = await admin.listImages(bucketId);
+    expect(withoutCrop!.pipeline_version).toBe(IMAGE_PIPELINE_VERSION);
     expect(withoutCrop!.id).toBe(withCrop!.id);
     for (const board of BOARD_IDS) {
       expect(withoutCrop!.variants[board]!.cropped_bytes).toBeNull();

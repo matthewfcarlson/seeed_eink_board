@@ -477,9 +477,22 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .photo-tile:hover .photo-tile-delete, .photo-tile:focus-within .photo-tile-delete { opacity: 1; }
 .photo-tile-delete:hover { background: var(--red); }
-.photo-tile-dither {
+.photo-tile-badges {
   position: absolute; top: 6px; left: 6px;
+  display: flex; align-items: center; gap: 4px;
+}
+.photo-tile-dither {
   font-size: 0.62em; padding: 2px 7px;
+}
+/* Image rendered by an older pipeline version - see admin.ts's outdatedPipelineBadge. */
+.photo-tile-outdated {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--yellow-tint); color: var(--yellow);
+  box-shadow: var(--shadow-sm);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.72em; font-weight: 700; line-height: 1;
+  cursor: help;
 }
 .photo-tile-add {
   display: flex; flex-direction: column; align-items: center; justify-content: center;

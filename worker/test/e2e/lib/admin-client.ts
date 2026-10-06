@@ -197,6 +197,7 @@ export class AdminClient {
       id: string;
       filename: string;
       dither_algorithm: string;
+      pipeline_version: number;
       variants: Record<string, { cropped_bytes: number | null }>;
     }>
   > {
@@ -222,7 +223,7 @@ export class AdminClient {
     bucketId: string,
     rotationId: string,
     imageId: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }
+    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; pipelineVersion?: number }
   ): Promise<void> {
     const form = buildVariantFormData(opts);
     const res = await fetch(`${this.baseUrl}/admin/buckets/${bucketId}/rotate/${rotationId}/reencrypt-image/${imageId}`, {
@@ -317,7 +318,13 @@ export class AdminClient {
   async uploadImage(
     bucketId: string,
     filename: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; contentHash?: string; allowDuplicate?: boolean }
+    opts: {
+      raw: Uint8Array;
+      variants: Record<BoardId, CiphertextVariant>;
+      contentHash?: string;
+      allowDuplicate?: boolean;
+      pipelineVersion?: number;
+    }
   ): Promise<void> {
     const res = await this.uploadImageRaw(bucketId, filename, opts);
     if (!res.ok) {
@@ -330,7 +337,13 @@ export class AdminClient {
   async uploadImageRaw(
     bucketId: string,
     filename: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; contentHash?: string; allowDuplicate?: boolean }
+    opts: {
+      raw: Uint8Array;
+      variants: Record<BoardId, CiphertextVariant>;
+      contentHash?: string;
+      allowDuplicate?: boolean;
+      pipelineVersion?: number;
+    }
   ): Promise<Response> {
     const form = buildVariantFormData(opts);
     form.set("dither_algorithm", "floyd_steinberg");
@@ -342,9 +355,14 @@ export class AdminClient {
   }
 }
 
-function buildVariantFormData(opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }): FormData {
+function buildVariantFormData(opts: {
+  raw: Uint8Array;
+  variants: Record<BoardId, CiphertextVariant>;
+  pipelineVersion?: number;
+}): FormData {
   const form = new FormData();
   form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
+  if (opts.pipelineVersion !== undefined) form.set("pipeline_version", String(opts.pipelineVersion));
   for (const board of BOARD_IDS) {
     const variant = opts.variants[board];
     form.set(`packed_hash__${board}`, variant.packedHash);

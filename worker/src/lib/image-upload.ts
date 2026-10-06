@@ -17,13 +17,17 @@
  * client (or scripts/upload-images.ts run from an old checkout) still
  * uploads; the routes delete any previously stored crop when it's absent.
  *
+ * `pipeline_version` is optional: which IMAGE_PIPELINE_VERSION produced
+ * these variants (migrations/0029_image_pipeline_version.sql). Absent means
+ * a client from before the field existed, i.e. version 1.
+ *
  * `content_hash` is optional (present only from clients new enough to send
  * it): the upload route uses it for duplicate rejection, the rotation
  * reencrypt-image route just refreshes the stored column (the rotation
  * re-derives the packed pixels, so the old hash may be stale either way).
  */
 
-import { BOARD_IDS, isValidPackedEncoding, type BoardId, type PackedEncoding } from "./media-constants";
+import { BOARD_IDS, IMAGE_PIPELINE_VERSION, isValidPackedEncoding, type BoardId, type PackedEncoding } from "./media-constants";
 
 export interface CiphertextUploadVariantFields {
   packed: File;
@@ -40,6 +44,8 @@ export interface CiphertextUploadFields {
    *  over the DEFAULT board's plaintext packed buffer — see migrations/
    *  0020_image_content_hash.sql. Optional; absent = no duplicate detection. */
   contentHash?: string;
+  /** 1..IMAGE_PIPELINE_VERSION; defaults to 1 when the field is absent. */
+  pipelineVersion: number;
 }
 
 /** Checks field presence/type only — cheap, synchronous, before touching any bytes. */
@@ -77,7 +83,13 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
     return { error: "content_hash must be a 16-char hex string when present" };
   }
 
-  return { raw, variants, contentHash };
+  const pipelineVersionField = body.pipeline_version ?? "1";
+  const pipelineVersion = typeof pipelineVersionField === "string" && /^\d{1,4}$/.test(pipelineVersionField) ? Number(pipelineVersionField) : NaN;
+  if (!(pipelineVersion >= 1 && pipelineVersion <= IMAGE_PIPELINE_VERSION)) {
+    return { error: `pipeline_version must be an integer from 1 to ${IMAGE_PIPELINE_VERSION} when present` };
+  }
+
+  return { raw, variants, contentHash, pipelineVersion };
 }
 
 export interface CiphertextUploadVariantBytes {
