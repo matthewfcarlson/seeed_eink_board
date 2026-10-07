@@ -17,11 +17,13 @@ export const PALETTE: Rgb[] = [
 
 /**
  * What each PALETTE entry actually looks like on a Spectra 6 panel,
- * index-aligned with PALETTE. Used only by the dashboard's display preview
- * (client/display-preview.ts) to show how a dithered image will read on the
- * wall: the panel's "white" is a light gray paper, its black isn't fully
- * black, and its inks are far darker and less saturated than pure RGB.
- * Dithering itself still targets PALETTE.
+ * index-aligned with PALETTE: the panel's "white" is a light gray paper,
+ * its black isn't fully black, and its inks are far darker and less
+ * saturated than pure RGB. Since IMAGE_PIPELINE_VERSION 3 these are what
+ * photos are dithered against (dither.ts's PANEL_MATCHER, after tone.ts fits
+ * the photo into this black..white range), and the display preview
+ * (client/display-preview.ts) paints them to show the result. PALETTE stays
+ * the ideal-RGB set for the QR-registration screen.
  *
  * Source: the measured `spectra6` profile in epdoptimize 1.3.0
  * (https://github.com/Utzel-Butzel/epdoptimize, Apache-2.0; same values in
