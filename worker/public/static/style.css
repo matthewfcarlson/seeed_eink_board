@@ -494,6 +494,11 @@ tbody tr:hover { background: var(--surface-2); }
   font-size: 0.72em; font-weight: 700; line-height: 1;
   cursor: help;
 }
+.photo-tile-outdated.inline { display: inline-flex; vertical-align: middle; box-shadow: none; cursor: default; }
+.rerender-row {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 8px; margin: -4px 0 12px;
+}
 .photo-tile-add {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 4px;

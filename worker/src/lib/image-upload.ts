@@ -37,8 +37,9 @@ export interface CiphertextUploadVariantFields {
   packedEncoding: PackedEncoding;
 }
 
-export interface CiphertextUploadFields {
-  raw: File;
+/** Everything but the raw original — what POST /admin/images/:id/rerender
+ *  accepts on its own, since a re-render never changes the raw blob. */
+export interface CiphertextVariantFields {
   variants: Record<BoardId, CiphertextUploadVariantFields>;
   /** 16-hex-char keyed content hash (client/crypto.ts's computeContentHash)
    *  over the DEFAULT board's plaintext packed buffer — see migrations/
@@ -48,13 +49,23 @@ export interface CiphertextUploadFields {
   pipelineVersion: number;
 }
 
+export interface CiphertextUploadFields extends CiphertextVariantFields {
+  raw: File;
+}
+
 /** Checks field presence/type only — cheap, synchronous, before touching any bytes. */
 export function validateCiphertextUploadFields(body: Record<string, unknown>): CiphertextUploadFields | { error: string } {
   const raw = body.raw;
   if (!(raw instanceof File)) {
     return { error: "raw ciphertext file is required" };
   }
+  const rest = validateCiphertextVariantFields(body);
+  if ("error" in rest) return rest;
+  return { raw, ...rest };
+}
 
+/** validateCiphertextUploadFields minus the `raw` file. */
+export function validateCiphertextVariantFields(body: Record<string, unknown>): CiphertextVariantFields | { error: string } {
   const variants = {} as Record<BoardId, CiphertextUploadVariantFields>;
   for (const board of BOARD_IDS) {
     const packed = body[`packed__${board}`];
@@ -89,7 +100,7 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
     return { error: `pipeline_version must be an integer from 1 to ${IMAGE_PIPELINE_VERSION} when present` };
   }
 
-  return { raw, variants, contentHash, pipelineVersion };
+  return { variants, contentHash, pipelineVersion };
 }
 
 export interface CiphertextUploadVariantBytes {
@@ -98,9 +109,12 @@ export interface CiphertextUploadVariantBytes {
   croppedBytes: Uint8Array | null;
 }
 
-export interface CiphertextUploadBytes {
-  rawBytes: Uint8Array;
+export interface CiphertextVariantBytes {
   variants: Record<BoardId, CiphertextUploadVariantBytes>;
+}
+
+export interface CiphertextUploadBytes extends CiphertextVariantBytes {
+  rawBytes: Uint8Array;
 }
 
 /** Reads every file into memory and rejects an empty body — separate from
@@ -109,7 +123,13 @@ export interface CiphertextUploadBytes {
 export async function readCiphertextUploadBytes(fields: CiphertextUploadFields): Promise<CiphertextUploadBytes | { error: string }> {
   const rawBytes = new Uint8Array(await fields.raw.arrayBuffer());
   if (rawBytes.byteLength === 0) return { error: "Empty raw ciphertext body" };
+  const rest = await readCiphertextVariantBytes(fields);
+  if ("error" in rest) return rest;
+  return { rawBytes, ...rest };
+}
 
+/** readCiphertextUploadBytes minus the `raw` file. */
+export async function readCiphertextVariantBytes(fields: CiphertextVariantFields): Promise<CiphertextVariantBytes | { error: string }> {
   const variants = {} as Record<BoardId, CiphertextUploadVariantBytes>;
   for (const board of BOARD_IDS) {
     const variant = fields.variants[board];
@@ -124,5 +144,5 @@ export async function readCiphertextUploadBytes(fields: CiphertextUploadFields):
     variants[board] = { packedBytes, thumbBytes, croppedBytes };
   }
 
-  return { rawBytes, variants };
+  return { variants };
 }

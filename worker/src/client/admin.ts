@@ -1387,6 +1387,19 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
     })
     .join("");
 
+  // Offered only to accounts that can write (the re-render replaces blobs);
+  // a read-only viewer of a public bucket still sees the badges.
+  const outdatedCount = images.filter(isOutdatedImage).length;
+  const rerenderSection =
+    canWrite && outdatedCount > 0
+      ? '<div class="rerender-row">' +
+          '<span class="hint"><span class="photo-tile-outdated inline" aria-hidden="true">&#8635;</span> ' +
+            outdatedCount + (outdatedCount === 1 ? " photo was" : " photos were") + " made with older image processing.</span>" +
+          '<button class="ghost sm" onclick="rerenderOutdatedImages(' + jsArg(bucket.id) + ')">Re-render ' +
+            (outdatedCount === 1 ? "it" : "them") + "&hellip;</button>" +
+        "</div>"
+      : "";
+
   const addTile = canWrite
     ? '<button type="button" class="photo-tile photo-tile-add" onclick="openUploadModal(' + jsArg(bucket.id) + ')">' +
         '<span class="plus">+</span> Add photo' +
@@ -1476,6 +1489,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
     '<div class="card">' +
       titleRow +
       '<div class="photo-grid">' + tiles + addTile + "</div>" +
+      rerenderSection +
       ownerSection +
     "</div>"
   );
@@ -2196,19 +2210,29 @@ async function removeBucketCollaborator(bucketId: string, userId: string) {
 // encryption is that the Worker never sees plaintext, and rotation is no
 // exception: every image is downloaded, decrypted, and re-encrypted here.
 
-function rotateModalUpdate(done: number, total: number, note?: string) {
+// Progress modal shared by key rotation and re-rendering ("N of M images
+// <verb>"). The DOM ids keep their original rotate-modal names.
+let progressModalVerb = "re-encrypted";
+function progressModalUpdate(done: number, total: number, note?: string) {
   const pct = total > 0 ? Math.round((done / total) * 100) : 100;
   el("rotate-modal-body").innerHTML =
-    "<p>" + done + " of " + total + " images re-encrypted (" + pct + "%).</p>" +
+    "<p>" + done + " of " + total + " images " + progressModalVerb + " (" + pct + "%).</p>" +
     '<div class="progress-track">' +
       '<div class="progress-fill" style="width:' + pct + '%;"></div>' +
     "</div>" +
     (note ? '<p class="hint" style="margin-top:10px;">' + escapeHtml(note) + "</p>" : "");
 }
-function rotateModalOpen(done: number, total: number) {
-  el("rotate-modal-title").textContent = "Rotating bucket key";
-  rotateModalUpdate(done, total);
+function progressModalOpen(title: string, verb: string, done: number, total: number) {
+  el("rotate-modal-title").textContent = title;
+  progressModalVerb = verb;
+  progressModalUpdate(done, total);
   el("rotate-modal-overlay").classList.add("open");
+}
+function rotateModalUpdate(done: number, total: number, note?: string) {
+  progressModalUpdate(done, total, note);
+}
+function rotateModalOpen(done: number, total: number) {
+  progressModalOpen("Rotating bucket key", "re-encrypted", done, total);
 }
 function rotateModalClose() {
   el("rotate-modal-overlay").classList.remove("open");
@@ -2247,71 +2271,187 @@ async function reencryptOneImage(
   oldKey: CryptoKey,
   newKey: CryptoKey
 ): Promise<void> {
-  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
-    headers: { Authorization: "Bearer " + getApiKey() },
-  });
-  if (!res.ok) throw new Error(res.status + " " + res.statusText);
-  const rawCiphertext = new Uint8Array(await res.arrayBuffer());
-  const rawBytes = await aesGcmDecryptBlob(oldKey, rawCiphertext);
+  const rawBytes = await fetchRawOriginal(imageId, oldKey);
   const newRawCiphertext = await aesGcmEncryptBlob(newKey, rawBytes);
 
   const formData = new FormData();
   formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
-  formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
-
-  // Every board's variant gets re-derived and re-uploaded together, same as
-  // processAndUploadImage() - this does NOT try to preserve whatever packed_encoding
-  // each variant happened to have before rotation (there's nothing stored
-  // server-side to read a "how was this compressed" answer from without the
-  // bucket key anyway).
-  await Promise.all(
-    BOARD_IDS.map(async (board) => {
-      // The stored crop is already exactly this board's upright size, so
-      // decodeToBoardBuffer's cover-fit is a 1:1 draw - DEFAULT_CROP only
-      // matters on the raw-original fallback.
-      const storedCrop = await fetchCroppedSource(imageId, board, oldKey);
-      const source = storedCrop ?? rawBytes;
-      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(source)]), DEFAULT_CROP, board);
-      const { upright } = landscape;
-      const [thumbnail, croppedSource] = await Promise.all([
-        makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
-        // Re-encrypt the stored crop's exact bytes rather than re-encoding
-        // it - no generational JPEG loss on every rotation.
-        storedCrop ?? makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
-      ]);
-      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
-      const packed = packToNibbles(indices);
-      // Refresh the keyed content hash under the NEW bucket key while the
-      // plaintext is in hand (migrations/0020_image_content_hash.sql) — the
-      // stored hash must stay comparable with post-rotation uploads, which
-      // are keyed with this same new key.
-      if (board === DEFAULT_BOARD_ID) {
-        formData.set("content_hash", await computeContentHash(newKey, packed));
-      }
-
-      const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
-
-      const [newPackedCiphertext, newThumbCiphertext, newCroppedCiphertext] = await Promise.all([
-        aesGcmEncryptBlob(newKey, packedForUpload),
-        aesGcmEncryptBlob(newKey, thumbnail),
-        aesGcmEncryptBlob(newKey, croppedSource),
-      ]);
-      const packedHash = await computeHash16(newPackedCiphertext);
-
-      formData.set(`packed_encoding__${board}`, packedEncoding);
-      formData.set(`packed_hash__${board}`, packedHash);
-      formData.set(`packed__${board}`, new Blob([new Uint8Array(newPackedCiphertext)]), `packed-${board}.bin`);
-      formData.set(`thumb__${board}`, new Blob([new Uint8Array(newThumbCiphertext)]), `thumb-${board}.bin`);
-      formData.set(`cropped__${board}`, new Blob([new Uint8Array(newCroppedCiphertext)]), `cropped-${board}.bin`);
-    })
-  );
+  await renderStoredImageVariants(formData, imageId, ditherAlgorithm, oldKey, newKey, async () => rawBytes);
 
   await apiFetch(
     "/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/" + encodeURIComponent(rotationId) + "/reencrypt-image/" + encodeURIComponent(imageId),
     { method: "POST", body: formData }
   );
 }
+
+/** Fetches and decrypts an image's raw original (the storage-sized JPEG from
+ *  decode.ts's resizeForStorage). */
+async function fetchRawOriginal(imageId: string, key: CryptoKey): Promise<Uint8Array> {
+  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
+    headers: { Authorization: "Bearer " + getApiKey() },
+  });
+  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  return aesGcmDecryptBlob(key, new Uint8Array(await res.arrayBuffer()));
+}
+
+/**
+ * Re-runs the current pipeline for an image that's already stored, filling
+ * `formData` with every board's packed/thumb/cropped ciphertext plus
+ * content_hash and pipeline_version — shared by key rotation
+ * (reencryptOneImage) and the gallery's re-render (rerenderOneImage). Stored
+ * blobs are decrypted with `readKey` and the results encrypted with
+ * `writeKey` (the same key for a re-render).
+ *
+ * Each board starts from its stored cropped source when there is one
+ * (migrations/0028_image_cropped_source.sql), which keeps the user's
+ * pan/zoom. A board without one is re-cropped from the raw original with
+ * DEFAULT_CROP (centered, no zoom) and that crop becomes its cropped source.
+ * `getRawOriginal` is only called in that case, so a caller can make the
+ * raw download lazy.
+ *
+ * Every board's variant gets re-derived together, same as
+ * processAndUploadImage() - this does NOT try to preserve whatever
+ * packed_encoding each variant had before (there's nothing stored
+ * server-side to read a "how was this compressed" answer from without the
+ * bucket key anyway).
+ */
+async function renderStoredImageVariants(
+  formData: FormData,
+  imageId: string,
+  ditherAlgorithm: DitherAlgorithm,
+  readKey: CryptoKey,
+  writeKey: CryptoKey,
+  getRawOriginal: () => Promise<Uint8Array>
+): Promise<void> {
+  formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
+  await Promise.all(
+    BOARD_IDS.map(async (board) => {
+      // The stored crop is already exactly this board's upright size, so
+      // decodeToBoardBuffer's cover-fit is a 1:1 draw - DEFAULT_CROP only
+      // matters on the raw-original fallback.
+      const storedCrop = await fetchCroppedSource(imageId, board, readKey);
+      const source = storedCrop ?? (await getRawOriginal());
+      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(source)]), DEFAULT_CROP, board);
+      const { upright } = landscape;
+      const [thumbnail, croppedSource] = await Promise.all([
+        makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
+        // Re-encrypt the stored crop's exact bytes rather than re-encoding
+        // it - no generational JPEG loss on every rotation/re-render.
+        storedCrop ?? makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
+      ]);
+      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
+      const packed = packToNibbles(indices);
+      // Refresh the keyed content hash under the write key while the
+      // plaintext is in hand (migrations/0020_image_content_hash.sql) — the
+      // stored hash must stay comparable with later uploads keyed the same way.
+      if (board === DEFAULT_BOARD_ID) {
+        formData.set("content_hash", await computeContentHash(writeKey, packed));
+      }
+
+      const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
+      const [packedCiphertext, thumbCiphertext, croppedCiphertext] = await Promise.all([
+        aesGcmEncryptBlob(writeKey, packedForUpload),
+        aesGcmEncryptBlob(writeKey, thumbnail),
+        aesGcmEncryptBlob(writeKey, croppedSource),
+      ]);
+      const packedHash = await computeHash16(packedCiphertext);
+
+      formData.set(`packed_encoding__${board}`, packedEncoding);
+      formData.set(`packed_hash__${board}`, packedHash);
+      formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
+      formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+      formData.set(`cropped__${board}`, new Blob([new Uint8Array(croppedCiphertext)]), `cropped-${board}.bin`);
+    })
+  );
+}
+
+/** Re-renders one already-stored image with the current pipeline, under the
+ *  bucket's current key (POST /admin/images/:id/rerender). The raw original
+ *  is only downloaded if some board has no stored crop to start from. */
+async function rerenderOneImage(imageId: string, ditherAlgorithm: DitherAlgorithm, key: CryptoKey, keyVersion: number): Promise<void> {
+  let rawPromise: Promise<Uint8Array> | null = null;
+  const getRawOriginal = () => (rawPromise ??= fetchRawOriginal(imageId, key));
+
+  const formData = new FormData();
+  formData.set("key_version", String(keyVersion));
+  await renderStoredImageVariants(formData, imageId, ditherAlgorithm, key, key, getRawOriginal);
+  await apiFetch("/admin/images/" + encodeURIComponent(imageId) + "/rerender", { method: "POST", body: formData });
+}
+
+function isOutdatedImage(img: any): boolean {
+  return Number(img.pipeline_version ?? 1) < IMAGE_PIPELINE_VERSION;
+}
+
+/**
+ * The bucket card's "Re-render N older photos" button: re-runs the current
+ * pipeline over every image whose pipeline_version is behind
+ * (migrations/0029_image_pipeline_version.sql), one at a time with the
+ * progress modal. Stops at the first failure; clicking again picks up where
+ * it left off, since finished images are no longer outdated.
+ */
+async function rerenderOutdatedImages(bucketId: string) {
+  const bucketKey = bucketAesKeys.get(bucketId);
+  const bucket = allBucketsCache.find((b) => b.id === bucketId);
+  if (!bucketKey || !bucket) {
+    showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
+    return;
+  }
+
+  let outdated: any[];
+  try {
+    const imagesResult = await apiFetch("/admin/images?device_key=" + encodeURIComponent(bucketId));
+    outdated = imagesResult.images.filter(isOutdatedImage);
+  } catch (err: any) {
+    showMessage("app-message", "Failed to load this bucket's image list: " + err.message, "error");
+    return;
+  }
+  if (outdated.length === 0) {
+    await refreshBucket(bucketId);
+    return;
+  }
+
+  const withoutCrop = outdated.filter((img) => BOARD_IDS.some((board) => !img.variants?.[board]?.cropped_bytes)).length;
+  const proceed = confirm(
+    "Re-render " + outdated.length + (outdated.length === 1 ? " photo" : " photos") + " with the latest image processing? " +
+      "Each one is downloaded, processed in this browser and re-uploaded, so a large bucket takes a while." +
+      (withoutCrop > 0
+        ? "\n\n" + withoutCrop + " of them were uploaded before crops were saved, so they'll be re-cropped centered with no zoom. " +
+          "Re-upload those instead if you want to keep a custom crop."
+        : "")
+  );
+  if (!proceed) return;
+
+  const total = outdated.length;
+  progressModalOpen("Re-rendering photos", "re-rendered", 0, total);
+  for (let i = 0; i < total; i++) {
+    const img = outdated[i];
+    progressModalUpdate(i, total, "Re-rendering " + img.filename + "…");
+    try {
+      await rerenderOneImage(img.id, img.dither_algorithm, bucketKey, bucket.key_version ?? 1);
+    } catch (err: any) {
+      progressModalUpdate(i, total, "Failed on " + img.filename + ": " + err.message);
+      showMessage(
+        "app-message",
+        "Re-render stopped: " + img.filename + " failed (" + err.message + "). Click Re-render again to continue with the rest.",
+        "error"
+      );
+      await refreshBucket(bucketId);
+      return;
+    }
+    // Its thumbnail changed (possibly its shape too) - drop the cached
+    // decrypted copy so refreshBucket() decrypts the new one.
+    const staleThumbUrl = thumbnailUrlCache[img.id];
+    if (staleThumbUrl) {
+      URL.revokeObjectURL(staleThumbUrl);
+      delete thumbnailUrlCache[img.id];
+    }
+  }
+  progressModalUpdate(total, total, "Done.");
+  await refreshBucket(bucketId);
+}
+(window as any).rerenderOutdatedImages = rerenderOutdatedImages;
 
 /**
  * Starts a new rotation, or resumes one found via GET rotate/status (called

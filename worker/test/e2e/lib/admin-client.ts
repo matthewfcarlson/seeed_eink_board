@@ -219,6 +219,17 @@ export class AdminClient {
     });
   }
 
+  /** POST /admin/images/:id/rerender - returns the raw Response so tests can
+   *  assert on 409/403 as well as success. */
+  async rerenderImageRaw(
+    imageId: string,
+    opts: { keyVersion: number; variants: Record<BoardId, CiphertextVariant>; pipelineVersion?: number }
+  ): Promise<Response> {
+    const form = buildVariantFormData({ raw: null, variants: opts.variants, pipelineVersion: opts.pipelineVersion });
+    form.set("key_version", String(opts.keyVersion));
+    return fetch(`${this.baseUrl}/admin/images/${imageId}/rerender`, { method: "POST", headers: this.authHeaders(), body: form });
+  }
+
   async reencryptImage(
     bucketId: string,
     rotationId: string,
@@ -356,12 +367,12 @@ export class AdminClient {
 }
 
 function buildVariantFormData(opts: {
-  raw: Uint8Array;
+  raw: Uint8Array | null;
   variants: Record<BoardId, CiphertextVariant>;
   pipelineVersion?: number;
 }): FormData {
   const form = new FormData();
-  form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
+  if (opts.raw) form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
   if (opts.pipelineVersion !== undefined) form.set("pipeline_version", String(opts.pipelineVersion));
   for (const board of BOARD_IDS) {
     const variant = opts.variants[board];

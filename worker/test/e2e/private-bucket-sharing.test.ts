@@ -361,4 +361,71 @@ describe("e2e: private bucket sharing", () => {
       expect(await admin.getCroppedSourceCiphertext(withoutCrop!.id, board)).toBeNull();
     }
   });
+  it("re-rendering an outdated image replaces its variants under the current key, and refuses stale keys, rotations and non-writers", async () => {
+    const { apiKey } = await registerTestAccount(wrangler.baseUrl);
+    const admin = new AdminClient(wrangler.baseUrl, apiKey);
+    const keyPair = await generateP256KeyPair();
+    const bucketKey = await generateBucketKey();
+    const wrapped = await wrapKeyFor(await exportPublicKeyRaw(keyPair.publicKey), await exportAesKeyRaw(bucketKey), HKDF_INFO_BUCKET_WRAP);
+    const { id: bucketId } = await admin.createBucket("private-e2e-rerender-bucket", wrapped);
+
+    // An "old pipeline" image: no pipeline_version (= 1), no cropped source.
+    await admin.uploadImage(bucketId, "old.bin", {
+      raw: await aesGcmEncryptBlob(bucketKey, buildDummyBlob("raw")),
+      variants: await buildBothBoardVariants(bucketKey),
+    });
+    const [before] = await admin.listImages(bucketId);
+    expect(before!.pipeline_version).toBe(1);
+
+    // Another account can't re-render it.
+    const { apiKey: otherKey } = await registerTestAccount(wrangler.baseUrl);
+    const other = new AdminClient(wrangler.baseUrl, otherKey);
+    const forbidden = await other.rerenderImageRaw(before!.id, {
+      keyVersion: 1,
+      variants: await buildBothBoardVariants(bucketKey, { croppedLabel: "cropped-new" }),
+      pipelineVersion: IMAGE_PIPELINE_VERSION,
+    });
+    expect(forbidden.status).toBe(403);
+
+    // A key_version that isn't the bucket's current one is refused.
+    const stale = await admin.rerenderImageRaw(before!.id, {
+      keyVersion: 2,
+      variants: await buildBothBoardVariants(bucketKey, { croppedLabel: "cropped-new" }),
+      pipelineVersion: IMAGE_PIPELINE_VERSION,
+    });
+    expect(stale.status).toBe(409);
+
+    const ok = await admin.rerenderImageRaw(before!.id, {
+      keyVersion: 1,
+      variants: await buildBothBoardVariants(bucketKey, { croppedLabel: "cropped-new" }),
+      pipelineVersion: IMAGE_PIPELINE_VERSION,
+    });
+    expect(ok.status, await ok.clone().text()).toBe(200);
+
+    const [after] = await admin.listImages(bucketId);
+    expect(after!.id).toBe(before!.id);
+    expect(after!.pipeline_version).toBe(IMAGE_PIPELINE_VERSION);
+    for (const board of BOARD_IDS) {
+      expect(after!.variants[board]!.cropped_bytes).toBeGreaterThan(0);
+      const cropped = await admin.getCroppedSourceCiphertext(after!.id, board);
+      expect(new TextDecoder().decode(await aesGcmDecryptBlob(bucketKey, cropped!))).toBe(`e2e-test-cropped-new-${board}`);
+    }
+    // The raw original is untouched by a re-render.
+    const raw = await admin.getRawImageCiphertext(after!.id);
+    expect(new TextDecoder().decode(await aesGcmDecryptBlob(bucketKey, raw))).toBe("e2e-test-raw");
+
+    // While a key rotation is in progress, re-rendering is refused.
+    const newKeyWrapped = await wrapKeyFor(
+      await exportPublicKeyRaw(keyPair.publicKey),
+      await exportAesKeyRaw(await generateBucketKey()),
+      HKDF_INFO_BUCKET_WRAP
+    );
+    await admin.rotateStart(bucketId, newKeyWrapped);
+    const duringRotation = await admin.rerenderImageRaw(before!.id, {
+      keyVersion: 1,
+      variants: await buildBothBoardVariants(bucketKey),
+      pipelineVersion: IMAGE_PIPELINE_VERSION,
+    });
+    expect(duringRotation.status).toBe(409);
+  });
 });

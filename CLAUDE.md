@@ -339,7 +339,16 @@ any tile below the current version (`outdatedPipelineBadge`). Bump the
 constant whenever a pipeline change alters output (tone curve, palette,
 dither), and every older photo gets flagged. Currently 2; everything
 uploaded before cropped sources is 1. A key rotation re-renders, so it
-brings images up to the rotating client's version.
+brings images up to the rotating client's version. A bucket with outdated
+photos also shows "Re-render them…" (writers only): `rerenderOutdatedImages`
+re-runs the current pipeline per image from its cropped source (raw original
++ centered crop when none, downloaded only then) and posts the variants to
+`POST /admin/images/:id/rerender` under the bucket's current key — raw is
+untouched. It shares `renderStoredImageVariants` with rotation. The route
+409s on a `key_version` that isn't current or while a rotation is in
+progress. Narrow race left open: a rotation started between that check and
+the KV writes could get one image overwritten with old-key blobs; rotation's
+finalize doesn't detect it.
 
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default
