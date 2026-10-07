@@ -279,9 +279,11 @@ tight, worth watching before adding more.
   passkey.
 - No ESP32 flash encryption — a stolen device's on-device private key (and
   every bucket key wrapped for it) isn't protected at rest.
-- Rotating a bucket's key re-derives images from the stored raw original with
-  a centered/no-zoom crop — per-image crop/pan/zoom isn't persisted, so a
-  custom crop resets on rotation. Cosmetic, not a security issue.
+- Rotating a bucket's key re-derives each board's variant from that board's
+  stored **cropped source** (below), so a custom crop survives. Images
+  uploaded before cropped sources existed have none and are re-cropped
+  centered/no-zoom from the raw original (that crop is then stored). Cosmetic,
+  not a security issue.
 - The upload crop UI shows one reference board's aspect ratio (EE02's
   portrait 3:4); the other board's variant is derived from the same
   `panX`/`panY`/`zoom` fractions applied to its own aspect ratio, not a
@@ -316,6 +318,49 @@ is tracked per-device, and two devices sharing the same buckets are seeded
 with their own MAC so they don't march in lockstep. Uploading/deleting takes
 effect on the device's next `/image_packed` request, which also records what
 was served.
+
+**Cropped source** (`migrations/0028_image_cropped_source.sql`): alongside
+each board's packed variant the client stores `img:cropped:<bucket>:<id>:<board>`
+— an encrypted JPEG (q0.92) of the user's upright crop at that board's full
+resolution, *before* enhance/dither. It's the input for any future re-render
+(e.g. a color-pipeline change) or key rotation, so the user's framing is
+never lost, and the dashboard thumbnail is derived from the same crop at its
+true aspect (EE02 3:4 -> 120x160, EE04 3:5 -> 96x160; it used to be forced to
+120x160 for both). Optional on the wire (`cropped__<board>`); a re-upload or
+rotation that omits it deletes the old one, and `image_variants.cropped_bytes`
+is NULL. Fetched via `GET /admin/images/:id/cropped/:board` (404 = none).
+
+**Pipeline version** (`migrations/0029_image_pipeline_version.sql`):
+`images.pipeline_version` records which `IMAGE_PIPELINE_VERSION`
+(`lib/media-constants.ts`, with a history comment) produced an image's
+variants; the client sends it as `pipeline_version` on upload and
+reencrypt-image (absent = 1). The gallery shows a small yellow ↻ badge on
+any tile below the current version (`outdatedPipelineBadge`). Bump the
+constant whenever a pipeline change alters output (tone curve, palette,
+dither), and every older photo gets flagged. Currently 2; everything
+uploaded before cropped sources is 1. A key rotation re-renders, so it
+brings images up to the rotating client's version. A bucket with outdated
+photos also shows "Re-render them…" (writers only): `rerenderOutdatedImages`
+re-runs the current pipeline per image from its cropped source (raw original
++ centered crop when none, downloaded only then) and posts the variants to
+`POST /admin/images/:id/rerender` under the bucket's current key — raw is
+untouched. It shares `renderStoredImageVariants` with rotation. The route
+409s on a `key_version` that isn't current or while a rotation is in
+progress. Narrow race left open: a rotation started between that check and
+the KV writes could get one image overwritten with old-key blobs; rotation's
+finalize doesn't detect it.
+
+**Display preview** (`worker/src/client/display-preview.ts`): the upload
+modal's "Preview on display" toggle runs the real pipeline (same
+`enhanceAndDither()` in `lib/dither.ts` the upload uses, on the same
+board-oriented buffer) for the current crop/dither, then paints each palette
+index in `PANEL_APPEARANCE` (`lib/palette.ts`) — what that ink looks like on
+the panel (gray paper white, muted inks) rather than the pure RGB the
+ditherer targets — and shows it over the crop box, debounced on every crop or
+dither change. Previews the reference board (EE02), whose 3:4 shape the crop
+box uses. `PANEL_APPEARANCE` is eyeballed, not measured on our hardware;
+calibrating it (instructions in its comment) makes the preview trustworthy
+and is the input the planned color fixes need anyway.
 
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default

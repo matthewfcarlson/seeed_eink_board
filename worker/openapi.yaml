@@ -134,6 +134,12 @@ components:
             now — see migrations/0016_bucket_key_rotation.sql. Lags the
             bucket's own key_version between a rotation's start and this
             image's reencrypt-image call.
+        pipeline_version:
+          type: integer
+          description: >-
+            Which client image-pipeline version produced this image's variants
+            (migrations/0029_image_pipeline_version.sql). Below the client's
+            IMAGE_PIPELINE_VERSION = rendered by an older pipeline.
         variants:
           type: object
           description: >-
@@ -147,6 +153,12 @@ components:
               packed_hash: { type: string }
               packed_bytes: { type: integer }
               packed_encoding: { type: string, enum: [identity, deflate-raw] }
+              cropped_bytes:
+                type: integer
+                nullable: true
+                description: >-
+                  Ciphertext size of this board's cropped source (see GET
+                  /admin/images/{id}/cropped/{board}); null when none is stored.
         thumbnail_ciphertext_b64:
           type: string
           nullable: true
@@ -950,6 +962,9 @@ paths:
                 thumb__ee04-7in3: { type: string, format: binary }
                 packed_hash__ee04-7in3: { type: string }
                 packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
+                cropped__ee02-13in3: { type: string, format: binary, description: Optional EE02 cropped source re-encrypted under the new key (see /admin/images/upload). Omitting it deletes the old one. }
+                cropped__ee04-7in3: { type: string, format: binary, description: Optional EE04 cropped source re-encrypted under the new key. Omitting it deletes the old one. }
+                pipeline_version: { type: integer, minimum: 1, default: 1, description: "IMAGE_PIPELINE_VERSION (lib/media-constants.ts) of the client that produced these variants (migrations/0029_image_pipeline_version.sql). Absent = 1. The dashboard flags images below the current version." }
                 content_hash: { type: string, description: Optional refreshed 16-char hex content hash under the NEW bucket key (see /admin/images/upload); recomputed because the rotation re-derives the packed pixels. }
       responses:
         '200':
@@ -1115,6 +1130,18 @@ paths:
                 thumb__ee04-7in3: { type: string, format: binary, description: AES-256-GCM ciphertext of EE04's dashboard preview JPEG }
                 packed_hash__ee04-7in3: { type: string, description: 16-char hex content hash over EE04's packed ciphertext. }
                 packed_encoding__ee04-7in3: { type: string, enum: [identity, deflate-raw], default: identity }
+                cropped__ee02-13in3:
+                  type: string
+                  format: binary
+                  description: >-
+                    Optional AES-256-GCM ciphertext of EE02's cropped source: a
+                    JPEG of the user's upright crop at full display resolution
+                    (1200x1600), before any enhance/dither step
+                    (migrations/0028_image_cropped_source.sql). Kept so a later
+                    re-render or key rotation keeps the user's framing.
+                    Omitting it on a re-upload deletes any previously stored one.
+                cropped__ee04-7in3: { type: string, format: binary, description: Optional EE04 cropped source (480x800); same rules as cropped__ee02-13in3. }
+                pipeline_version: { type: integer, minimum: 1, default: 1, description: "IMAGE_PIPELINE_VERSION (lib/media-constants.ts) of the client that produced these variants (migrations/0029_image_pipeline_version.sql). Absent = 1. The dashboard flags images below the current version." }
                 content_hash:
                   type: string
                   description: >-
@@ -1170,6 +1197,63 @@ paths:
             image/*: { schema: { type: string, format: binary } }
         '403': { description: No read access to this bucket }
         '404': { description: Not found }
+
+  /admin/images/{id}/rerender:
+    post:
+      summary: Replace an image's variants with a fresh client-side render
+      description: >-
+        The gallery's "Re-render older photos" button: the client re-runs the
+        current image pipeline from each board's cropped source (or a centered
+        crop of the raw original when there is none) and uploads every board's
+        packed/thumb/cropped ciphertext under the bucket's CURRENT key. Same
+        multipart fields as /admin/images/upload minus `raw` (the raw original
+        is never changed), plus `key_version`. Write access required.
+      parameters:
+        - $ref: '#/components/parameters/ImageIdPath'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [key_version]
+              properties:
+                key_version: { type: integer, description: Key version the client encrypted with; must be the bucket's current one, which the image must already be on. }
+                pipeline_version: { type: integer, minimum: 1, default: 1 }
+                content_hash: { type: string, description: Refreshed keyed content hash; absent keeps the stored one. }
+              additionalProperties: true
+              description: Plus packed__/thumb__/packed_hash__/packed_encoding__/cropped__<board> for every board, as in /admin/images/upload.
+      responses:
+        '200': { description: Re-rendered; body has id and pipeline_version }
+        '400': { description: Missing or malformed field }
+        '403': { description: No WRITE access to this bucket }
+        '404': { description: Not found }
+        '409': { description: Stale key_version, or a key rotation is in progress for this bucket }
+
+  /admin/images/{id}/cropped/{board}:
+    get:
+      summary: Fetch one board's cropped-source ciphertext
+      description: >-
+        AES-256-GCM ciphertext of a JPEG of the user's upright crop for this
+        board, before any enhance/dither step
+        (migrations/0028_image_cropped_source.sql). Same access rule as
+        /admin/images/{id}/raw. 404 when none is stored (the image predates
+        cropped sources, or came from an older client), so callers fall back
+        to re-cropping the raw original.
+      parameters:
+        - $ref: '#/components/parameters/ImageIdPath'
+        - name: board
+          in: path
+          required: true
+          schema: { type: string, enum: [ee02-13in3, ee04-7in3] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        '400': { description: Unknown board }
+        '403': { description: No read access to this bucket }
+        '404': { description: Image not found, or no cropped source stored for this board }
 
   /admin/schedule/{target}:
     get:

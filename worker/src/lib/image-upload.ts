@@ -12,28 +12,45 @@
  * confirmUpload/reencryptOneImage) always generates all of them, and only
  * two boards exist today, so there's no partial-upload case worth supporting.
  *
+ * `cropped__<board>` is optional per board: the encrypted undithered upright
+ * crop (migrations/0028_image_cropped_source.sql). Optional so an older
+ * client (or scripts/upload-images.ts run from an old checkout) still
+ * uploads; the routes delete any previously stored crop when it's absent.
+ *
+ * `pipeline_version` is optional: which IMAGE_PIPELINE_VERSION produced
+ * these variants (migrations/0029_image_pipeline_version.sql). Absent means
+ * a client from before the field existed, i.e. version 1.
+ *
  * `content_hash` is optional (present only from clients new enough to send
  * it): the upload route uses it for duplicate rejection, the rotation
  * reencrypt-image route just refreshes the stored column (the rotation
  * re-derives the packed pixels, so the old hash may be stale either way).
  */
 
-import { BOARD_IDS, isValidPackedEncoding, type BoardId, type PackedEncoding } from "./media-constants";
+import { BOARD_IDS, IMAGE_PIPELINE_VERSION, isValidPackedEncoding, type BoardId, type PackedEncoding } from "./media-constants";
 
 export interface CiphertextUploadVariantFields {
   packed: File;
   thumb: File;
+  cropped: File | null;
   packedHash: string;
   packedEncoding: PackedEncoding;
 }
 
-export interface CiphertextUploadFields {
-  raw: File;
+/** Everything but the raw original — what POST /admin/images/:id/rerender
+ *  accepts on its own, since a re-render never changes the raw blob. */
+export interface CiphertextVariantFields {
   variants: Record<BoardId, CiphertextUploadVariantFields>;
   /** 16-hex-char keyed content hash (client/crypto.ts's computeContentHash)
    *  over the DEFAULT board's plaintext packed buffer — see migrations/
    *  0020_image_content_hash.sql. Optional; absent = no duplicate detection. */
   contentHash?: string;
+  /** 1..IMAGE_PIPELINE_VERSION; defaults to 1 when the field is absent. */
+  pipelineVersion: number;
+}
+
+export interface CiphertextUploadFields extends CiphertextVariantFields {
+  raw: File;
 }
 
 /** Checks field presence/type only — cheap, synchronous, before touching any bytes. */
@@ -42,11 +59,18 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
   if (!(raw instanceof File)) {
     return { error: "raw ciphertext file is required" };
   }
+  const rest = validateCiphertextVariantFields(body);
+  if ("error" in rest) return rest;
+  return { raw, ...rest };
+}
 
+/** validateCiphertextUploadFields minus the `raw` file. */
+export function validateCiphertextVariantFields(body: Record<string, unknown>): CiphertextVariantFields | { error: string } {
   const variants = {} as Record<BoardId, CiphertextUploadVariantFields>;
   for (const board of BOARD_IDS) {
     const packed = body[`packed__${board}`];
     const thumb = body[`thumb__${board}`];
+    const cropped = body[`cropped__${board}`];
     const packedHash = body[`packed_hash__${board}`];
     const packedEncoding = body[`packed_encoding__${board}`] ?? "identity";
 
@@ -59,7 +83,10 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
     if (typeof packedEncoding !== "string" || !isValidPackedEncoding(packedEncoding)) {
       return { error: `packed_encoding__${board} must be one of the known PackedEncoding values` };
     }
-    variants[board] = { packed, thumb, packedHash, packedEncoding };
+    if (cropped !== undefined && !(cropped instanceof File)) {
+      return { error: `cropped__${board} must be a ciphertext file when present` };
+    }
+    variants[board] = { packed, thumb, cropped: cropped ?? null, packedHash, packedEncoding };
   }
 
   const contentHash = body.content_hash;
@@ -67,17 +94,27 @@ export function validateCiphertextUploadFields(body: Record<string, unknown>): C
     return { error: "content_hash must be a 16-char hex string when present" };
   }
 
-  return { raw, variants, contentHash };
+  const pipelineVersionField = body.pipeline_version ?? "1";
+  const pipelineVersion = typeof pipelineVersionField === "string" && /^\d{1,4}$/.test(pipelineVersionField) ? Number(pipelineVersionField) : NaN;
+  if (!(pipelineVersion >= 1 && pipelineVersion <= IMAGE_PIPELINE_VERSION)) {
+    return { error: `pipeline_version must be an integer from 1 to ${IMAGE_PIPELINE_VERSION} when present` };
+  }
+
+  return { variants, contentHash, pipelineVersion };
 }
 
 export interface CiphertextUploadVariantBytes {
   packedBytes: Uint8Array;
   thumbBytes: Uint8Array;
+  croppedBytes: Uint8Array | null;
 }
 
-export interface CiphertextUploadBytes {
-  rawBytes: Uint8Array;
+export interface CiphertextVariantBytes {
   variants: Record<BoardId, CiphertextUploadVariantBytes>;
+}
+
+export interface CiphertextUploadBytes extends CiphertextVariantBytes {
+  rawBytes: Uint8Array;
 }
 
 /** Reads every file into memory and rejects an empty body — separate from
@@ -86,19 +123,26 @@ export interface CiphertextUploadBytes {
 export async function readCiphertextUploadBytes(fields: CiphertextUploadFields): Promise<CiphertextUploadBytes | { error: string }> {
   const rawBytes = new Uint8Array(await fields.raw.arrayBuffer());
   if (rawBytes.byteLength === 0) return { error: "Empty raw ciphertext body" };
+  const rest = await readCiphertextVariantBytes(fields);
+  if ("error" in rest) return rest;
+  return { rawBytes, ...rest };
+}
 
+/** readCiphertextUploadBytes minus the `raw` file. */
+export async function readCiphertextVariantBytes(fields: CiphertextVariantFields): Promise<CiphertextVariantBytes | { error: string }> {
   const variants = {} as Record<BoardId, CiphertextUploadVariantBytes>;
   for (const board of BOARD_IDS) {
     const variant = fields.variants[board];
-    const [packedBytes, thumbBytes] = await Promise.all([
+    const [packedBytes, thumbBytes, croppedBytes] = await Promise.all([
       variant.packed.arrayBuffer().then((b) => new Uint8Array(b)),
       variant.thumb.arrayBuffer().then((b) => new Uint8Array(b)),
+      variant.cropped ? variant.cropped.arrayBuffer().then((b) => new Uint8Array(b)) : null,
     ]);
-    if (packedBytes.byteLength === 0 || thumbBytes.byteLength === 0) {
+    if (packedBytes.byteLength === 0 || thumbBytes.byteLength === 0 || croppedBytes?.byteLength === 0) {
       return { error: `Empty ciphertext body for board ${board}` };
     }
-    variants[board] = { packedBytes, thumbBytes };
+    variants[board] = { packedBytes, thumbBytes, croppedBytes };
   }
 
-  return { rawBytes, variants };
+  return { variants };
 }

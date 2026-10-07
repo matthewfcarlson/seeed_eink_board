@@ -1,0 +1,17 @@
+-- Per-board "cropped source": the upright crop the user framed at upload
+-- time (or, for a pre-existing image, the centered crop a key rotation
+-- re-derived), at that board's full display resolution, BEFORE any
+-- enhance/dither step - stored as an AES-256-GCM-encrypted JPEG in KV
+-- (lib/image-store.ts's `img:cropped:` key), same as every other blob.
+--
+-- Two reasons to keep it:
+--   - The packed buffer is the only other copy of the user's framing, and
+--     dithering can't be undone. With this, a future change to the color
+--     pipeline (tone curve, palette, dither) can re-render existing images
+--     from the right crop instead of falling back to a centered one.
+--   - The dashboard thumbnail is derived from it at its true aspect ratio
+--     (EE04's crop is 3:5, not EE02's 3:4).
+--
+-- NULL = no cropped source stored for this variant (an image uploaded
+-- before this migration, or by a client too old to send one).
+ALTER TABLE image_variants ADD COLUMN cropped_bytes INTEGER;

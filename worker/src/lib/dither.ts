@@ -220,6 +220,21 @@ export function ditherImage(
   }
 }
 
+// The enhance factors every upload path applies before dithering — the
+// dashboard's upload, re-render and key rotation, its display preview, and
+// scripts/upload-images.ts all go through enhanceAndDither() below.
+export const DEFAULT_BRIGHTNESS = 1.0;
+export const DEFAULT_CONTRAST = 1.2;
+export const DEFAULT_SATURATION = 1.2;
+
+/** The color half of the image pipeline: enhance() in place with the default
+ *  factors, then dither to palette indices. `rgba` is the board-oriented
+ *  (landscape) buffer and is modified. */
+export function enhanceAndDither(rgba: Uint8ClampedArray, width: number, height: number, algorithm: DitherAlgorithm): Uint8Array {
+  enhance(rgba, width, height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
+  return ditherImage(rgba, width, height, algorithm);
+}
+
 /** 2 pixels/byte, big-nibble-first, using the exact hardware nibble map. */
 export function packToNibbles(indices: Uint8Array): Uint8Array {
   const packed = new Uint8Array(Math.ceil(indices.length / 2));

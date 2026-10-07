@@ -1,17 +1,23 @@
 import type { Hono } from "hono";
-import { BOARD_IDS, DEFAULT_BOARD_ID, DITHER_ALGORITHMS, type BoardId, type DitherAlgorithm, type Env } from "../../types";
+import { BOARD_IDS, DEFAULT_BOARD_ID, DITHER_ALGORITHMS, isValidBoardId, type BoardId, type DitherAlgorithm, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketAccess, assertBucketReadAccess } from "../../lib/bucket-access";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
 import {
   deleteImageBlobs,
+  getCroppedSource,
   getRawImage,
   getThumbnailCiphertextB64,
-  putPackedImage,
+  putImageVariantBlobs,
   putRawImage,
-  putThumbnail,
+  upsertImageVariantStatements,
 } from "../../lib/image-store";
-import { readCiphertextUploadBytes, validateCiphertextUploadFields } from "../../lib/image-upload";
+import {
+  readCiphertextUploadBytes,
+  readCiphertextVariantBytes,
+  validateCiphertextUploadFields,
+  validateCiphertextVariantFields,
+} from "../../lib/image-upload";
 import { validateFilename } from "../../lib/validate";
 
 function isValidDitherAlgorithm(value: string): value is DitherAlgorithm {
@@ -116,36 +122,22 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
       .first<{ id: string }>();
     const id = existing?.id ?? crypto.randomUUID();
 
-    await Promise.all([
-      putRawImage(c.env, deviceKey, id, rawBytes),
-      ...BOARD_IDS.flatMap((board) => [
-        putPackedImage(c.env, deviceKey, id, board, variants[board].packedBytes),
-        putThumbnail(c.env, deviceKey, id, board, variants[board].thumbBytes),
-      ]),
-    ]);
+    await Promise.all([putRawImage(c.env, deviceKey, id, rawBytes), putImageVariantBlobs(c.env, deviceKey, id, bytes)]);
 
     const now = Math.floor(Date.now() / 1000);
     await c.env.DB.batch([
       c.env.DB.prepare(
-        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version, content_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO images (id, device_key, filename, dither_algorithm, raw_bytes, created_at, key_version, content_hash, pipeline_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(device_key, filename) DO UPDATE SET
            dither_algorithm = excluded.dither_algorithm,
            raw_bytes = excluded.raw_bytes,
            created_at = excluded.created_at,
            key_version = excluded.key_version,
-           content_hash = excluded.content_hash`
-      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion, fields.contentHash ?? null),
-      ...BOARD_IDS.map((board) =>
-        c.env.DB.prepare(
-          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(image_id, board) DO UPDATE SET
-             packed_encoding = excluded.packed_encoding,
-             packed_hash = excluded.packed_hash,
-             packed_bytes = excluded.packed_bytes`
-        ).bind(id, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength)
-      ),
+           content_hash = excluded.content_hash,
+           pipeline_version = excluded.pipeline_version`
+      ).bind(id, deviceKey, filename, ditherParam, rawBytes.byteLength, now, keyVersion, fields.contentHash ?? null, fields.pipelineVersion),
+      ...upsertImageVariantStatements(c.env, id, fields, bytes),
     ]);
 
     await invalidateRotationCache(c.env, deviceKey);
@@ -157,6 +149,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
         device_key: deviceKey,
         filename,
         dither_algorithm: ditherParam,
+        pipeline_version: fields.pipelineVersion,
         variants: Object.fromEntries(
           BOARD_IDS.map((board) => [
             board,
@@ -172,6 +165,69 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     );
   });
 
+  // Replaces one image's per-board variants (packed/thumb/cropped) with a
+  // fresh client-side render under the bucket's CURRENT key — the gallery's
+  // "Re-render older photos" button, for images whose pipeline_version is
+  // behind (migrations/0029_image_pipeline_version.sql). The raw original is
+  // never touched, so it isn't sent. Same multipart shape as upload minus
+  // `raw`, plus a required `key_version`: the version of the key the client
+  // encrypted with. Anything other than the bucket's current version, which
+  // this image must also already be on, is refused with 409 — as is any
+  // re-render while a key rotation is in progress, since the rotation owns
+  // every image's blobs until it finalizes.
+  app.post("/admin/images/:id/rerender", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id is required" }, 400);
+
+    const image = await c.env.DB.prepare("SELECT device_key, key_version FROM images WHERE id = ?")
+      .bind(id)
+      .first<{ device_key: string; key_version: number }>();
+    if (!image) return c.json({ error: "Not found" }, 404);
+    const deviceKey = image.device_key;
+    // Write-shaped, same as upload/delete.
+    if (!(await assertBucketAccess(c.env, deviceKey, c.var.user.id))) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+
+    const body = await c.req.parseBody();
+    const keyVersionField = body.key_version;
+    const keyVersion = typeof keyVersionField === "string" && /^\d{1,9}$/.test(keyVersionField) ? Number(keyVersionField) : NaN;
+    if (!Number.isInteger(keyVersion)) return c.json({ error: "key_version (integer) is required" }, 400);
+
+    const fields = validateCiphertextVariantFields(body);
+    if ("error" in fields) return c.json({ error: fields.error }, 400);
+
+    const [bucket, rotation] = await Promise.all([
+      c.env.DB.prepare("SELECT key_version FROM buckets WHERE id = ?").bind(deviceKey).first<{ key_version: number }>(),
+      c.env.DB.prepare("SELECT id FROM bucket_rotations WHERE bucket_id = ? AND status = 'in_progress'").bind(deviceKey).first(),
+    ]);
+    if (rotation) {
+      return c.json({ error: "this bucket's key rotation is in progress; finish it before re-rendering" }, 409);
+    }
+    const currentKeyVersion = bucket?.key_version ?? 1;
+    if (keyVersion !== currentKeyVersion || image.key_version !== currentKeyVersion) {
+      return c.json({ error: "stale bucket key: reload the page and try again" }, 409);
+    }
+
+    const bytes = await readCiphertextVariantBytes(fields);
+    if ("error" in bytes) return c.json({ error: bytes.error }, 400);
+
+    await putImageVariantBlobs(c.env, deviceKey, id, bytes);
+    await c.env.DB.batch([
+      // COALESCE: a client that didn't send a content hash leaves the old one.
+      c.env.DB.prepare("UPDATE images SET pipeline_version = ?, content_hash = COALESCE(?, content_hash) WHERE id = ?")
+        .bind(fields.pipelineVersion, fields.contentHash ?? null, id),
+      ...upsertImageVariantStatements(c.env, id, fields, bytes),
+    ]);
+
+    // New packed hashes under the same image id - same reasoning as
+    // reencrypt-image's invalidation.
+    await invalidateRotationCache(c.env, deviceKey);
+    await invalidateRotationCacheForBucketConsumers(c.env, deviceKey);
+
+    return c.json({ id, pipeline_version: fields.pipelineVersion });
+  });
+
   app.get("/admin/images", requireAdmin, async (c) => {
     const deviceKey = c.req.query("device_key");
     if (!deviceKey) return c.json({ error: "device_key query param is required" }, 400);
@@ -182,7 +238,7 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     }
 
     const rows = await c.env.DB.prepare(
-      "SELECT id, filename, dither_algorithm, raw_bytes, created_at, key_version FROM images WHERE device_key = ? ORDER BY filename ASC"
+      "SELECT id, filename, dither_algorithm, raw_bytes, created_at, key_version, pipeline_version FROM images WHERE device_key = ? ORDER BY filename ASC"
     )
       .bind(deviceKey)
       .all<{
@@ -192,21 +248,35 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
         raw_bytes: number;
         created_at: number;
         key_version: number;
+        pipeline_version: number;
       }>();
 
     if (rows.results.length === 0) return c.json({ images: [] });
 
     const variantRows = await c.env.DB.prepare(
-      `SELECT image_id, board, packed_hash, packed_bytes, packed_encoding FROM image_variants
+      `SELECT image_id, board, packed_hash, packed_bytes, packed_encoding, cropped_bytes FROM image_variants
        WHERE image_id IN (${rows.results.map(() => "?").join(",")})`
     )
       .bind(...rows.results.map((r) => r.id))
-      .all<{ image_id: string; board: BoardId; packed_hash: string; packed_bytes: number; packed_encoding: string }>();
+      .all<{
+        image_id: string;
+        board: BoardId;
+        packed_hash: string;
+        packed_bytes: number;
+        packed_encoding: string;
+        cropped_bytes: number | null;
+      }>();
 
-    const variantsByImage = new Map<string, Record<string, { packed_hash: string; packed_bytes: number; packed_encoding: string }>>();
+    type VariantSummary = { packed_hash: string; packed_bytes: number; packed_encoding: string; cropped_bytes: number | null };
+    const variantsByImage = new Map<string, Record<string, VariantSummary>>();
     for (const v of variantRows.results) {
       const entry = variantsByImage.get(v.image_id) ?? {};
-      entry[v.board] = { packed_hash: v.packed_hash, packed_bytes: v.packed_bytes, packed_encoding: v.packed_encoding };
+      entry[v.board] = {
+        packed_hash: v.packed_hash,
+        packed_bytes: v.packed_bytes,
+        packed_encoding: v.packed_encoding,
+        cropped_bytes: v.cropped_bytes,
+      };
       variantsByImage.set(v.image_id, entry);
     }
 
@@ -271,6 +341,33 @@ export function registerAdminImageRoutes(app: Hono<{ Bindings: Env }>) {
     // Not long-cacheable: re-uploading the same filename reuses this id (see the
     // upload handler above), so the bytes at this URL can change over time.
     return new Response(new Uint8Array(raw), {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Cache-Control": "private, no-cache",
+      },
+    });
+  });
+
+  // One board's undithered upright crop (migrations/0028_image_cropped_source.sql),
+  // as ciphertext. 404 when this image has none (it predates the column, or
+  // was uploaded by an older client) - callers fall back to re-cropping the
+  // raw original. Same access/caching rules as /raw above.
+  app.get("/admin/images/:id/cropped/:board", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    const board = c.req.param("board");
+    if (!id || !board) return c.json({ error: "id and board are required" }, 400);
+    if (!isValidBoardId(board)) return c.json({ error: `board must be one of: ${BOARD_IDS.join(", ")}` }, 400);
+
+    const deviceKey = await findImageDeviceKey(c.env, id);
+    if (!deviceKey) return c.json({ error: "Not found" }, 404);
+    if (!(await assertBucketReadAccess(c.env, deviceKey, c.var.user.id))) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+
+    const cropped = await getCroppedSource(c.env, deviceKey, id, board);
+    if (!cropped) return c.json({ error: "Not found" }, 404);
+
+    return new Response(new Uint8Array(cropped), {
       headers: {
         "Content-Type": "application/octet-stream",
         "Cache-Control": "private, no-cache",

@@ -35,18 +35,16 @@ import {
   type WrappedKey,
 } from "./crypto";
 import { DEFAULT_CROP, decodeToBoardBuffer, resizeForStorage, type CropParams } from "./decode";
-import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
-import { BOARD_IDS, DEFAULT_BOARD_ID, type DitherAlgorithm } from "../lib/media-constants";
+import { computeHash16, enhanceAndDither, packToNibbles } from "../lib/dither";
+import { BOARD_IDS, DEFAULT_BOARD_ID, IMAGE_PIPELINE_VERSION, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
-import { makeThumbnailJpeg } from "./thumbnail";
+import { makeCroppedSourceJpeg, makeThumbnailJpeg } from "./thumbnail";
+import { renderDisplayPreview } from "./display-preview";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
 import { computeSharingKeyProof, type SharingKeyProofPurpose } from "../lib/sharing-key-proof";
 
 const KEY_STORAGE = "eink_admin_api_key";
 const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
-const DEFAULT_BRIGHTNESS = 1.0;
-const DEFAULT_CONTRAST = 1.2;
-const DEFAULT_SATURATION = 1.2;
 // Set by renderClaimBanner() from ?secret= when arriving via a device's QR scan;
 // consumed once by the Register click handler. See lib/registration-url.ts.
 let pendingClaimSecret: string | null = null;
@@ -109,6 +107,12 @@ let cropNatural = { w: 0, h: 0 };
 // Aliases uploadCurrent.crop while a photo is on the crop stage, so the
 // drag/zoom handlers below write straight into that queue item.
 let cropState: CropParams = { ...DEFAULT_CROP };
+// Upload modal's "Preview on display" toggle (client/display-preview.ts).
+// Stays on across queue items once turned on. `displayPreviewSeq` drops a
+// render that finished after a newer one was requested.
+let displayPreviewOn = false;
+let displayPreviewTimer: ReturnType<typeof setTimeout> | null = null;
+let displayPreviewSeq = 0;
 let cropDrag: { startX: number; startY: number; startLeft: number; startTop: number } | null = null;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -1349,6 +1353,20 @@ function bucketHasWriteAccess(bucket: any): boolean {
   return !!bucket.key;
 }
 
+// Small badge on a photo tile whose variants came from an older version of
+// the image pipeline (migrations/0029_image_pipeline_version.sql). The
+// title says what re-uploading would gain; version 1 is the only old one so
+// far, and what it lacks is a saved crop.
+function outdatedPipelineBadge(img: any): string {
+  const version = Number(img.pipeline_version ?? 1);
+  if (version >= IMAGE_PIPELINE_VERSION) return "";
+  const title =
+    "Processed by an older version of the image pipeline (v" + version + ", current v" + IMAGE_PIPELINE_VERSION + "). " +
+    (version < 2 ? "Its crop wasn't saved and its preview may be the wrong shape. " : "") +
+    "Re-upload it to use the latest processing.";
+  return '<span class="photo-tile-outdated" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">&#8635;</span>';
+}
+
 function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotation: any | null): string {
   const canWrite = bucketHasWriteAccess(bucket);
   const tiles = images
@@ -1362,13 +1380,29 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
       return (
         '<div class="photo-tile" onclick="openLightbox(' + jsArg(img.id) + ', ' + jsArg(bucket.id) + ', ' + jsArg(img.filename) + ')">' +
           thumb +
-          '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
+          '<div class="photo-tile-badges">' +
+            '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
+            outdatedPipelineBadge(img) +
+          "</div>" +
           deleteBtn +
           '<div class="photo-tile-caption">' + escapeHtml(img.filename) + "</div>" +
         "</div>"
       );
     })
     .join("");
+
+  // Offered only to accounts that can write (the re-render replaces blobs);
+  // a read-only viewer of a public bucket still sees the badges.
+  const outdatedCount = images.filter(isOutdatedImage).length;
+  const rerenderSection =
+    canWrite && outdatedCount > 0
+      ? '<div class="rerender-row">' +
+          '<span class="hint"><span class="photo-tile-outdated inline" aria-hidden="true">&#8635;</span> ' +
+            outdatedCount + (outdatedCount === 1 ? " photo was" : " photos were") + " made with older image processing.</span>" +
+          '<button class="ghost sm" onclick="rerenderOutdatedImages(' + jsArg(bucket.id) + ')">Re-render ' +
+            (outdatedCount === 1 ? "it" : "them") + "&hellip;</button>" +
+        "</div>"
+      : "";
 
   const addTile = canWrite
     ? '<button type="button" class="photo-tile photo-tile-add" onclick="openUploadModal(' + jsArg(bucket.id) + ')">' +
@@ -1459,6 +1493,7 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
     '<div class="card">' +
       titleRow +
       '<div class="photo-grid">' + tiles + addTile + "</div>" +
+      rerenderSection +
       ownerSection +
     "</div>"
   );
@@ -1709,6 +1744,7 @@ function renderUploadCropStage(item: UploadQueueItem) {
     '<div class="crop-stage">' +
       '<div class="crop-viewport" id="upload-crop-viewport" style="width:' + CROP_BOX_W + 'px;height:' + CROP_BOX_H + 'px;">' +
         '<img id="upload-crop-img" src="' + item.objectUrl + '" alt="">' +
+        '<canvas id="upload-preview-canvas" class="crop-preview stale"' + (displayPreviewOn ? "" : " hidden") + "></canvas>" +
       "</div>" +
       '<div class="crop-controls">' +
         '<p class="crop-hint hint-block">Drag the photo to reposition it, and zoom in if you want to fill the frame differently. The box shows exactly what the display will show.</p>' +
@@ -1719,6 +1755,12 @@ function renderUploadCropStage(item: UploadQueueItem) {
         "</div>" +
         '<div class="row"><label>Filename</label><input type="text" id="upload-filename-input" value="' + escapeHtml(item.filename) + '"></div>' +
         '<div class="row"><label>Dither</label><select id="upload-dither-select">' + ditherOptions + "</select></div>" +
+        '<div class="crop-preview-row">' +
+          '<button class="ghost sm" id="upload-preview-btn" type="button" aria-pressed="' + displayPreviewOn + '">' +
+            (displayPreviewOn ? "Show photo" : "Preview on display") +
+          "</button>" +
+          '<span class="hint" id="upload-preview-status">' + (displayPreviewOn ? "Rendering&hellip;" : "") + "</span>" +
+        "</div>" +
         '<div class="upload-actions">' +
           '<button id="upload-confirm-btn">' + (pendingOthers ? "Upload &amp; next" : "Upload photo") + "</button>" +
           (pendingOthers
@@ -1752,12 +1794,25 @@ function renderUploadCropStage(item: UploadQueueItem) {
   el<HTMLInputElement>("upload-zoom-slider").addEventListener("input", (e) => {
     cropState.zoom = Number((e.target as HTMLInputElement).value) / 100;
     layoutCropImage();
+    scheduleDisplayPreview();
   });
   el("upload-crop-reset-btn").addEventListener("click", () => {
     Object.assign(cropState, DEFAULT_CROP);
     el<HTMLInputElement>("upload-zoom-slider").value = "100";
     layoutCropImage();
+    scheduleDisplayPreview();
   });
+  el("upload-dither-select").addEventListener("change", () => scheduleDisplayPreview(0));
+  el("upload-preview-btn").addEventListener("click", () => {
+    displayPreviewOn = !displayPreviewOn;
+    const btn = el("upload-preview-btn");
+    btn.textContent = displayPreviewOn ? "Show photo" : "Preview on display";
+    btn.setAttribute("aria-pressed", String(displayPreviewOn));
+    el("upload-preview-canvas").hidden = !displayPreviewOn;
+    el("upload-preview-status").textContent = "";
+    if (displayPreviewOn) scheduleDisplayPreview(0);
+  });
+  if (displayPreviewOn) scheduleDisplayPreview(0);
   el("upload-confirm-btn").addEventListener("click", confirmUpload);
   document.getElementById("upload-all-btn")?.addEventListener("click", confirmUploadAll);
   document.getElementById("upload-remove-btn")?.addEventListener("click", () => {
@@ -1821,6 +1876,48 @@ function onCropPointerUp(e: PointerEvent) {
   cropDrag = null;
   el("upload-crop-viewport").classList.remove("dragging");
   try { el("upload-crop-viewport").releasePointerCapture(e.pointerId); } catch {}
+  scheduleDisplayPreview();
+}
+
+// Re-renders the display preview after the crop or dither changes, debounced
+// so dragging the zoom slider doesn't queue a full-resolution dither per
+// step. Meanwhile the preview is marked stale (CSS hides it, so the photo
+// underneath shows the new framing live).
+function scheduleDisplayPreview(delayMs = 300) {
+  if (!displayPreviewOn) return;
+  document.getElementById("upload-preview-canvas")?.classList.add("stale");
+  if (displayPreviewTimer) clearTimeout(displayPreviewTimer);
+  displayPreviewTimer = setTimeout(() => {
+    displayPreviewTimer = null;
+    void renderUploadDisplayPreview();
+  }, delayMs);
+}
+
+async function renderUploadDisplayPreview() {
+  const item = uploadCurrent;
+  const ditherSelect = document.getElementById("upload-dither-select") as HTMLSelectElement | null;
+  if (!item || !ditherSelect || !displayPreviewOn) return;
+  const seq = ++displayPreviewSeq;
+  const status = document.getElementById("upload-preview-status");
+  if (status) status.textContent = "Rendering…";
+  try {
+    // The crop box is the reference board's (EE02's 3:4) shape, so that's
+    // the board previewed - see root CLAUDE.md's crop-UI known gap.
+    const image = await renderDisplayPreview(item.file, { ...cropState }, DEFAULT_BOARD_ID, ditherSelect.value as DitherAlgorithm);
+    const canvas = document.getElementById("upload-preview-canvas") as HTMLCanvasElement | null;
+    // A newer render was requested, or the modal moved on to another photo.
+    if (seq !== displayPreviewSeq || !canvas || uploadCurrent !== item) return;
+    canvas.width = image.width;
+    canvas.height = image.height;
+    canvas.getContext("2d")?.putImageData(image, 0, 0);
+    canvas.classList.remove("stale");
+    const statusNow = document.getElementById("upload-preview-status");
+    if (statusNow) statusNow.textContent = "Simulated panel colors (approximate)";
+  } catch (err: any) {
+    if (seq !== displayPreviewSeq) return;
+    const statusNow = document.getElementById("upload-preview-status");
+    if (statusNow) statusNow.textContent = "Preview failed: " + err.message;
+  }
 }
 
 // Next photo still waiting to be positioned, preferring the ones after
@@ -1946,6 +2043,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
   const formData = new FormData();
   formData.set("dither_algorithm", dither);
   formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
+  formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
   // Bucket-key-keyed hash of the default board's PLAINTEXT packed buffer
   // (see crypto.ts's computeContentHash) — the Worker compares it against
@@ -1963,13 +2061,20 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
   await Promise.all(
     BOARD_IDS.map(async (board) => {
       const landscape = await decodeToBoardBuffer(file, crop, board);
-      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
+      // Both come from the upright crop BEFORE enhance() touches anything:
+      // the cropped source (migrations/0028_image_cropped_source.sql) is what
+      // a later re-render or key rotation starts from, so it must hold the
+      // user's framing without this pipeline's color tweaks baked in.
+      const { upright } = landscape;
+      const [thumbnail, croppedSource] = await Promise.all([
+        makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
+        makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
+      ]);
+      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, dither);
       const packed = packToNibbles(indices);
       if (board === DEFAULT_BOARD_ID) {
         contentHash.value = await computeContentHash(bucketKey, packed);
       }
-      const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
 
       // Compress the plaintext packed buffer BEFORE encrypting it -
       // ciphertext doesn't compress meaningfully (see compress.ts's doc
@@ -1977,9 +2082,10 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
       // meaningfully smaller.
       const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
 
-      const [packedCiphertext, thumbCiphertext] = await Promise.all([
+      const [packedCiphertext, thumbCiphertext, croppedCiphertext] = await Promise.all([
         aesGcmEncryptBlob(bucketKey, packedForUpload),
         aesGcmEncryptBlob(bucketKey, thumbnail),
+        aesGcmEncryptBlob(bucketKey, croppedSource),
       ]);
       const packedHash = await computeHash16(packedCiphertext);
 
@@ -1987,6 +2093,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
       formData.set(`packed_hash__${board}`, packedHash);
       formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
       formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+      formData.set(`cropped__${board}`, new Blob([new Uint8Array(croppedCiphertext)]), `cropped-${board}.bin`);
     })
   );
 
@@ -2168,37 +2275,58 @@ async function removeBucketCollaborator(bucketId: string, userId: string) {
 // encryption is that the Worker never sees plaintext, and rotation is no
 // exception: every image is downloaded, decrypted, and re-encrypted here.
 
-function rotateModalUpdate(done: number, total: number, note?: string) {
+// Progress modal shared by key rotation and re-rendering ("N of M images
+// <verb>"). The DOM ids keep their original rotate-modal names.
+let progressModalVerb = "re-encrypted";
+function progressModalUpdate(done: number, total: number, note?: string) {
   const pct = total > 0 ? Math.round((done / total) * 100) : 100;
   el("rotate-modal-body").innerHTML =
-    "<p>" + done + " of " + total + " images re-encrypted (" + pct + "%).</p>" +
+    "<p>" + done + " of " + total + " images " + progressModalVerb + " (" + pct + "%).</p>" +
     '<div class="progress-track">' +
       '<div class="progress-fill" style="width:' + pct + '%;"></div>' +
     "</div>" +
     (note ? '<p class="hint" style="margin-top:10px;">' + escapeHtml(note) + "</p>" : "");
 }
-function rotateModalOpen(done: number, total: number) {
-  el("rotate-modal-title").textContent = "Rotating bucket key";
-  rotateModalUpdate(done, total);
+function progressModalOpen(title: string, verb: string, done: number, total: number) {
+  el("rotate-modal-title").textContent = title;
+  progressModalVerb = verb;
+  progressModalUpdate(done, total);
   el("rotate-modal-overlay").classList.add("open");
+}
+function rotateModalUpdate(done: number, total: number, note?: string) {
+  progressModalUpdate(done, total, note);
+}
+function rotateModalOpen(done: number, total: number) {
+  progressModalOpen("Rotating bucket key", "re-encrypted", done, total);
 }
 function rotateModalClose() {
   el("rotate-modal-overlay").classList.remove("open");
 }
 el("rotate-modal-close-btn").addEventListener("click", rotateModalClose);
 
+/** Fetches and decrypts one board's stored cropped source (a JPEG), or null
+ *  when the image has none - see GET /admin/images/:id/cropped/:board. */
+async function fetchCroppedSource(imageId: string, board: BoardId, key: CryptoKey): Promise<Uint8Array | null> {
+  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/cropped/" + encodeURIComponent(board), {
+    headers: { Authorization: "Bearer " + getApiKey() },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  return aesGcmDecryptBlob(key, new Uint8Array(await res.arrayBuffer()));
+}
+
 /**
  * Re-encrypts one image under `newKey`: fetches and decrypts its raw original
- * (the only ciphertext an admin route exposes — there is no route to fetch an
- * image's already-processed packed/thumb blobs) under `oldKey`, then re-runs
+ * and per-board cropped sources (there is no route to fetch an image's
+ * already-processed packed/thumb blobs) under `oldKey`, then re-runs
  * the exact decode -> enhance -> dither -> pack -> thumbnail pipeline
  * processAndUploadImage() uses, so the result is the same processing applied again,
- * not a copy of bytes that happen to already exist. Note this re-crops with
- * the DEFAULT_CROP framing (centered, no zoom): per-image pan/zoom choices
- * made at original upload time aren't persisted anywhere server-side (they're
- * baked directly into the packed pixels, never stored as separate metadata),
- * so there's no way to reproduce a custom crop here — only the pixels for a
- * previously-default-cropped image are guaranteed to come out identical.
+ * not a copy of bytes that happen to already exist. Each board starts from
+ * that board's stored cropped source when there is one (migrations/
+ * 0028_image_cropped_source.sql), which keeps the user's original pan/zoom.
+ * An image uploaded before cropped sources existed has none, so it's
+ * re-cropped from the raw original with DEFAULT_CROP (centered, no zoom) and
+ * that crop is stored as its cropped source from here on.
  */
 async function reencryptOneImage(
   bucketId: string,
@@ -2208,57 +2336,186 @@ async function reencryptOneImage(
   oldKey: CryptoKey,
   newKey: CryptoKey
 ): Promise<void> {
-  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
-    headers: { Authorization: "Bearer " + getApiKey() },
-  });
-  if (!res.ok) throw new Error(res.status + " " + res.statusText);
-  const rawCiphertext = new Uint8Array(await res.arrayBuffer());
-  const rawBytes = await aesGcmDecryptBlob(oldKey, rawCiphertext);
+  const rawBytes = await fetchRawOriginal(imageId, oldKey);
   const newRawCiphertext = await aesGcmEncryptBlob(newKey, rawBytes);
 
   const formData = new FormData();
   formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
-
-  // Every board's variant gets re-derived and re-uploaded together, same as
-  // processAndUploadImage() - this does NOT try to preserve whatever packed_encoding
-  // each variant happened to have before rotation (there's nothing stored
-  // server-side to read a "how was this compressed" answer from without the
-  // bucket key anyway).
-  await Promise.all(
-    BOARD_IDS.map(async (board) => {
-      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(rawBytes)]), DEFAULT_CROP, board);
-      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
-      const packed = packToNibbles(indices);
-      // Refresh the keyed content hash under the NEW bucket key while the
-      // plaintext is in hand (migrations/0020_image_content_hash.sql) — the
-      // stored hash must stay comparable with post-rotation uploads, which
-      // are keyed with this same new key.
-      if (board === DEFAULT_BOARD_ID) {
-        formData.set("content_hash", await computeContentHash(newKey, packed));
-      }
-      const thumbnail = await makeThumbnailJpeg(landscape.upright.rgba, landscape.upright.width, landscape.upright.height);
-
-      const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
-
-      const [newPackedCiphertext, newThumbCiphertext] = await Promise.all([
-        aesGcmEncryptBlob(newKey, packedForUpload),
-        aesGcmEncryptBlob(newKey, thumbnail),
-      ]);
-      const packedHash = await computeHash16(newPackedCiphertext);
-
-      formData.set(`packed_encoding__${board}`, packedEncoding);
-      formData.set(`packed_hash__${board}`, packedHash);
-      formData.set(`packed__${board}`, new Blob([new Uint8Array(newPackedCiphertext)]), `packed-${board}.bin`);
-      formData.set(`thumb__${board}`, new Blob([new Uint8Array(newThumbCiphertext)]), `thumb-${board}.bin`);
-    })
-  );
+  await renderStoredImageVariants(formData, imageId, ditherAlgorithm, oldKey, newKey, async () => rawBytes);
 
   await apiFetch(
     "/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/" + encodeURIComponent(rotationId) + "/reencrypt-image/" + encodeURIComponent(imageId),
     { method: "POST", body: formData }
   );
 }
+
+/** Fetches and decrypts an image's raw original (the storage-sized JPEG from
+ *  decode.ts's resizeForStorage). */
+async function fetchRawOriginal(imageId: string, key: CryptoKey): Promise<Uint8Array> {
+  const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
+    headers: { Authorization: "Bearer " + getApiKey() },
+  });
+  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  return aesGcmDecryptBlob(key, new Uint8Array(await res.arrayBuffer()));
+}
+
+/**
+ * Re-runs the current pipeline for an image that's already stored, filling
+ * `formData` with every board's packed/thumb/cropped ciphertext plus
+ * content_hash and pipeline_version — shared by key rotation
+ * (reencryptOneImage) and the gallery's re-render (rerenderOneImage). Stored
+ * blobs are decrypted with `readKey` and the results encrypted with
+ * `writeKey` (the same key for a re-render).
+ *
+ * Each board starts from its stored cropped source when there is one
+ * (migrations/0028_image_cropped_source.sql), which keeps the user's
+ * pan/zoom. A board without one is re-cropped from the raw original with
+ * DEFAULT_CROP (centered, no zoom) and that crop becomes its cropped source.
+ * `getRawOriginal` is only called in that case, so a caller can make the
+ * raw download lazy.
+ *
+ * Every board's variant gets re-derived together, same as
+ * processAndUploadImage() - this does NOT try to preserve whatever
+ * packed_encoding each variant had before (there's nothing stored
+ * server-side to read a "how was this compressed" answer from without the
+ * bucket key anyway).
+ */
+async function renderStoredImageVariants(
+  formData: FormData,
+  imageId: string,
+  ditherAlgorithm: DitherAlgorithm,
+  readKey: CryptoKey,
+  writeKey: CryptoKey,
+  getRawOriginal: () => Promise<Uint8Array>
+): Promise<void> {
+  formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
+  await Promise.all(
+    BOARD_IDS.map(async (board) => {
+      // The stored crop is already exactly this board's upright size, so
+      // decodeToBoardBuffer's cover-fit is a 1:1 draw - DEFAULT_CROP only
+      // matters on the raw-original fallback.
+      const storedCrop = await fetchCroppedSource(imageId, board, readKey);
+      const source = storedCrop ?? (await getRawOriginal());
+      const landscape = await decodeToBoardBuffer(new Blob([new Uint8Array(source)]), DEFAULT_CROP, board);
+      const { upright } = landscape;
+      const [thumbnail, croppedSource] = await Promise.all([
+        makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
+        // Re-encrypt the stored crop's exact bytes rather than re-encoding
+        // it - no generational JPEG loss on every rotation/re-render.
+        storedCrop ?? makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
+      ]);
+      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
+      const packed = packToNibbles(indices);
+      // Refresh the keyed content hash under the write key while the
+      // plaintext is in hand (migrations/0020_image_content_hash.sql) — the
+      // stored hash must stay comparable with later uploads keyed the same way.
+      if (board === DEFAULT_BOARD_ID) {
+        formData.set("content_hash", await computeContentHash(writeKey, packed));
+      }
+
+      const { bytes: packedForUpload, encoding: packedEncoding } = await compressPackedForUpload(packed);
+
+      const [packedCiphertext, thumbCiphertext, croppedCiphertext] = await Promise.all([
+        aesGcmEncryptBlob(writeKey, packedForUpload),
+        aesGcmEncryptBlob(writeKey, thumbnail),
+        aesGcmEncryptBlob(writeKey, croppedSource),
+      ]);
+      const packedHash = await computeHash16(packedCiphertext);
+
+      formData.set(`packed_encoding__${board}`, packedEncoding);
+      formData.set(`packed_hash__${board}`, packedHash);
+      formData.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
+      formData.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+      formData.set(`cropped__${board}`, new Blob([new Uint8Array(croppedCiphertext)]), `cropped-${board}.bin`);
+    })
+  );
+}
+
+/** Re-renders one already-stored image with the current pipeline, under the
+ *  bucket's current key (POST /admin/images/:id/rerender). The raw original
+ *  is only downloaded if some board has no stored crop to start from. */
+async function rerenderOneImage(imageId: string, ditherAlgorithm: DitherAlgorithm, key: CryptoKey, keyVersion: number): Promise<void> {
+  let rawPromise: Promise<Uint8Array> | null = null;
+  const getRawOriginal = () => (rawPromise ??= fetchRawOriginal(imageId, key));
+
+  const formData = new FormData();
+  formData.set("key_version", String(keyVersion));
+  await renderStoredImageVariants(formData, imageId, ditherAlgorithm, key, key, getRawOriginal);
+  await apiFetch("/admin/images/" + encodeURIComponent(imageId) + "/rerender", { method: "POST", body: formData });
+}
+
+function isOutdatedImage(img: any): boolean {
+  return Number(img.pipeline_version ?? 1) < IMAGE_PIPELINE_VERSION;
+}
+
+/**
+ * The bucket card's "Re-render N older photos" button: re-runs the current
+ * pipeline over every image whose pipeline_version is behind
+ * (migrations/0029_image_pipeline_version.sql), one at a time with the
+ * progress modal. Stops at the first failure; clicking again picks up where
+ * it left off, since finished images are no longer outdated.
+ */
+async function rerenderOutdatedImages(bucketId: string) {
+  const bucketKey = bucketAesKeys.get(bucketId);
+  const bucket = allBucketsCache.find((b) => b.id === bucketId);
+  if (!bucketKey || !bucket) {
+    showMessage("app-message", "This bucket's key isn't unlocked in this session — log out and back in with your passkey.", "error");
+    return;
+  }
+
+  let outdated: any[];
+  try {
+    const imagesResult = await apiFetch("/admin/images?device_key=" + encodeURIComponent(bucketId));
+    outdated = imagesResult.images.filter(isOutdatedImage);
+  } catch (err: any) {
+    showMessage("app-message", "Failed to load this bucket's image list: " + err.message, "error");
+    return;
+  }
+  if (outdated.length === 0) {
+    await refreshBucket(bucketId);
+    return;
+  }
+
+  const withoutCrop = outdated.filter((img) => BOARD_IDS.some((board) => !img.variants?.[board]?.cropped_bytes)).length;
+  const proceed = confirm(
+    "Re-render " + outdated.length + (outdated.length === 1 ? " photo" : " photos") + " with the latest image processing? " +
+      "Each one is downloaded, processed in this browser and re-uploaded, so a large bucket takes a while." +
+      (withoutCrop > 0
+        ? "\n\n" + withoutCrop + " of them were uploaded before crops were saved, so they'll be re-cropped centered with no zoom. " +
+          "Re-upload those instead if you want to keep a custom crop."
+        : "")
+  );
+  if (!proceed) return;
+
+  const total = outdated.length;
+  progressModalOpen("Re-rendering photos", "re-rendered", 0, total);
+  for (let i = 0; i < total; i++) {
+    const img = outdated[i];
+    progressModalUpdate(i, total, "Re-rendering " + img.filename + "…");
+    try {
+      await rerenderOneImage(img.id, img.dither_algorithm, bucketKey, bucket.key_version ?? 1);
+    } catch (err: any) {
+      progressModalUpdate(i, total, "Failed on " + img.filename + ": " + err.message);
+      showMessage(
+        "app-message",
+        "Re-render stopped: " + img.filename + " failed (" + err.message + "). Click Re-render again to continue with the rest.",
+        "error"
+      );
+      await refreshBucket(bucketId);
+      return;
+    }
+    // Its thumbnail changed (possibly its shape too) - drop the cached
+    // decrypted copy so refreshBucket() decrypts the new one.
+    const staleThumbUrl = thumbnailUrlCache[img.id];
+    if (staleThumbUrl) {
+      URL.revokeObjectURL(staleThumbUrl);
+      delete thumbnailUrlCache[img.id];
+    }
+  }
+  progressModalUpdate(total, total, "Done.");
+  await refreshBucket(bucketId);
+}
+(window as any).rerenderOutdatedImages = rerenderOutdatedImages;
 
 /**
  * Starts a new rotation, or resumes one found via GET rotate/status (called

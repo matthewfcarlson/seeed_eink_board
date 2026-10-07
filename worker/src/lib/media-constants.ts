@@ -47,6 +47,17 @@ export function isValidBoardId(value: string): value is BoardId {
 // build).
 export const DEFAULT_BOARD_ID: BoardId = "ee02-13in3";
 
+/**
+ * Bump whenever the client-side image pipeline changes what it produces, so
+ * the dashboard can flag images rendered by an older one
+ * (migrations/0029_image_pipeline_version.sql). History:
+ *   1 - original pipeline; no stored cropped source.
+ *   2 - stores each board's undithered cropped source
+ *       (migrations/0028_image_cropped_source.sql) and aspect-correct
+ *       thumbnails.
+ */
+export const IMAGE_PIPELINE_VERSION = 2;
+
 export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";
 export const DITHER_ALGORITHMS: DitherAlgorithm[] = ["floyd_steinberg", "atkinson", "ordered"];
 

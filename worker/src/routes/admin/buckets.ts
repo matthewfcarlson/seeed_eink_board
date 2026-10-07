@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { BOARD_IDS, type Env } from "../../types";
 import { requireAdmin } from "../../lib/admin-middleware";
-import { deleteImageBlobs, putPackedImage, putRawImage, putThumbnail } from "../../lib/image-store";
+import { deleteImageBlobs, putImageVariantBlobs, putRawImage, upsertImageVariantStatements } from "../../lib/image-store";
 import { invalidateRotationCache, invalidateRotationCacheForBucketConsumers } from "../../lib/rotation";
 import {
   bucketKeyUpsertStatement,
@@ -517,7 +517,7 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
     if ("error" in fields) return c.json({ error: fields.error }, 400);
     const bytes = await readCiphertextUploadBytes(fields);
     if ("error" in bytes) return c.json({ error: bytes.error }, 400);
-    const { rawBytes, variants } = bytes;
+    const { rawBytes } = bytes;
 
     // The client re-derives every board's `packed` from scratch (decode ->
     // dither -> pack, see admin.ts's reencryptOneImage()) rather than
@@ -537,27 +537,15 @@ export function registerAdminBucketRoutes(app: Hono<{ Bindings: Env }>) {
         .run();
     }
 
-    await Promise.all([
-      putRawImage(c.env, id, imageId, rawBytes),
-      ...BOARD_IDS.flatMap((board) => [
-        putPackedImage(c.env, id, imageId, board, variants[board].packedBytes),
-        putThumbnail(c.env, id, imageId, board, variants[board].thumbBytes),
-      ]),
-    ]);
+    await Promise.all([putRawImage(c.env, id, imageId, rawBytes), putImageVariantBlobs(c.env, id, imageId, bytes)]);
 
     await c.env.DB.batch([
-      c.env.DB.prepare("UPDATE images SET raw_bytes = ?, key_version = ? WHERE id = ?")
-        .bind(rawBytes.byteLength, rotation.new_key_version, imageId),
-      ...BOARD_IDS.map((board) =>
-        c.env.DB.prepare(
-          `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(image_id, board) DO UPDATE SET
-             packed_encoding = excluded.packed_encoding,
-             packed_hash = excluded.packed_hash,
-             packed_bytes = excluded.packed_bytes`
-        ).bind(imageId, board, fields.variants[board].packedEncoding, fields.variants[board].packedHash, variants[board].packedBytes.byteLength)
-      ),
+      // A rotation re-renders every variant, so it also brings the image up
+      // to whatever pipeline version the rotating client runs
+      // (migrations/0029_image_pipeline_version.sql).
+      c.env.DB.prepare("UPDATE images SET raw_bytes = ?, key_version = ?, pipeline_version = ? WHERE id = ?")
+        .bind(rawBytes.byteLength, rotation.new_key_version, fields.pipelineVersion, imageId),
+      ...upsertImageVariantStatements(c.env, imageId, fields, bytes),
     ]);
 
     // The packed blobs (and their hashes) just changed under the same image

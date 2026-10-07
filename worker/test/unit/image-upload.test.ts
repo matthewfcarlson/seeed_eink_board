@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { readCiphertextUploadBytes, validateCiphertextUploadFields } from "../../src/lib/image-upload";
-import { BOARD_IDS } from "../../src/lib/media-constants";
+import {
+  readCiphertextUploadBytes,
+  readCiphertextVariantBytes,
+  validateCiphertextUploadFields,
+  validateCiphertextVariantFields,
+} from "../../src/lib/image-upload";
+import { BOARD_IDS, IMAGE_PIPELINE_VERSION } from "../../src/lib/media-constants";
 
 function file(bytes: number[] = [1, 2, 3]): File {
   return new File([new Uint8Array(bytes)], "blob");
@@ -117,5 +122,76 @@ describe("readCiphertextUploadBytes", () => {
     const fields = validateCiphertextUploadFields(validBody({ [`packed__${BOARD_IDS[0]}`]: file([]) }));
     if ("error" in fields) throw new Error(fields.error);
     expect(await readCiphertextUploadBytes(fields)).toEqual({ error: expect.stringContaining("Empty") });
+  });
+});
+
+describe("cropped__<board> (optional cropped source)", () => {
+  it("is null for every board when absent (older callers)", async () => {
+    const fields = validateCiphertextUploadFields(validBody());
+    if ("error" in fields) throw new Error(fields.error);
+    const result = await readCiphertextUploadBytes(fields);
+    if ("error" in result) throw new Error(result.error);
+    for (const board of BOARD_IDS) expect(result.variants[board].croppedBytes).toBeNull();
+  });
+
+  it("reads a board's cropped bytes when present", async () => {
+    const fields = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: file([4, 4, 4, 4]) }));
+    if ("error" in fields) throw new Error(fields.error);
+    const result = await readCiphertextUploadBytes(fields);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.variants[BOARD_IDS[0]!]!.croppedBytes).toEqual(new Uint8Array([4, 4, 4, 4]));
+    expect(result.variants[BOARD_IDS[1]!]!.croppedBytes).toBeNull();
+  });
+
+  it("rejects a non-File cropped value", () => {
+    const result = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: "not-a-file" }));
+    expect(result).toEqual({ error: expect.stringContaining("cropped__") });
+  });
+
+  it("rejects an empty cropped file", async () => {
+    const fields = validateCiphertextUploadFields(validBody({ [`cropped__${BOARD_IDS[0]}`]: file([]) }));
+    if ("error" in fields) throw new Error(fields.error);
+    expect(await readCiphertextUploadBytes(fields)).toEqual({ error: expect.stringContaining("Empty") });
+  });
+});
+
+describe("pipeline_version", () => {
+  it("defaults to 1 when absent (clients from before the field existed)", () => {
+    const result = validateCiphertextUploadFields(validBody());
+    if ("error" in result) throw new Error(result.error);
+    expect(result.pipelineVersion).toBe(1);
+  });
+
+  it("accepts every version up to the current one", () => {
+    for (let v = 1; v <= IMAGE_PIPELINE_VERSION; v++) {
+      const result = validateCiphertextUploadFields(validBody({ pipeline_version: String(v) }));
+      if ("error" in result) throw new Error(result.error);
+      expect(result.pipelineVersion).toBe(v);
+    }
+  });
+
+  it("rejects zero, future, non-integer and non-string values", () => {
+    for (const bad of ["0", String(IMAGE_PIPELINE_VERSION + 1), "1.5", "-1", "abc", "", 2]) {
+      const result = validateCiphertextUploadFields(validBody({ pipeline_version: bad }));
+      expect(result).toEqual({ error: expect.stringContaining("pipeline_version") });
+    }
+  });
+});
+
+describe("validateCiphertextVariantFields / readCiphertextVariantBytes (re-render: no raw)", () => {
+  it("accepts a body without raw and reads every board's bytes", async () => {
+    const { raw, ...withoutRaw } = validBody({ pipeline_version: String(IMAGE_PIPELINE_VERSION) });
+    const fields = validateCiphertextVariantFields(withoutRaw);
+    if ("error" in fields) throw new Error(fields.error);
+    expect(fields.pipelineVersion).toBe(IMAGE_PIPELINE_VERSION);
+    const bytes = await readCiphertextVariantBytes(fields);
+    if ("error" in bytes) throw new Error(bytes.error);
+    for (const board of BOARD_IDS) expect(bytes.variants[board].packedBytes.byteLength).toBeGreaterThan(0);
+  });
+
+  it("still rejects a missing variant field", () => {
+    const { raw, ...withoutRaw } = validBody();
+    delete withoutRaw[`packed__${BOARD_IDS[0]}`];
+    expect(validateCiphertextVariantFields(withoutRaw)).toEqual({ error: expect.stringContaining("required") });
   });
 });

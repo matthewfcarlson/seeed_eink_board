@@ -40,10 +40,12 @@ import {
   type BoardId,
   type DitherAlgorithm,
   DITHER_ALGORITHMS,
+  IMAGE_PIPELINE_VERSION,
 } from "../src/lib/media-constants";
-import { computeHash16, ditherImage, enhance, packToNibbles } from "../src/lib/dither";
+import { computeHash16, enhanceAndDither, packToNibbles } from "../src/lib/dither";
 import { rotate90CW } from "../src/lib/decode";
 import { compressPackedForUpload } from "../src/client/compress";
+import { thumbnailSize } from "../src/client/thumbnail";
 import {
   HKDF_INFO_BUCKET_WRAP,
   aesGcmEncryptBlob,
@@ -51,16 +53,11 @@ import {
   wrapKeyFor,
 } from "../src/client/crypto";
 
-// Same browser-default enhance factors the dashboard's confirmUpload() uses
-// (src/client/admin.ts's DEFAULT_BRIGHTNESS/CONTRAST/SATURATION).
-const DEFAULT_BRIGHTNESS = 1.0;
-const DEFAULT_CONTRAST = 1.2;
-const DEFAULT_SATURATION = 1.2;
 
-// src/client/thumbnail.ts's exact thumbnail geometry/quality.
-const THUMBNAIL_WIDTH = 120;
-const THUMBNAIL_HEIGHT = 160;
+// src/client/thumbnail.ts's exact thumbnail/cropped-source quality (its
+// thumbnailSize() supplies the aspect-preserving geometry).
 const THUMBNAIL_JPEG_QUALITY = 0.7;
+const CROPPED_SOURCE_JPEG_QUALITY = 0.92;
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]);
 
@@ -439,12 +436,23 @@ export async function decodeUpright(
 
 /** sharp twin of client/thumbnail.ts's makeThumbnailJpeg(). */
 async function makeThumbnailJpeg(rgba: Uint8ClampedArray, width: number, height: number): Promise<Uint8Array> {
+  const size = thumbnailSize(width, height);
   const jpeg = await sharp(Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength), {
     raw: { width, height, channels: 4 },
   })
-    .resize(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, { fit: "fill" })
+    .resize(size.width, size.height, { fit: "fill" })
     // Browser canvas takes 0-1; sharp takes 1-100.
     .jpeg({ quality: Math.round(THUMBNAIL_JPEG_QUALITY * 100) })
+    .toBuffer();
+  return new Uint8Array(jpeg);
+}
+
+/** sharp twin of client/thumbnail.ts's makeCroppedSourceJpeg(). */
+async function makeCroppedSourceJpeg(rgba: Uint8ClampedArray, width: number, height: number): Promise<Uint8Array> {
+  const jpeg = await sharp(Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength), {
+    raw: { width, height, channels: 4 },
+  })
+    .jpeg({ quality: Math.round(CROPPED_SOURCE_JPEG_QUALITY * 100) })
     .toBuffer();
   return new Uint8Array(jpeg);
 }
@@ -469,6 +477,7 @@ async function buildUploadForm(
   const form = new FormData();
   form.set("dither_algorithm", dither);
   form.set("raw", new Blob([rawCiphertext]), "raw.bin");
+  form.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
   for (const board of BOARD_IDS) {
     const geometry = BOARD_GEOMETRY[board];
@@ -481,19 +490,21 @@ async function buildUploadForm(
     const oriented = geometry.needsRotation
       ? rotate90CW(upright.rgba, upright.width, upright.height)
       : upright;
-    enhance(oriented.rgba, oriented.width, oriented.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-
-    const indices = ditherImage(oriented.rgba, oriented.width, oriented.height, dither);
+    const indices = enhanceAndDither(oriented.rgba, oriented.width, oriented.height, dither);
     const packed = packToNibbles(indices);
-    const thumbnail = await makeThumbnailJpeg(upright.rgba, upright.width, upright.height);
+    const [thumbnail, cropped] = await Promise.all([
+      makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
+      makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
+    ]);
 
     // Compress the plaintext packed buffer BEFORE encrypting it — same rule
     // and same threshold as the browser (client/compress.ts).
     const { bytes: packedForUpload, encoding } = await compressPackedForUpload(packed);
 
-    const [packedCiphertext, thumbCiphertext] = await Promise.all([
+    const [packedCiphertext, thumbCiphertext, croppedCiphertext] = await Promise.all([
       aesGcmEncryptBlob(aesKey, packedForUpload),
       aesGcmEncryptBlob(aesKey, thumbnail),
+      aesGcmEncryptBlob(aesKey, cropped),
     ]);
     const packedHash = await computeHash16(packedCiphertext);
 
@@ -501,6 +512,7 @@ async function buildUploadForm(
     form.set(`packed_hash__${board}`, packedHash);
     form.set(`packed__${board}`, new Blob([new Uint8Array(packedCiphertext)]), `packed-${board}.bin`);
     form.set(`thumb__${board}`, new Blob([new Uint8Array(thumbCiphertext)]), `thumb-${board}.bin`);
+    form.set(`cropped__${board}`, new Blob([new Uint8Array(croppedCiphertext)]), `cropped-${board}.bin`);
   }
   return form;
 }

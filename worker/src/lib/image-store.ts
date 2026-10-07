@@ -1,14 +1,18 @@
 import type { Env } from "../types";
+import type { CiphertextVariantBytes, CiphertextVariantFields } from "./image-upload";
 import { BOARD_IDS, type BoardId, type PackedEncoding } from "./media-constants";
 
 /** KV keys for the blobs kept per catalog image — see plan §Storage (KV-only).
- *  `packed`/`thumb` are per-board (migrations/0019_image_board_variants.sql -
+ *  `packed`/`thumb`/`cropped` are per-board (migrations/0019_image_board_variants.sql -
  *  a bucket can mix EE02/EE04 devices, so each image needs one rendition per
- *  board); `raw` is the single as-uploaded original, shared by every variant. */
+ *  board); `raw` is the single as-uploaded original, shared by every variant.
+ *  `cropped` is that board's undithered upright crop (migrations/
+ *  0028_image_cropped_source.sql) - optional, absent on older images. */
 export const imageStoreKeys = {
   raw: (deviceKey: string, imageId: string) => `img:raw:${deviceKey}:${imageId}`,
   packed: (deviceKey: string, imageId: string, board: BoardId) => `img:packed:${deviceKey}:${imageId}:${board}`,
   thumb: (deviceKey: string, imageId: string, board: BoardId) => `img:thumb:${deviceKey}:${imageId}:${board}`,
+  cropped: (deviceKey: string, imageId: string, board: BoardId) => `img:cropped:${deviceKey}:${imageId}:${board}`,
 };
 
 /**
@@ -50,6 +54,27 @@ export async function getThumbnail(env: Env, deviceKey: string, imageId: string,
   return env.KV.get(imageStoreKeys.thumb(deviceKey, imageId, board), "arrayBuffer");
 }
 
+/** Writes this board's cropped-source ciphertext, or deletes any existing one
+ *  when `ciphertext` is null — a re-upload or rotation that didn't send one
+ *  must not leave a stale crop (or one under a revoked key version) behind. */
+export async function putOrDeleteCroppedSource(
+  env: Env,
+  deviceKey: string,
+  imageId: string,
+  board: BoardId,
+  ciphertext: Uint8Array | null
+): Promise<void> {
+  const key = imageStoreKeys.cropped(deviceKey, imageId, board);
+  if (ciphertext) await env.KV.put(key, ciphertext);
+  else await env.KV.delete(key);
+}
+
+/** Ciphertext of one board's undithered upright crop (a JPEG once
+ *  decrypted), or null if none was ever stored for this (image, board). */
+export async function getCroppedSource(env: Env, deviceKey: string, imageId: string, board: BoardId): Promise<ArrayBuffer | null> {
+  return env.KV.get(imageStoreKeys.cropped(deviceKey, imageId, board), "arrayBuffer");
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunkSize = 0x8000;
@@ -74,6 +99,7 @@ export async function deleteImageBlobs(env: Env, deviceKey: string, imageId: str
     ...BOARD_IDS.flatMap((board) => [
       env.KV.delete(imageStoreKeys.packed(deviceKey, imageId, board)),
       env.KV.delete(imageStoreKeys.thumb(deviceKey, imageId, board)),
+      env.KV.delete(imageStoreKeys.cropped(deviceKey, imageId, board)),
     ]),
   ]);
 }
@@ -93,4 +119,43 @@ export async function getImageVariant(env: Env, imageId: string, board: BoardId)
     .bind(imageId, board)
     .first<{ packed_hash: string; packed_bytes: number; packed_encoding: PackedEncoding }>();
   return row ? { packedHash: row.packed_hash, packedBytes: row.packed_bytes, packedEncoding: row.packed_encoding } : null;
+}
+
+/** Writes every board's packed/thumb/cropped blobs for one image — shared by
+ *  upload, rotation's reencrypt-image and rerender. */
+export async function putImageVariantBlobs(env: Env, deviceKey: string, imageId: string, bytes: CiphertextVariantBytes): Promise<void> {
+  await Promise.all(
+    BOARD_IDS.flatMap((board) => [
+      putPackedImage(env, deviceKey, imageId, board, bytes.variants[board].packedBytes),
+      putThumbnail(env, deviceKey, imageId, board, bytes.variants[board].thumbBytes),
+      putOrDeleteCroppedSource(env, deviceKey, imageId, board, bytes.variants[board].croppedBytes),
+    ])
+  );
+}
+
+/** One image_variants upsert per board, for the caller to include in its D1 batch. */
+export function upsertImageVariantStatements(
+  env: Env,
+  imageId: string,
+  fields: CiphertextVariantFields,
+  bytes: CiphertextVariantBytes
+): D1PreparedStatement[] {
+  return BOARD_IDS.map((board) =>
+    env.DB.prepare(
+      `INSERT INTO image_variants (image_id, board, packed_encoding, packed_hash, packed_bytes, cropped_bytes)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(image_id, board) DO UPDATE SET
+         packed_encoding = excluded.packed_encoding,
+         packed_hash = excluded.packed_hash,
+         packed_bytes = excluded.packed_bytes,
+         cropped_bytes = excluded.cropped_bytes`
+    ).bind(
+      imageId,
+      board,
+      fields.variants[board].packedEncoding,
+      fields.variants[board].packedHash,
+      bytes.variants[board].packedBytes.byteLength,
+      bytes.variants[board].croppedBytes?.byteLength ?? null
+    )
+  );
 }

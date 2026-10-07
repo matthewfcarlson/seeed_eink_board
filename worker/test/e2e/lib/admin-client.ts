@@ -9,6 +9,8 @@ export interface CiphertextVariant {
   packedHash: string;
   packed: Uint8Array;
   thumb: Uint8Array;
+  /** Optional cropped source (migrations/0028_image_cropped_source.sql). */
+  cropped?: Uint8Array;
   packedEncoding?: PackedEncoding;
 }
 
@@ -182,7 +184,23 @@ export class AdminClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  async listImages(bucketId: string): Promise<Array<{ id: string; filename: string; dither_algorithm: string }>> {
+  /** One board's cropped-source ciphertext, or null on 404 (none stored). */
+  async getCroppedSourceCiphertext(imageId: string, board: BoardId): Promise<Uint8Array | null> {
+    const res = await fetch(`${this.baseUrl}/admin/images/${imageId}/cropped/${board}`, { headers: this.authHeaders() });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`GET cropped source failed: ${res.status} ${await res.text()}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  async listImages(bucketId: string): Promise<
+    Array<{
+      id: string;
+      filename: string;
+      dither_algorithm: string;
+      pipeline_version: number;
+      variants: Record<string, { cropped_bytes: number | null }>;
+    }>
+  > {
     const { images } = await this.json<{ images: any[] }>(`/admin/images?device_key=${encodeURIComponent(bucketId)}`, {
       method: "GET",
     });
@@ -201,11 +219,22 @@ export class AdminClient {
     });
   }
 
+  /** POST /admin/images/:id/rerender - returns the raw Response so tests can
+   *  assert on 409/403 as well as success. */
+  async rerenderImageRaw(
+    imageId: string,
+    opts: { keyVersion: number; variants: Record<BoardId, CiphertextVariant>; pipelineVersion?: number }
+  ): Promise<Response> {
+    const form = buildVariantFormData({ raw: null, variants: opts.variants, pipelineVersion: opts.pipelineVersion });
+    form.set("key_version", String(opts.keyVersion));
+    return fetch(`${this.baseUrl}/admin/images/${imageId}/rerender`, { method: "POST", headers: this.authHeaders(), body: form });
+  }
+
   async reencryptImage(
     bucketId: string,
     rotationId: string,
     imageId: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }
+    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; pipelineVersion?: number }
   ): Promise<void> {
     const form = buildVariantFormData(opts);
     const res = await fetch(`${this.baseUrl}/admin/buckets/${bucketId}/rotate/${rotationId}/reencrypt-image/${imageId}`, {
@@ -300,7 +329,13 @@ export class AdminClient {
   async uploadImage(
     bucketId: string,
     filename: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; contentHash?: string; allowDuplicate?: boolean }
+    opts: {
+      raw: Uint8Array;
+      variants: Record<BoardId, CiphertextVariant>;
+      contentHash?: string;
+      allowDuplicate?: boolean;
+      pipelineVersion?: number;
+    }
   ): Promise<void> {
     const res = await this.uploadImageRaw(bucketId, filename, opts);
     if (!res.ok) {
@@ -313,7 +348,13 @@ export class AdminClient {
   async uploadImageRaw(
     bucketId: string,
     filename: string,
-    opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant>; contentHash?: string; allowDuplicate?: boolean }
+    opts: {
+      raw: Uint8Array;
+      variants: Record<BoardId, CiphertextVariant>;
+      contentHash?: string;
+      allowDuplicate?: boolean;
+      pipelineVersion?: number;
+    }
   ): Promise<Response> {
     const form = buildVariantFormData(opts);
     form.set("dither_algorithm", "floyd_steinberg");
@@ -325,15 +366,21 @@ export class AdminClient {
   }
 }
 
-function buildVariantFormData(opts: { raw: Uint8Array; variants: Record<BoardId, CiphertextVariant> }): FormData {
+function buildVariantFormData(opts: {
+  raw: Uint8Array | null;
+  variants: Record<BoardId, CiphertextVariant>;
+  pipelineVersion?: number;
+}): FormData {
   const form = new FormData();
-  form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
+  if (opts.raw) form.set("raw", new Blob([new Uint8Array(opts.raw)]), "raw.bin");
+  if (opts.pipelineVersion !== undefined) form.set("pipeline_version", String(opts.pipelineVersion));
   for (const board of BOARD_IDS) {
     const variant = opts.variants[board];
     form.set(`packed_hash__${board}`, variant.packedHash);
     form.set(`packed_encoding__${board}`, variant.packedEncoding ?? "identity");
     form.set(`packed__${board}`, new Blob([new Uint8Array(variant.packed)]), `packed-${board}.bin`);
     form.set(`thumb__${board}`, new Blob([new Uint8Array(variant.thumb)]), `thumb-${board}.bin`);
+    if (variant.cropped) form.set(`cropped__${board}`, new Blob([new Uint8Array(variant.cropped)]), `cropped-${board}.bin`);
   }
   return form;
 }
