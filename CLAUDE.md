@@ -350,6 +350,18 @@ progress. Narrow race left open: a rotation started between that check and
 the KV writes could get one image overwritten with old-key blobs; rotation's
 finalize doesn't detect it.
 
+**Display preview** (`worker/src/client/display-preview.ts`): the upload
+modal's "Preview on display" toggle runs the real pipeline (same
+`enhanceAndDither()` in `lib/dither.ts` the upload uses, on the same
+board-oriented buffer) for the current crop/dither, then paints each palette
+index in `PANEL_APPEARANCE` (`lib/palette.ts`) — what that ink looks like on
+the panel (gray paper white, muted inks) rather than the pure RGB the
+ditherer targets — and shows it over the crop box, debounced on every crop or
+dither change. Previews the reference board (EE02), whose 3:4 shape the crop
+box uses. `PANEL_APPEARANCE` is eyeballed, not measured on our hardware;
+calibrating it (instructions in its comment) makes the preview trustworthy
+and is the input the planned color fixes need anyway.
+
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default
 board's *plaintext* packed buffer, computed client-side before

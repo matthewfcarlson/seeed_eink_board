@@ -42,7 +42,7 @@ import {
   DITHER_ALGORITHMS,
   IMAGE_PIPELINE_VERSION,
 } from "../src/lib/media-constants";
-import { computeHash16, ditherImage, enhance, packToNibbles } from "../src/lib/dither";
+import { computeHash16, enhanceAndDither, packToNibbles } from "../src/lib/dither";
 import { rotate90CW } from "../src/lib/decode";
 import { compressPackedForUpload } from "../src/client/compress";
 import { thumbnailSize } from "../src/client/thumbnail";
@@ -53,11 +53,6 @@ import {
   wrapKeyFor,
 } from "../src/client/crypto";
 
-// Same browser-default enhance factors the dashboard's confirmUpload() uses
-// (src/client/admin.ts's DEFAULT_BRIGHTNESS/CONTRAST/SATURATION).
-const DEFAULT_BRIGHTNESS = 1.0;
-const DEFAULT_CONTRAST = 1.2;
-const DEFAULT_SATURATION = 1.2;
 
 // src/client/thumbnail.ts's exact thumbnail/cropped-source quality (its
 // thumbnailSize() supplies the aspect-preserving geometry).
@@ -495,9 +490,7 @@ async function buildUploadForm(
     const oriented = geometry.needsRotation
       ? rotate90CW(upright.rgba, upright.width, upright.height)
       : upright;
-    enhance(oriented.rgba, oriented.width, oriented.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-
-    const indices = ditherImage(oriented.rgba, oriented.width, oriented.height, dither);
+    const indices = enhanceAndDither(oriented.rgba, oriented.width, oriented.height, dither);
     const packed = packToNibbles(indices);
     const [thumbnail, cropped] = await Promise.all([
       makeThumbnailJpeg(upright.rgba, upright.width, upright.height),

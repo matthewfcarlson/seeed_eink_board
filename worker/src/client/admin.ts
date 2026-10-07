@@ -35,18 +35,16 @@ import {
   type WrappedKey,
 } from "./crypto";
 import { DEFAULT_CROP, decodeToBoardBuffer, resizeForStorage, type CropParams } from "./decode";
-import { computeHash16, ditherImage, enhance, packToNibbles } from "../lib/dither";
+import { computeHash16, enhanceAndDither, packToNibbles } from "../lib/dither";
 import { BOARD_IDS, DEFAULT_BOARD_ID, IMAGE_PIPELINE_VERSION, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
 import { makeCroppedSourceJpeg, makeThumbnailJpeg } from "./thumbnail";
+import { renderDisplayPreview } from "./display-preview";
 import { localKeystoreGet, localKeystoreSet } from "./keystore";
 import { computeSharingKeyProof, type SharingKeyProofPurpose } from "../lib/sharing-key-proof";
 
 const KEY_STORAGE = "eink_admin_api_key";
 const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
-const DEFAULT_BRIGHTNESS = 1.0;
-const DEFAULT_CONTRAST = 1.2;
-const DEFAULT_SATURATION = 1.2;
 // Set by renderClaimBanner() from ?secret= when arriving via a device's QR scan;
 // consumed once by the Register click handler. See lib/registration-url.ts.
 let pendingClaimSecret: string | null = null;
@@ -109,6 +107,12 @@ let cropNatural = { w: 0, h: 0 };
 // Aliases uploadCurrent.crop while a photo is on the crop stage, so the
 // drag/zoom handlers below write straight into that queue item.
 let cropState: CropParams = { ...DEFAULT_CROP };
+// Upload modal's "Preview on display" toggle (client/display-preview.ts).
+// Stays on across queue items once turned on. `displayPreviewSeq` drops a
+// render that finished after a newer one was requested.
+let displayPreviewOn = false;
+let displayPreviewTimer: ReturnType<typeof setTimeout> | null = null;
+let displayPreviewSeq = 0;
 let cropDrag: { startX: number; startY: number; startLeft: number; startTop: number } | null = null;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -1740,6 +1744,7 @@ function renderUploadCropStage(item: UploadQueueItem) {
     '<div class="crop-stage">' +
       '<div class="crop-viewport" id="upload-crop-viewport" style="width:' + CROP_BOX_W + 'px;height:' + CROP_BOX_H + 'px;">' +
         '<img id="upload-crop-img" src="' + item.objectUrl + '" alt="">' +
+        '<canvas id="upload-preview-canvas" class="crop-preview stale"' + (displayPreviewOn ? "" : " hidden") + "></canvas>" +
       "</div>" +
       '<div class="crop-controls">' +
         '<p class="crop-hint hint-block">Drag the photo to reposition it, and zoom in if you want to fill the frame differently. The box shows exactly what the display will show.</p>' +
@@ -1750,6 +1755,12 @@ function renderUploadCropStage(item: UploadQueueItem) {
         "</div>" +
         '<div class="row"><label>Filename</label><input type="text" id="upload-filename-input" value="' + escapeHtml(item.filename) + '"></div>' +
         '<div class="row"><label>Dither</label><select id="upload-dither-select">' + ditherOptions + "</select></div>" +
+        '<div class="crop-preview-row">' +
+          '<button class="ghost sm" id="upload-preview-btn" type="button" aria-pressed="' + displayPreviewOn + '">' +
+            (displayPreviewOn ? "Show photo" : "Preview on display") +
+          "</button>" +
+          '<span class="hint" id="upload-preview-status">' + (displayPreviewOn ? "Rendering&hellip;" : "") + "</span>" +
+        "</div>" +
         '<div class="upload-actions">' +
           '<button id="upload-confirm-btn">' + (pendingOthers ? "Upload &amp; next" : "Upload photo") + "</button>" +
           (pendingOthers
@@ -1783,12 +1794,25 @@ function renderUploadCropStage(item: UploadQueueItem) {
   el<HTMLInputElement>("upload-zoom-slider").addEventListener("input", (e) => {
     cropState.zoom = Number((e.target as HTMLInputElement).value) / 100;
     layoutCropImage();
+    scheduleDisplayPreview();
   });
   el("upload-crop-reset-btn").addEventListener("click", () => {
     Object.assign(cropState, DEFAULT_CROP);
     el<HTMLInputElement>("upload-zoom-slider").value = "100";
     layoutCropImage();
+    scheduleDisplayPreview();
   });
+  el("upload-dither-select").addEventListener("change", () => scheduleDisplayPreview(0));
+  el("upload-preview-btn").addEventListener("click", () => {
+    displayPreviewOn = !displayPreviewOn;
+    const btn = el("upload-preview-btn");
+    btn.textContent = displayPreviewOn ? "Show photo" : "Preview on display";
+    btn.setAttribute("aria-pressed", String(displayPreviewOn));
+    el("upload-preview-canvas").hidden = !displayPreviewOn;
+    el("upload-preview-status").textContent = "";
+    if (displayPreviewOn) scheduleDisplayPreview(0);
+  });
+  if (displayPreviewOn) scheduleDisplayPreview(0);
   el("upload-confirm-btn").addEventListener("click", confirmUpload);
   document.getElementById("upload-all-btn")?.addEventListener("click", confirmUploadAll);
   document.getElementById("upload-remove-btn")?.addEventListener("click", () => {
@@ -1852,6 +1876,48 @@ function onCropPointerUp(e: PointerEvent) {
   cropDrag = null;
   el("upload-crop-viewport").classList.remove("dragging");
   try { el("upload-crop-viewport").releasePointerCapture(e.pointerId); } catch {}
+  scheduleDisplayPreview();
+}
+
+// Re-renders the display preview after the crop or dither changes, debounced
+// so dragging the zoom slider doesn't queue a full-resolution dither per
+// step. Meanwhile the preview is marked stale (CSS hides it, so the photo
+// underneath shows the new framing live).
+function scheduleDisplayPreview(delayMs = 300) {
+  if (!displayPreviewOn) return;
+  document.getElementById("upload-preview-canvas")?.classList.add("stale");
+  if (displayPreviewTimer) clearTimeout(displayPreviewTimer);
+  displayPreviewTimer = setTimeout(() => {
+    displayPreviewTimer = null;
+    void renderUploadDisplayPreview();
+  }, delayMs);
+}
+
+async function renderUploadDisplayPreview() {
+  const item = uploadCurrent;
+  const ditherSelect = document.getElementById("upload-dither-select") as HTMLSelectElement | null;
+  if (!item || !ditherSelect || !displayPreviewOn) return;
+  const seq = ++displayPreviewSeq;
+  const status = document.getElementById("upload-preview-status");
+  if (status) status.textContent = "Rendering…";
+  try {
+    // The crop box is the reference board's (EE02's 3:4) shape, so that's
+    // the board previewed - see root CLAUDE.md's crop-UI known gap.
+    const image = await renderDisplayPreview(item.file, { ...cropState }, DEFAULT_BOARD_ID, ditherSelect.value as DitherAlgorithm);
+    const canvas = document.getElementById("upload-preview-canvas") as HTMLCanvasElement | null;
+    // A newer render was requested, or the modal moved on to another photo.
+    if (seq !== displayPreviewSeq || !canvas || uploadCurrent !== item) return;
+    canvas.width = image.width;
+    canvas.height = image.height;
+    canvas.getContext("2d")?.putImageData(image, 0, 0);
+    canvas.classList.remove("stale");
+    const statusNow = document.getElementById("upload-preview-status");
+    if (statusNow) statusNow.textContent = "Simulated panel colors (approximate)";
+  } catch (err: any) {
+    if (seq !== displayPreviewSeq) return;
+    const statusNow = document.getElementById("upload-preview-status");
+    if (statusNow) statusNow.textContent = "Preview failed: " + err.message;
+  }
 }
 
 // Next photo still waiting to be positioned, preferring the ones after
@@ -2004,8 +2070,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
         makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
         makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
       ]);
-      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, dither);
+      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, dither);
       const packed = packToNibbles(indices);
       if (board === DEFAULT_BOARD_ID) {
         contentHash.value = await computeContentHash(bucketKey, packed);
@@ -2339,8 +2404,7 @@ async function renderStoredImageVariants(
         // it - no generational JPEG loss on every rotation/re-render.
         storedCrop ?? makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
       ]);
-      enhance(landscape.rgba, landscape.width, landscape.height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-      const indices = ditherImage(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
+      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
       const packed = packToNibbles(indices);
       // Refresh the keyed content hash under the write key while the
       // plaintext is in hand (migrations/0020_image_content_hash.sql) — the

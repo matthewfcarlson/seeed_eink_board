@@ -599,6 +599,14 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .crop-viewport.dragging { cursor: grabbing; }
 .crop-viewport img { position: absolute; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.crop-viewport .crop-preview {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+/* Stale (re-rendering) or mid-drag: show the photo underneath instead. */
+.crop-viewport .crop-preview.stale, .crop-viewport.dragging .crop-preview { opacity: 0; }
+.crop-preview-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 0 12px; }
 .crop-controls { flex: 1; min-width: 200px; }
 .crop-zoom-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .crop-zoom-row span { font-size: 0.8em; color: var(--ink-soft); flex: none; }
