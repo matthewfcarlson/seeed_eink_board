@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkRateLimit, RATE_LIMITS } from "../../src/lib/rate-limit";
+import { adminRateLimitBucket, checkRateLimit, RATE_LIMITS } from "../../src/lib/rate-limit";
 import type { Env } from "../../src/types";
 
 /** Minimal D1 stand-in implementing exactly the upsert+RETURNING semantics
@@ -81,5 +81,24 @@ describe("checkRateLimit", () => {
       },
     } as unknown as Env;
     expect(await checkRateLimit(env, "auth", "x", 1, 60)).toBe(true);
+  });
+});
+
+describe("adminRateLimitBucket", () => {
+  it("puts image transfer endpoints in their own bucket", () => {
+    expect(adminRateLimitBucket("POST", "/admin/images/upload")).toBe("adminImages");
+    expect(adminRateLimitBucket("GET", "/admin/images/abc/raw")).toBe("adminImages");
+    expect(adminRateLimitBucket("GET", "/admin/images/abc/cropped/ee02-13in3")).toBe("adminImages");
+    expect(adminRateLimitBucket("POST", "/admin/images/abc/rerender")).toBe("adminImages");
+    expect(adminRateLimitBucket("POST", "/admin/buckets/b1/rotate/r1/reencrypt-image/abc")).toBe("adminImages");
+  });
+
+  it("keeps /admin/me separate and everything else in the shared admin bucket", () => {
+    expect(adminRateLimitBucket("GET", "/admin/me")).toBe("adminMe");
+    expect(adminRateLimitBucket("PUT", "/admin/me/sharing-key/repair")).toBe("adminMe");
+    expect(adminRateLimitBucket("GET", "/admin/images")).toBe("admin");
+    expect(adminRateLimitBucket("DELETE", "/admin/images/abc")).toBe("admin");
+    expect(adminRateLimitBucket("GET", "/admin/images/abc/rerender")).toBe("admin");
+    expect(adminRateLimitBucket("POST", "/admin/buckets/b1/rotate/r1/finalize")).toBe("admin");
   });
 });
