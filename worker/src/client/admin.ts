@@ -35,8 +35,8 @@ import {
   type WrappedKey,
 } from "./crypto";
 import { DEFAULT_CROP, decodeToBoardBuffer, resizeForStorage, type CropParams } from "./decode";
-import { computeHash16, enhanceAndDither, packToNibbles } from "../lib/dither";
-import { BOARD_IDS, DEFAULT_BOARD_ID, IMAGE_PIPELINE_VERSION, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
+import { PIPELINE_DITHER_NAME, computeHash16, enhanceAndDither, packToNibbles } from "../lib/dither";
+import { BOARD_IDS, DEFAULT_BOARD_ID, IMAGE_PIPELINE_VERSION, type BoardId } from "../lib/media-constants";
 import { compressPackedForUpload } from "./compress";
 import { makeCroppedSourceJpeg, makeThumbnailJpeg } from "./thumbnail";
 import { renderDisplayPreview } from "./display-preview";
@@ -44,7 +44,6 @@ import { localKeystoreGet, localKeystoreSet } from "./keystore";
 import { computeSharingKeyProof, type SharingKeyProofPurpose } from "../lib/sharing-key-proof";
 
 const KEY_STORAGE = "eink_admin_api_key";
-const DITHER_ALGORITHMS = ["floyd_steinberg", "atkinson", "ordered"];
 // Set by renderClaimBanner() from ?secret= when arriving via a device's QR scan;
 // consumed once by the Register click handler. See lib/registration-url.ts.
 let pendingClaimSecret: string | null = null;
@@ -92,7 +91,6 @@ type UploadQueueItem = {
   objectUrl: string;
   crop: CropParams;
   filename: string;
-  dither: DitherAlgorithm;
   // pending: still waiting to be cropped. queued/uploading: confirmed, in
   // uploadChain. skipped: declined at the duplicate-image prompt.
   status: "pending" | "queued" | "uploading" | "done" | "skipped" | "error";
@@ -102,7 +100,6 @@ let uploadModalDeviceKey: string | null = null;
 let uploadQueue: UploadQueueItem[] = [];
 let uploadCurrent: UploadQueueItem | null = null;
 let uploadChain: Promise<void> = Promise.resolve();
-let uploadLastDither: DitherAlgorithm = DITHER_ALGORITHMS[0] as DitherAlgorithm;
 let cropNatural = { w: 0, h: 0 };
 // Aliases uploadCurrent.crop while a photo is on the crop stage, so the
 // drag/zoom handlers below write straight into that queue item.
@@ -1381,7 +1378,6 @@ function bucketCardHtml(bucket: any, images: any[], collaborators: any[], rotati
         '<div class="photo-tile" onclick="openLightbox(' + jsArg(img.id) + ', ' + jsArg(bucket.id) + ', ' + jsArg(img.filename) + ')">' +
           thumb +
           '<div class="photo-tile-badges">' +
-            '<span class="pill photo-tile-dither">' + escapeHtml(img.dither_algorithm) + "</span>" +
             outdatedPipelineBadge(img) +
           "</div>" +
           deleteBtn +
@@ -1640,7 +1636,6 @@ function addFilesToUploadQueue(files: File[]) {
       objectUrl: URL.createObjectURL(file),
       crop: { ...DEFAULT_CROP },
       filename: "",
-      dither: uploadLastDither,
       status: "pending",
     };
     item.filename = uniqueQueueFilename(deviceKey, file.name);
@@ -1651,14 +1646,12 @@ function addFilesToUploadQueue(files: File[]) {
   renderUploadModal();
 }
 
-// Copies the crop stage's filename/dither inputs back into the item being
-// edited, before anything switches away from it.
+// Copies the crop stage's filename input back into the item being edited,
+// before anything switches away from it.
 function saveUploadCropForm() {
   if (!uploadCurrent) return;
   const nameInput = document.getElementById("upload-filename-input") as HTMLInputElement | null;
-  const ditherSelect = document.getElementById("upload-dither-select") as HTMLSelectElement | null;
   if (nameInput) uploadCurrent.filename = nameInput.value.trim() || uploadCurrent.file.name;
-  if (ditherSelect) uploadCurrent.dither = ditherSelect.value as DitherAlgorithm;
 }
 
 function uploadQueueStripHtml(): string {
@@ -1735,9 +1728,6 @@ function renderUploadProgress() {
 function renderUploadCropStage(item: UploadQueueItem) {
   cropState = item.crop;
   cropNatural = { w: 0, h: 0 };
-  const ditherOptions = DITHER_ALGORITHMS.map((a) =>
-    '<option value="' + a + '"' + (a === item.dither ? " selected" : "") + ">" + a + "</option>"
-  ).join("");
   const pendingOthers = uploadQueue.filter((i) => i.status === "pending" && i !== item).length;
   el("upload-modal-body").innerHTML =
     '<div class="upload-queue" id="upload-queue-strip">' + uploadQueueStripHtml() + "</div>" +
@@ -1754,7 +1744,6 @@ function renderUploadCropStage(item: UploadQueueItem) {
           '<button class="ghost sm" id="upload-crop-reset-btn" type="button">Reset</button>' +
         "</div>" +
         '<div class="row"><label>Filename</label><input type="text" id="upload-filename-input" value="' + escapeHtml(item.filename) + '"></div>' +
-        '<div class="row"><label>Dither</label><select id="upload-dither-select">' + ditherOptions + "</select></div>" +
         '<div class="crop-preview-row">' +
           '<button class="ghost sm" id="upload-preview-btn" type="button" aria-pressed="' + displayPreviewOn + '">' +
             (displayPreviewOn ? "Show photo" : "Preview on display") +
@@ -1802,7 +1791,6 @@ function renderUploadCropStage(item: UploadQueueItem) {
     layoutCropImage();
     scheduleDisplayPreview();
   });
-  el("upload-dither-select").addEventListener("change", () => scheduleDisplayPreview(0));
   el("upload-preview-btn").addEventListener("click", () => {
     displayPreviewOn = !displayPreviewOn;
     const btn = el("upload-preview-btn");
@@ -1879,7 +1867,7 @@ function onCropPointerUp(e: PointerEvent) {
   scheduleDisplayPreview();
 }
 
-// Re-renders the display preview after the crop or dither changes, debounced
+// Re-renders the display preview after the crop changes, debounced
 // so dragging the zoom slider doesn't queue a full-resolution dither per
 // step. Meanwhile the preview is marked stale (CSS hides it, so the photo
 // underneath shows the new framing live).
@@ -1895,15 +1883,14 @@ function scheduleDisplayPreview(delayMs = 300) {
 
 async function renderUploadDisplayPreview() {
   const item = uploadCurrent;
-  const ditherSelect = document.getElementById("upload-dither-select") as HTMLSelectElement | null;
-  if (!item || !ditherSelect || !displayPreviewOn) return;
+  if (!item || !displayPreviewOn) return;
   const seq = ++displayPreviewSeq;
   const status = document.getElementById("upload-preview-status");
   if (status) status.textContent = "Rendering…";
   try {
     // The crop box is the reference board's (EE02's 3:4) shape, so that's
     // the board previewed - see root CLAUDE.md's crop-UI known gap.
-    const image = await renderDisplayPreview(item.file, { ...cropState }, DEFAULT_BOARD_ID, ditherSelect.value as DitherAlgorithm);
+    const image = await renderDisplayPreview(item.file, { ...cropState }, DEFAULT_BOARD_ID);
     const canvas = document.getElementById("upload-preview-canvas") as HTMLCanvasElement | null;
     // A newer render was requested, or the modal moved on to another photo.
     if (seq !== displayPreviewSeq || !canvas || uploadCurrent !== item) return;
@@ -1943,14 +1930,13 @@ function confirmUpload() {
     showMessage("app-message", "Filename must be 1-255 characters with no control characters.", "error");
     return;
   }
-  uploadLastDither = item.dither;
   enqueueUpload(item);
   uploadCurrent = nextPendingUploadItem(item);
   renderUploadModal();
 }
 
 // Queues every remaining photo as-is: ones you haven't touched go up with the
-// default centered crop and the current dither choice.
+// default centered crop.
 function confirmUploadAll() {
   saveUploadCropForm();
   const pending = uploadQueue.filter((i) => i.status === "pending");
@@ -1961,7 +1947,6 @@ function confirmUploadAll() {
     showMessage("app-message", `"${invalid.filename}" isn't a valid filename (1-255 characters, no control characters).`, "error");
     return;
   }
-  if (uploadCurrent) uploadLastDither = uploadCurrent.dither;
   for (const item of pending) enqueueUpload(item);
   uploadCurrent = null;
   renderUploadModal();
@@ -2025,7 +2010,7 @@ async function runQueuedUpload(item: UploadQueueItem) {
  * to re-upload a duplicate.
  */
 async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
-  const { deviceKey, file, filename, dither } = item;
+  const { deviceKey, file, filename } = item;
   const crop = { ...item.crop };
   const bucketKey = bucketAesKeys.get(deviceKey);
   if (!bucketKey) {
@@ -2041,7 +2026,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
   const rawCiphertext = await aesGcmEncryptBlob(bucketKey, rawBytes);
 
   const formData = new FormData();
-  formData.set("dither_algorithm", dither);
+  formData.set("dither_algorithm", PIPELINE_DITHER_NAME);
   formData.set("raw", new Blob([new Uint8Array(rawCiphertext)]), "raw.bin");
   formData.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
@@ -2070,7 +2055,7 @@ async function processAndUploadImage(item: UploadQueueItem): Promise<boolean> {
         makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
         makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
       ]);
-      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, dither);
+      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height);
       const packed = packToNibbles(indices);
       if (board === DEFAULT_BOARD_ID) {
         contentHash.value = await computeContentHash(bucketKey, packed);
@@ -2332,7 +2317,6 @@ async function reencryptOneImage(
   bucketId: string,
   rotationId: string,
   imageId: string,
-  ditherAlgorithm: DitherAlgorithm,
   oldKey: CryptoKey,
   newKey: CryptoKey
 ): Promise<void> {
@@ -2341,7 +2325,7 @@ async function reencryptOneImage(
 
   const formData = new FormData();
   formData.set("raw", new Blob([new Uint8Array(newRawCiphertext)]), "raw.bin");
-  await renderStoredImageVariants(formData, imageId, ditherAlgorithm, oldKey, newKey, async () => rawBytes);
+  await renderStoredImageVariants(formData, imageId, oldKey, newKey, async () => rawBytes);
 
   await apiFetch(
     "/admin/buckets/" + encodeURIComponent(bucketId) + "/rotate/" + encodeURIComponent(rotationId) + "/reencrypt-image/" + encodeURIComponent(imageId),
@@ -2415,7 +2399,6 @@ async function withRateLimitRetry<T>(step: () => Promise<T>, onWait: (seconds: n
 async function renderStoredImageVariants(
   formData: FormData,
   imageId: string,
-  ditherAlgorithm: DitherAlgorithm,
   readKey: CryptoKey,
   writeKey: CryptoKey,
   getRawOriginal: () => Promise<Uint8Array>
@@ -2436,7 +2419,7 @@ async function renderStoredImageVariants(
         // it - no generational JPEG loss on every rotation/re-render.
         storedCrop ?? makeCroppedSourceJpeg(upright.rgba, upright.width, upright.height),
       ]);
-      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, ditherAlgorithm);
+      const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height);
       const packed = packToNibbles(indices);
       // Refresh the keyed content hash under the write key while the
       // plaintext is in hand (migrations/0020_image_content_hash.sql) — the
@@ -2466,13 +2449,13 @@ async function renderStoredImageVariants(
 /** Re-renders one already-stored image with the current pipeline, under the
  *  bucket's current key (POST /admin/images/:id/rerender). The raw original
  *  is only downloaded if some board has no stored crop to start from. */
-async function rerenderOneImage(imageId: string, ditherAlgorithm: DitherAlgorithm, key: CryptoKey, keyVersion: number): Promise<void> {
+async function rerenderOneImage(imageId: string, key: CryptoKey, keyVersion: number): Promise<void> {
   let rawPromise: Promise<Uint8Array> | null = null;
   const getRawOriginal = () => (rawPromise ??= fetchRawOriginal(imageId, key));
 
   const formData = new FormData();
   formData.set("key_version", String(keyVersion));
-  await renderStoredImageVariants(formData, imageId, ditherAlgorithm, key, key, getRawOriginal);
+  await renderStoredImageVariants(formData, imageId, key, key, getRawOriginal);
   await apiFetch("/admin/images/" + encodeURIComponent(imageId) + "/rerender", { method: "POST", body: formData });
 }
 
@@ -2526,7 +2509,7 @@ async function rerenderOutdatedImages(bucketId: string) {
     progressModalUpdate(i, total, "Re-rendering " + img.filename + "…");
     try {
       await withRateLimitRetry(
-        () => rerenderOneImage(img.id, img.dither_algorithm, bucketKey, bucket.key_version ?? 1),
+        () => rerenderOneImage(img.id, bucketKey, bucket.key_version ?? 1),
         (seconds) => progressModalUpdate(i, total, "Server busy — continuing with " + img.filename + " in " + seconds + "s…")
       );
     } catch (err: any) {
@@ -2649,7 +2632,7 @@ async function runBucketRotation(bucketId: string) {
     rotateModalUpdate(migrated, total, "Re-encrypting " + meta.filename + "…");
     try {
       await withRateLimitRetry(
-        () => reencryptOneImage(bucketId, rotationId, imageId, meta.dither_algorithm, oldBucketKey, newKey),
+        () => reencryptOneImage(bucketId, rotationId, imageId, oldBucketKey, newKey),
         (seconds) => rotateModalUpdate(migrated, total, "Server busy — continuing with " + meta.filename + " in " + seconds + "s…")
       );
     } catch (err: any) {

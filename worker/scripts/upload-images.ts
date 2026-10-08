@@ -27,7 +27,7 @@
  *
  * Usage:
  *   node scripts/upload-images.mjs --url https://... --api-key eink_... \
- *     --bucket "hokusai" [files-or-directories...] [--dither floyd_steinberg]
+ *     --bucket "hokusai" [files-or-directories...]
  */
 
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -38,11 +38,9 @@ import {
   BOARD_GEOMETRY,
   BOARD_IDS,
   type BoardId,
-  type DitherAlgorithm,
-  DITHER_ALGORITHMS,
   IMAGE_PIPELINE_VERSION,
 } from "../src/lib/media-constants";
-import { computeHash16, enhanceAndDither, packToNibbles } from "../src/lib/dither";
+import { PIPELINE_DITHER_NAME, computeHash16, enhanceAndDither, packToNibbles } from "../src/lib/dither";
 import { rotate90CW } from "../src/lib/decode";
 import { compressPackedForUpload } from "../src/client/compress";
 import { thumbnailSize } from "../src/client/thumbnail";
@@ -91,7 +89,6 @@ interface Options {
   url: string;
   apiKey: string;
   bucket: string;
-  dither: DitherAlgorithm;
   bucketKeyB64: string | null;
   panX: number;
   panY: number;
@@ -106,7 +103,7 @@ interface Options {
 function usage(): never {
   console.error(`Usage:
   node scripts/upload-images.mjs --url <worker-url> --api-key <eink_...> --bucket <label> \\
-    <files-or-directories...> [--dither floyd_steinberg|atkinson|ordered]
+    <files-or-directories...>
     [--bucket-key <base64 32-byte key | invite #key= fragment | invite URL>]
     [--pan-x 0..1] [--pan-y 0..1] [--zoom >=1] [--public] [--allow-upscale]
     [--fit cover|contain]  — cover fills the canvas (crops edges, default);
@@ -122,7 +119,6 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
     url: process.env.EINK_WORKER_URL ?? "",
     apiKey: process.env.EINK_API_KEY ?? "",
     bucket: "",
-    dither: "floyd_steinberg",
     bucketKeyB64: null,
     panX: 0.5,
     panY: 0,
@@ -144,7 +140,6 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
       case "--url": opts.url = next(); break;
       case "--api-key": opts.apiKey = next(); break;
       case "--bucket": opts.bucket = next(); break;
-      case "--dither": opts.dither = next() as DitherAlgorithm; break;
       case "--bucket-key": opts.bucketKeyB64 = next(); break;
       case "--pan-x": opts.panX = Number(next()); break;
       case "--pan-y": opts.panY = Number(next()); break;
@@ -169,10 +164,6 @@ function parseArgs(argv: string[]): Options & { paths: string[] } {
   }
   if (opts.paths.length === 0) usage();
   if (!opts.checkOnly && (!opts.url || !opts.apiKey || !opts.bucket)) usage();
-  if (!DITHER_ALGORITHMS.includes(opts.dither)) {
-    console.error(`--dither must be one of: ${DITHER_ALGORITHMS.join(", ")}`);
-    process.exit(2);
-  }
   opts.url = opts.url.replace(/\/+$/, "");
   // Center contain-fits vertically unless the caller says otherwise — the
   // cover default of panY=0 (top-align, keeps heads in portrait crops) would
@@ -466,7 +457,6 @@ async function buildUploadForm(
   file: string,
   filename: string,
   key: Uint8Array,
-  dither: DitherAlgorithm,
   crop: { panX: number; panY: number; zoom: number },
   fit: "cover" | "contain"
 ): Promise<FormData> {
@@ -475,7 +465,7 @@ async function buildUploadForm(
   const rawCiphertext = await aesGcmEncryptBlob(aesKey, rawBytes);
 
   const form = new FormData();
-  form.set("dither_algorithm", dither);
+  form.set("dither_algorithm", PIPELINE_DITHER_NAME);
   form.set("raw", new Blob([rawCiphertext]), "raw.bin");
   form.set("pipeline_version", String(IMAGE_PIPELINE_VERSION));
 
@@ -490,7 +480,7 @@ async function buildUploadForm(
     const oriented = geometry.needsRotation
       ? rotate90CW(upright.rgba, upright.width, upright.height)
       : upright;
-    const indices = enhanceAndDither(oriented.rgba, oriented.width, oriented.height, dither);
+    const indices = enhanceAndDither(oriented.rgba, oriented.width, oriented.height);
     const packed = packToNibbles(indices);
     const [thumbnail, cropped] = await Promise.all([
       makeThumbnailJpeg(upright.rgba, upright.width, upright.height),
@@ -601,7 +591,7 @@ export async function main(argv: string[]): Promise<void> {
     }
     process.stdout.write(`  upload ${filename} … `);
     try {
-      const form = await buildUploadForm(file, filename, key, opts.dither, { panX: opts.panX, panY: opts.panY, zoom: opts.zoom }, opts.fit);
+      const form = await buildUploadForm(file, filename, key, { panX: opts.panX, panY: opts.panY, zoom: opts.zoom }, opts.fit);
       await api(
         opts.url,
         opts.apiKey,

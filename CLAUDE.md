@@ -337,9 +337,10 @@ variants; the client sends it as `pipeline_version` on upload and
 reencrypt-image (absent = 1). The gallery shows a small yellow ↻ badge on
 any tile below the current version (`outdatedPipelineBadge`). Bump the
 constant whenever a pipeline change alters output (tone curve, palette,
-dither), and every older photo gets flagged. Currently 3; everything
-uploaded before cropped sources is 1, and 2 is cropped sources with the old
-color pipeline. A key rotation re-renders, so it
+dither), and every older photo gets flagged. Currently 4; everything
+uploaded before cropped sources is 1, 2 is cropped sources with the old
+color pipeline, 3 the tone stage + measured-ink matching, 4 the fixed
+serpentine/damped dither. A key rotation re-renders, so it
 brings images up to the rotating client's version. A bucket with outdated
 photos also shows "Re-render them…" (writers only): `rerenderOutdatedImages`
 re-runs the current pipeline per image from its cropped source (raw original
@@ -368,14 +369,26 @@ weighted 3x (`PANEL_MATCHER`; plain OKLab drifted bright reds orange). The
 ideal-RGB `PALETTE`/`nearestPaletteIndex` remain for the QR-registration
 screen. The old fixed contrast-1.2-around-the-mean step is gone.
 
+**Dithering is not user-selectable** (since v4): the upload modal has no
+dither picker and tiles show no dither pill. Every path uses
+`PIPELINE_DITHER` (`lib/dither.ts`): Floyd-Steinberg via the generic
+`errorDiffuse`, scanned serpentine (no diagonal worms) at 85% strength
+(fewer lone off-color dots on flat areas). `images.dither_algorithm` is
+still written (`PIPELINE_DITHER_NAME`) but is informational only.
+Comparison on synthetic scenes (2026-10): Stucki/Sierra kernels
+(`DIFFUSION_KERNELS`) give a slightly more organic texture at ~1.2-1.4x the
+cost, hard to tell apart at viewing size; plain blue-noise ordered
+dithering badly shifts hues with these six irregular inks (would need
+Yliluoma-style pattern dithering). Re-evaluate with real photos before
+switching kernels.
+
 **Display preview** (`worker/src/client/display-preview.ts`): the upload
 modal's "Preview on display" toggle runs the real pipeline (same
 `enhanceAndDither()` in `lib/dither.ts` the upload uses, on the same
 board-oriented buffer) for the current crop/dither, then paints each palette
 index in `PANEL_APPEARANCE` (`lib/palette.ts`) — what that ink looks like on
 the panel (gray paper white, muted inks), the same colors the ditherer
-targets — and shows it over the crop box, debounced on every crop or
-dither change. Previews the reference board (EE02), whose 3:4 shape the crop
+targets — and shows it over the crop box, debounced on every crop change. Previews the reference board (EE02), whose 3:4 shape the crop
 box uses. `PANEL_APPEARANCE` is epdoptimize's published, measured
 `spectra6` profile (Apache-2.0, credited in the comment), not a measurement
 of our own panels; calibrating on our hardware (instructions in its comment)

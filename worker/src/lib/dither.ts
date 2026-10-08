@@ -166,39 +166,97 @@ export function enhance(
   }
 }
 
-/** Standard Floyd-Steinberg: 7/16 right, 3/16 below-left, 5/16 below, 1/16 below-right. */
-function ditherFloydSteinberg(rgba: Uint8ClampedArray, width: number, height: number, matcher: PaletteMatcher): Uint8Array {
+/** One error-diffusion tap: offset from the current pixel (dx in scan
+ *  direction) and the share of the error it receives. */
+export type DiffusionTap = readonly [dx: number, dy: number, weight: number];
+
+/** Classic kernels; each one's weights sum to 1. */
+export const DIFFUSION_KERNELS = {
+  floydSteinberg: [
+    [1, 0, 7 / 16],
+    [-1, 1, 3 / 16], [0, 1, 5 / 16], [1, 1, 1 / 16],
+  ],
+  // Stucki: 12 taps over two rows below, /42.
+  stucki: [
+    [1, 0, 8 / 42], [2, 0, 4 / 42],
+    [-2, 1, 2 / 42], [-1, 1, 4 / 42], [0, 1, 8 / 42], [1, 1, 4 / 42], [2, 1, 2 / 42],
+    [-2, 2, 1 / 42], [-1, 2, 2 / 42], [0, 2, 4 / 42], [1, 2, 2 / 42], [2, 2, 1 / 42],
+  ],
+  // Sierra (3-row), /32.
+  sierra: [
+    [1, 0, 5 / 32], [2, 0, 3 / 32],
+    [-2, 1, 2 / 32], [-1, 1, 4 / 32], [0, 1, 5 / 32], [1, 1, 4 / 32], [2, 1, 2 / 32],
+    [-1, 2, 2 / 32], [0, 2, 3 / 32], [1, 2, 2 / 32],
+  ],
+} satisfies Record<string, readonly DiffusionTap[]>;
+
+export interface ErrorDiffusionOptions {
+  kernel: readonly DiffusionTap[];
+  /** Alternate scan direction every row (mirroring the kernel), which breaks
+   *  up the diagonal "worm" artifacts a fixed left-to-right scan leaves in
+   *  smooth areas. */
+  serpentine: boolean;
+  /** Fraction of each pixel's error passed on (1 = classic). Below 1, flat
+   *  areas get fewer lone off-color dots at a small cost in tonal accuracy. */
+  strength: number;
+}
+
+/** Generic error diffusion: quantize each pixel with `matcher`, then spread
+ *  `strength` x its residual over `kernel`. */
+export function errorDiffuse(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  matcher: PaletteMatcher,
+  options: ErrorDiffusionOptions
+): Uint8Array {
   const work = new Float32Array(width * height * 3);
   for (let i = 0, p = 0; i < width * height; i++, p += 4) {
     work[i * 3] = rgba[p]!;
     work[i * 3 + 1] = rgba[p + 1]!;
     work[i * 3 + 2] = rgba[p + 2]!;
   }
-
   const indices = new Uint8Array(width * height);
-
-  const addError = (x: number, y: number, dr: number, dg: number, db: number, weight: number) => {
-    if (x < 0 || x >= width || y < 0 || y >= height) return;
-    const i = (y * width + x) * 3;
-    work[i] = work[i]! + dr * weight;
-    work[i + 1] = work[i + 1]! + dg * weight;
-    work[i + 2] = work[i + 2]! + db * weight;
-  };
+  const { kernel, serpentine, strength } = options;
+  // Flattened taps, weights pre-multiplied by strength: this loop runs once
+  // per pixel per tap (~8M times for a full EE02 frame).
+  const taps = kernel.length;
+  const tapDx = new Int32Array(taps);
+  const tapDy = new Int32Array(taps);
+  const tapW = new Float32Array(taps);
+  for (let t = 0; t < taps; t++) {
+    tapDx[t] = kernel[t]![0];
+    tapDy[t] = kernel[t]![1];
+    tapW[t] = kernel[t]![2] * strength;
+  }
 
   for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+    const reverse = serpentine && (y & 1) === 1;
+    const dir = reverse ? -1 : 1;
+    for (let step = 0; step < width; step++) {
+      const x = reverse ? width - 1 - step : step;
       const i = y * width + x;
       const { index, dr, dg, db } = quantizeWithResidual(work[i * 3]!, work[i * 3 + 1]!, work[i * 3 + 2]!, matcher);
       indices[i] = index;
-
-      addError(x + 1, y, dr, dg, db, 7 / 16);
-      addError(x - 1, y + 1, dr, dg, db, 3 / 16);
-      addError(x, y + 1, dr, dg, db, 5 / 16);
-      addError(x + 1, y + 1, dr, dg, db, 1 / 16);
+      for (let t = 0; t < taps; t++) {
+        const nx = x + tapDx[t]! * dir;
+        const ny = y + tapDy[t]!;
+        if (nx < 0 || nx >= width || ny >= height) continue;
+        const w = tapW[t]!;
+        const j = (ny * width + nx) * 3;
+        work[j] = work[j]! + dr * w;
+        work[j + 1] = work[j + 1]! + dg * w;
+        work[j + 2] = work[j + 2]! + db * w;
+      }
     }
   }
-
   return indices;
+}
+
+/** Standard Floyd-Steinberg (left-to-right, full strength) — what the
+ *  "floyd_steinberg" DitherAlgorithm has always meant. */
+function ditherFloydSteinberg(rgba: Uint8ClampedArray, width: number, height: number, matcher: PaletteMatcher): Uint8Array {
+  return errorDiffuse(rgba, width, height, matcher, { kernel: DIFFUSION_KERNELS.floydSteinberg, serpentine: false, strength: 1 });
 }
 
 /** Atkinson: diffuses only 6/8 of the error (1/8 each to 6 neighbors), discarding the
@@ -299,17 +357,36 @@ export function ditherImage(
 }
 
 /**
+ * How the image pipeline dithers — fixed, not user-selectable (users used to
+ * pick per upload; it's now the pipeline's call). Since
+ * IMAGE_PIPELINE_VERSION 4: Floyd-Steinberg scanned serpentine, passing on
+ * 85% of the error. Serpentine removes the diagonal worms of a one-way scan;
+ * damping cuts the lone colored dots full diffusion scatters across flat
+ * areas with only six inks (Soldered made a reduced-diffusion kernel their
+ * Spectra 6 default for the same reason).
+ */
+export const PIPELINE_DITHER: ErrorDiffusionOptions = {
+  kernel: DIFFUSION_KERNELS.floydSteinberg,
+  serpentine: true,
+  strength: 0.85,
+};
+
+/** What's recorded in images.dither_algorithm for new renders — closest
+ *  DitherAlgorithm name to PIPELINE_DITHER. Informational only. */
+export const PIPELINE_DITHER_NAME: DitherAlgorithm = "floyd_steinberg";
+
+/**
  * The color half of the image pipeline, shared by every upload path (the
  * dashboard's upload, re-render and key rotation, its display preview, and
  * scripts/upload-images.ts). `rgba` is the board-oriented (landscape)
- * buffer and is modified. Since IMAGE_PIPELINE_VERSION 3: the photo-driven
- * tone stage in tone.ts (levels/brighten/contrast as needed, saturation,
- * then fit into the panel's measured black..white range), then dithering
- * against the measured inks with perceptual (OKLab) matching.
+ * buffer and is modified: the photo-driven tone stage in tone.ts
+ * (levels/brighten/contrast as needed, saturation, then fit into the
+ * panel's measured black..white range), then PIPELINE_DITHER against the
+ * measured inks with perceptual (OKLab) matching.
  */
-export function enhanceAndDither(rgba: Uint8ClampedArray, width: number, height: number, algorithm: DitherAlgorithm): Uint8Array {
+export function enhanceAndDither(rgba: Uint8ClampedArray, width: number, height: number): Uint8Array {
   prepareForPanel(rgba, width, height, PANEL_APPEARANCE[0]!, PANEL_APPEARANCE[1]!);
-  return ditherImage(rgba, width, height, algorithm, PANEL_MATCHER);
+  return errorDiffuse(rgba, width, height, PANEL_MATCHER, PIPELINE_DITHER);
 }
 
 /** 2 pixels/byte, big-nibble-first, using the exact hardware nibble map. */
