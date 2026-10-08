@@ -615,6 +615,45 @@ paths:
         '403': { description: Forbidden }
         '404': { description: Not found }
 
+  /admin/devices/{mac}/battery-history:
+    get:
+      summary: Daily battery samples and image-refresh counts
+      description: >-
+        Backs the battery modal in /admin. Stored in KV, one record per UTC day
+        with a 365-day TTL (lib/battery-history.ts). Oldest day first; days with
+        no data are present with empty `samples` and `refreshes: 0`.
+      parameters:
+        - $ref: '#/components/parameters/MacPath'
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mac: { type: string }
+                  days:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, example: '2026-10-08' }
+                        refreshes: { type: integer }
+                        samples:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              t: { type: integer, description: Epoch seconds }
+                              v: { type: number, description: Volts }
+        '400': { description: Bad mac or days }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+
   /admin/devices/{mac}/buckets:
     patch:
       summary: Replace a device's bucket subscriptions

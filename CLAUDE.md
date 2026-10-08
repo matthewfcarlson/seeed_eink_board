@@ -444,6 +444,17 @@ sleeps right up to that line and can alert/recover if a wake runs long. Low
 battery: < 3.5V, recovers at >= 3.7V (hysteresis). The offline message uses
 the last voltage to guess dead battery (< 3.6V) vs WiFi/power.
 
+**Battery history** (`lib/battery-history.ts`): the `/admin` Battery cell opens a
+modal charting battery % over 7/30/90/365 days plus image refreshes per day
+(`GET /admin/devices/:mac/battery-history`). KV only: one key per battery sample or
+image refresh, `hist:v1:<mac>:<rev>:<b|r>`, 365-day TTL each, so there's no
+read-modify-write to race. `rev` is a reversed, zero-padded timestamp so
+`KV.list({prefix})` returns newest-first and short ranges stop paging early; the
+voltage lives in key metadata, so one list call returns the series with no gets.
+Samples are written from authenticated `/device_config` (the request carrying
+`X-Battery-Voltage`); refreshes from `/image_packed` when a real image is served
+(not 304s or QR screens).
+
 **Delivery** (`lib/health-check.ts`, `lib/notify.ts`): the cron is now hourly
 (`index.ts`'s `scheduled()`; firmware sync still only every 6th hour). Alerts
 fire on transitions only — `devices.offline_alerted_at`/

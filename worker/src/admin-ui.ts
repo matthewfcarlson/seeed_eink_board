@@ -165,6 +165,16 @@ export function renderAdminPage(): string {
     </div>
   </div>
 
+  <div class="modal-overlay" id="battery-modal-overlay">
+    <div class="modal modal-wide">
+      <h3 id="battery-modal-title">Battery history</h3>
+      <div id="battery-modal-content"></div>
+      <div class="inline-form" style="margin-top:16px;">
+        <button class="ghost" id="battery-modal-close-btn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="schedule-modal-overlay">
     <div class="modal">
       <h3>Schedule override</h3>
