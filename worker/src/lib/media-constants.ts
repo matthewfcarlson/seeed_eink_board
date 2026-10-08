@@ -59,8 +59,10 @@ export const DEFAULT_BOARD_ID: BoardId = "ee02-13in3";
  *       needed, fit into the panel's range) and dithering against the
  *       measured Spectra 6 inks in OKLab, replacing fixed contrast 1.2 and
  *       pure-RGB targets.
+ *   4 - dithering is fixed (dither.ts's PIPELINE_DITHER: serpentine
+ *       Floyd-Steinberg at 85% strength) instead of a per-upload choice.
  */
-export const IMAGE_PIPELINE_VERSION = 3;
+export const IMAGE_PIPELINE_VERSION = 4;
 
 export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";
 export const DITHER_ALGORITHMS: DitherAlgorithm[] = ["floyd_steinberg", "atkinson", "ordered"];

@@ -1,6 +1,6 @@
 import { DEFAULT_CROP, decodeToBoardBuffer, type CropParams } from "./decode";
 import { enhanceAndDither } from "../lib/dither";
-import { BOARD_GEOMETRY, type BoardId, type DitherAlgorithm } from "../lib/media-constants";
+import { BOARD_GEOMETRY, type BoardId } from "../lib/media-constants";
 import { PANEL_APPEARANCE } from "../lib/palette";
 
 /**
@@ -14,14 +14,9 @@ import { PANEL_APPEARANCE } from "../lib/palette";
  * scaled down, the browser's averaging approximates the dots blending at
  * viewing distance.
  */
-export async function renderDisplayPreview(
-  file: Blob,
-  crop: CropParams = DEFAULT_CROP,
-  board: BoardId,
-  algorithm: DitherAlgorithm
-): Promise<ImageData> {
+export async function renderDisplayPreview(file: Blob, crop: CropParams = DEFAULT_CROP, board: BoardId): Promise<ImageData> {
   const landscape = await decodeToBoardBuffer(file, crop, board);
-  const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height, algorithm);
+  const indices = enhanceAndDither(landscape.rgba, landscape.width, landscape.height);
   const { width, height } = landscape.upright;
   const rgba = paintPanelAppearance(indices, landscape.width, width, height, BOARD_GEOMETRY[board].needsRotation);
   return new ImageData(rgba, width, height);

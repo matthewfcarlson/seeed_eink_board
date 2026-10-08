@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ditherImage, packToNibbles, quantizeWithResidual } from "../../src/lib/dither";
+import { DIFFUSION_KERNELS, IDEAL_RGB_MATCHER, PANEL_MATCHER, PIPELINE_DITHER, ditherImage, errorDiffuse, packToNibbles, quantizeWithResidual } from "../../src/lib/dither";
 import { NIBBLE_MAP, PALETTE } from "../../src/lib/palette";
 
 /**
@@ -67,5 +67,53 @@ describe("dither: packToNibbles output only ever uses the defined hardware nibbl
       expect(validNibbles.has(byte & 0xf)).toBe(true);
     }
     expect(PALETTE.length).toBe(6);
+  });
+});
+
+describe("errorDiffuse (pipeline dithering)", () => {
+  function flat(w: number, h: number, r: number, g: number, b: number): Uint8ClampedArray {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) rgba.set([r, g, b, 255], i * 4);
+    return rgba;
+  }
+
+  it("matches the classic ditherImage('floyd_steinberg') when not serpentine and at full strength", () => {
+    const a = ditherImage(flat(40, 30, 130, 90, 60), 40, 30, "floyd_steinberg");
+    const b = errorDiffuse(flat(40, 30, 130, 90, 60), 40, 30, IDEAL_RGB_MATCHER, {
+      kernel: DIFFUSION_KERNELS.floydSteinberg,
+      serpentine: false,
+      strength: 1,
+    });
+    expect(b).toEqual(a);
+  });
+
+  it("serpentine scanning changes the pattern (rows alternate direction)", () => {
+    const opts = { kernel: DIFFUSION_KERNELS.floydSteinberg, strength: 1 };
+    const oneWay = errorDiffuse(flat(40, 30, 130, 90, 60), 40, 30, IDEAL_RGB_MATCHER, { ...opts, serpentine: false });
+    const serp = errorDiffuse(flat(40, 30, 130, 90, 60), 40, 30, IDEAL_RGB_MATCHER, { ...opts, serpentine: true });
+    expect(serp).not.toEqual(oneWay);
+  });
+
+  it("every kernel's weights sum to 1", () => {
+    for (const kernel of Object.values(DIFFUSION_KERNELS)) {
+      expect(kernel.reduce((sum, [, , w]) => sum + w, 0)).toBeCloseTo(1, 10);
+    }
+  });
+
+  it("damped diffusion uses fewer off-color inks on a flat near-white area", () => {
+    // Panel white nudged 10% toward the yellow ink (inside the panel's
+    // range, as tone.ts guarantees): full diffusion keeps accumulating the
+    // small residual into scattered off-color dots; damping lets some fade.
+    const count = (strength: number) =>
+      [...errorDiffuse(flat(64, 64, 186, 198, 184), 64, 64, PANEL_MATCHER, {
+        kernel: DIFFUSION_KERNELS.floydSteinberg,
+        serpentine: true,
+        strength,
+      })].filter((i) => i !== 1).length;
+    expect(count(0.85)).toBeLessThan(count(1));
+  });
+
+  it("PIPELINE_DITHER is serpentine Floyd-Steinberg at 85%", () => {
+    expect(PIPELINE_DITHER).toEqual({ kernel: DIFFUSION_KERNELS.floydSteinberg, serpentine: true, strength: 0.85 });
   });
 });
