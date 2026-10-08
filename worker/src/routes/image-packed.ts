@@ -7,6 +7,7 @@ import { getRotationSnapshot, markServed, peekPendingImage } from "../lib/rotati
 import { getImageVariant, getPackedImage } from "../lib/image-store";
 import { renderNoBucketBuffer, renderRegistrationBuffer } from "../lib/qr-registration";
 import { assignBucketUrl, registrationUrl } from "../lib/registration-url";
+import { recordRefresh } from "../lib/battery-history";
 import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 import { isValidMac } from "../lib/validate";
 
@@ -128,6 +129,8 @@ export function registerImagePackedRoute(app: Hono<{ Bindings: Env }>) {
 
     const writeback = await markServed(c.env, deviceKey, snapshot, pending);
     c.executionCtx.waitUntil(writeback());
+    // Counts toward the device's "refreshes" history (battery modal in /admin).
+    c.executionCtx.waitUntil(recordRefresh(c.env, deviceKey, Math.floor(Date.now() / 1000)));
 
     return new Response(bytes, {
       status: 200,

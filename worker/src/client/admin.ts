@@ -1101,6 +1101,122 @@ function batteryPillHtml(voltage: number): string {
   return '<span class="pill ' + tone + '" title="' + voltage.toFixed(2) + 'V">' + pct + "%</span>";
 }
 
+// ---- Battery history modal ----
+// Data comes from GET /admin/devices/:mac/battery-history (KV, 365d retention).
+// Charts are hand-built SVG — no chart library — drawn with the page's CSS
+// color variables so they follow the theme. Hover/long-press titles carry the
+// exact numbers.
+type BatteryHistoryDay = { date: string; refreshes: number; samples: { t: number; v: number }[] };
+
+const SVG_W = 600;
+const SVG_PAD = { l: 38, r: 10, t: 10, b: 22 };
+
+function batteryLineChartHtml(days: BatteryHistoryDay[]): string {
+  const H = 160;
+  const plotW = SVG_W - SVG_PAD.l - SVG_PAD.r;
+  const plotH = H - SVG_PAD.t - SVG_PAD.b;
+  const start = Date.parse(days[0]!.date + "T00:00:00Z") / 1000;
+  const span = days.length * 86400;
+  const x = (t: number) => SVG_PAD.l + ((t - start) / span) * plotW;
+  const y = (pct: number) => SVG_PAD.t + (1 - pct / 100) * plotH;
+  const points = days.flatMap((d) => d.samples);
+  if (points.length === 0) return '<p class="hint">No battery readings recorded in this period yet.</p>';
+
+  let grid = "";
+  for (const pct of [0, 50, 100]) {
+    grid += '<line x1="' + SVG_PAD.l + '" x2="' + (SVG_W - SVG_PAD.r) + '" y1="' + y(pct).toFixed(1) + '" y2="' + y(pct).toFixed(1) + '" class="chart-grid"/>' +
+      '<text x="' + (SVG_PAD.l - 6) + '" y="' + (y(pct) + 4).toFixed(1) + '" class="chart-axis" text-anchor="end">' + pct + "%</text>";
+  }
+  const path = points.map((p, i) => (i === 0 ? "M" : "L") + x(p.t).toFixed(1) + " " + y(batteryPercent(p.v)).toFixed(1)).join(" ");
+  // Dots only when sparse enough to stay legible; each carries an exact-value tooltip.
+  const dots = points.length <= 120
+    ? points.map((p) =>
+        '<circle cx="' + x(p.t).toFixed(1) + '" cy="' + y(batteryPercent(p.v)).toFixed(1) + '" r="2.5" class="chart-dot"><title>' +
+        escapeHtml(new Date(p.t * 1000).toLocaleString()) + " — " + batteryPercent(p.v) + "% (" + p.v.toFixed(2) + "V)</title></circle>"
+      ).join("")
+    : "";
+  const labels = chartXLabelsAt(days, x, start, H);
+  return '<svg viewBox="0 0 ' + SVG_W + " " + H + '" class="chart" role="img" aria-label="Battery level over time">' +
+    grid + '<path d="' + path + '" class="chart-line"/>' + dots + labels + "</svg>";
+}
+
+function chartXLabelsAt(days: BatteryHistoryDay[], x: (t: number) => number, start: number, height: number): string {
+  const step = Math.max(1, Math.ceil(days.length / 6));
+  let out = "";
+  for (let i = 0; i < days.length; i += step) {
+    out += '<text x="' + x(start + i * 86400 + 43200).toFixed(1) + '" y="' + (height - 6) + '" class="chart-axis" text-anchor="middle">' +
+      escapeHtml(days[i]!.date.slice(5)) + "</text>";
+  }
+  return out;
+}
+
+function refreshBarChartHtml(days: BatteryHistoryDay[]): string {
+  const H = 110;
+  const plotW = SVG_W - SVG_PAD.l - SVG_PAD.r;
+  const plotH = H - SVG_PAD.t - SVG_PAD.b;
+  const max = Math.max(1, ...days.map((d) => d.refreshes));
+  const slot = plotW / days.length;
+  const barW = Math.max(1, slot * 0.7);
+  const start = Date.parse(days[0]!.date + "T00:00:00Z") / 1000;
+  const x = (t: number) => SVG_PAD.l + ((t - start) / (days.length * 86400)) * plotW;
+  const bars = days.map((d, i) => {
+    const h = (d.refreshes / max) * plotH;
+    return '<rect x="' + (SVG_PAD.l + i * slot + (slot - barW) / 2).toFixed(1) + '" y="' + (SVG_PAD.t + plotH - h).toFixed(1) +
+      '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1) + '" class="chart-bar"><title>' + escapeHtml(d.date) + " — " +
+      d.refreshes + (d.refreshes === 1 ? " refresh" : " refreshes") + "</title></rect>";
+  }).join("");
+  const axis = '<line x1="' + SVG_PAD.l + '" x2="' + (SVG_W - SVG_PAD.r) + '" y1="' + (SVG_PAD.t + plotH) + '" y2="' + (SVG_PAD.t + plotH) +
+    '" class="chart-grid"/><text x="' + (SVG_PAD.l - 6) + '" y="' + (SVG_PAD.t + 4) + '" class="chart-axis" text-anchor="end">' + max + "</text>" +
+    '<text x="' + (SVG_PAD.l - 6) + '" y="' + (SVG_PAD.t + plotH + 4) + '" class="chart-axis" text-anchor="end">0</text>';
+  return '<svg viewBox="0 0 ' + SVG_W + " " + H + '" class="chart" role="img" aria-label="Image refreshes per day">' +
+    axis + bars + chartXLabelsAt(days, x, start, H) + "</svg>";
+}
+
+let batteryModalMac = "";
+
+async function loadBatteryHistory(mac: string, rangeDays: number) {
+  const content = el("battery-modal-content");
+  content.innerHTML = '<p class="hint">Loading…</p>';
+  try {
+    const result = await apiFetch("/admin/devices/" + encodeURIComponent(mac) + "/battery-history?days=" + rangeDays);
+    if (mac !== batteryModalMac) return; // closed or switched to another device meanwhile
+    const days: BatteryHistoryDay[] = result.days;
+    const totalRefreshes = days.reduce((n, d) => n + d.refreshes, 0);
+    const readings = days.reduce((n, d) => n + d.samples.length, 0);
+    const latest = days.flatMap((d) => d.samples).pop();
+    const ranges = [7, 30, 90, 365].map((r) =>
+      '<button class="' + (r === rangeDays ? "sm" : "ghost sm") + '" onclick="loadBatteryHistory(' + jsArg(mac) + ", " + r + ')">' +
+      (r === 365 ? "1 year" : r + " days") + "</button>"
+    ).join(" ");
+    content.innerHTML =
+      '<div class="inline-form" style="margin-bottom:12px;">' + ranges + "</div>" +
+      '<p class="hint" style="margin:0 0 6px;">' +
+        (latest ? "Latest: " + batteryPercent(latest.v) + "% (" + latest.v.toFixed(2) + "V) · " : "") +
+        readings + (readings === 1 ? " reading" : " readings") + "</p>" +
+      batteryLineChartHtml(days) +
+      '<h4 style="margin:16px 0 6px;">Image refreshes</h4>' +
+      '<p class="hint" style="margin:0 0 6px;">' + totalRefreshes + (totalRefreshes === 1 ? " refresh" : " refreshes") +
+        " in the last " + rangeDays + " days</p>" +
+      refreshBarChartHtml(days);
+  } catch (err: any) {
+    content.innerHTML = '<p class="hint">Failed to load battery history: ' + escapeHtml(err.message) + "</p>";
+  }
+}
+(window as any).loadBatteryHistory = loadBatteryHistory;
+
+function openBatteryModal(mac: string, label: string) {
+  batteryModalMac = mac;
+  el("battery-modal-title").textContent = "Battery history" + (label ? " — " + label : "");
+  el("battery-modal-overlay").classList.add("open");
+  loadBatteryHistory(mac, 30);
+}
+(window as any).openBatteryModal = openBatteryModal;
+
+el("battery-modal-close-btn").addEventListener("click", () => {
+  batteryModalMac = "";
+  el("battery-modal-overlay").classList.remove("open");
+});
+
 function renderDevicesTable(devices: any[]) {
   const tbody = el("devices-table");
   if (devices.length === 0) {
@@ -1136,7 +1252,7 @@ function renderDevicesTable(devices: any[]) {
       "<td>" + currentImage + "</td>" +
       "<td>" + firmware + "</td>" +
       "<td>" + lastSeen + overdue + "</td>" +
-      "<td>" + battery + "</td>" +
+      '<td><button class="battery-link" title="Battery &amp; refresh history" onclick="openBatteryModal(' + jsArg(d.mac) + ', ' + jsArg(d.label || "") + ')">' + battery + "</button></td>" +
       '<td><button class="ghost sm" onclick="openBucketModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
       '<td><button class="ghost sm" onclick="openScheduleModal(' + jsArg(d.mac) + ')">Manage</button></td>' +
       '<td><button class="danger sm" onclick="deleteDevice(' + jsArg(d.mac) + ')">Remove</button></td>' +

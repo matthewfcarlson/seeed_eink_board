@@ -17,6 +17,8 @@ export const kvKeys = {
   // the server's ephemeral ECDH private key for one challenge, scoped to the
   // user that minted it. Single-use and short-lived like passkeyAttempt.
   sharingKeyChallenge: (challengeId: string) => `sharing_key_challenge:${challengeId}`,
+  // One record per device per UTC day (YYYYMMDD), 365d TTL — lib/battery-history.ts.
+  batteryDay: (mac: string, day: string) => `battery:v1:${mac}:${day}`,
   firmwareTarget: (target: string) => `firmware_target:${target}`,
   // Board-scoped: firmware_releases' key is (board, version), and a release
   // deliberately reuses the same version tag across boards (one shared

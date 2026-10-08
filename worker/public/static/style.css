@@ -703,3 +703,17 @@ footer a { color: var(--ink-faint); }
   .device-card { flex-direction: column; }
   .crop-stage { flex-direction: column; align-items: center; }
 }
+
+/* ---------- battery history charts ---------- */
+
+button.battery-link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: inherit; font: inherit; box-shadow: none;
+}
+button.battery-link:hover .pill { outline: 2px solid var(--blue); }
+svg.chart { width: 100%; height: auto; display: block; }
+svg.chart .chart-grid { stroke: var(--line); stroke-width: 1; }
+svg.chart .chart-axis { fill: var(--ink-soft); font-size: 10px; }
+svg.chart .chart-line { fill: none; stroke: var(--blue); stroke-width: 2; stroke-linejoin: round; }
+svg.chart .chart-dot { fill: var(--blue); }
+svg.chart .chart-bar { fill: var(--green); }

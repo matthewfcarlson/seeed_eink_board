@@ -9,6 +9,7 @@ import { requireAdmin } from "../../lib/admin-middleware";
 import { assertBucketReadAccess } from "../../lib/bucket-access";
 import { deleteBucketKey, parseWrappedBucketKey, upsertBucketKey } from "../../lib/bucket-keys";
 import { MAX_DEVICE_LABEL, isValidMac, isValidP256PublicKeyB64, validateLabel } from "../../lib/validate";
+import { MAX_HISTORY_DAYS, getBatteryHistory } from "../../lib/battery-history";
 import { evaluateDeviceHealth, type DeviceHealth } from "../../lib/device-health";
 
 /** snake_case like the rest of this API's JSON. */
@@ -199,6 +200,25 @@ export function registerAdminDeviceRoutes(app: Hono<{ Bindings: Env }>) {
       }))
     );
     return c.json({ devices });
+  });
+
+  // Daily battery samples + image-refresh counts for the /admin battery modal
+  // (KV-backed, 365-day retention — lib/battery-history.ts). ?days= defaults to 30.
+  app.get("/admin/devices/:mac/battery-history", requireAdmin, async (c) => {
+    const mac = normalizeMac(c.req.param("mac") ?? "");
+    if (!isValidMac(mac)) return c.json({ error: "mac must normalize to exactly 12 hex characters" }, 400);
+    const daysParam = c.req.query("days");
+    const days = daysParam === undefined ? 30 : Number(daysParam);
+    if (!Number.isInteger(days) || days < 1 || days > MAX_HISTORY_DAYS) {
+      return c.json({ error: `days must be an integer from 1 to ${MAX_HISTORY_DAYS}` }, 400);
+    }
+    const row = await c.env.DB.prepare("SELECT user_id FROM devices WHERE mac = ?")
+      .bind(mac)
+      .first<{ user_id: string | null }>();
+    if (!row) return c.json({ error: "Not found" }, 404);
+    if (row.user_id !== c.var.user.id) return c.json({ error: "Forbidden" }, 403);
+
+    return c.json({ mac, days: await getBatteryHistory(c.env, mac, days, Math.floor(Date.now() / 1000)) });
   });
 
   app.patch("/admin/devices/:mac", requireAdmin, async (c) => {

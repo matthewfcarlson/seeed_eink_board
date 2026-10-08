@@ -7,6 +7,7 @@ import { resolveScheduleConfig } from "../lib/schedule";
 import { resolveFirmwareTarget } from "../lib/firmware-target";
 import { getBucketKeysForDevice } from "../lib/bucket-keys";
 import { isValidFirmwareVersion, isValidMac, isValidP256PublicKeyB64 } from "../lib/validate";
+import { recordBatterySample } from "../lib/battery-history";
 import { checkRateLimit, rateLimitedResponse, RATE_LIMITS } from "../lib/rate-limit";
 
 /**
@@ -80,6 +81,11 @@ export function registerDeviceConfigRoute(app: Hono<{ Bindings: Env }>) {
           c.req.header("X-Device-Signature")
         );
         if (!valid) return c.text("Invalid or missing device signature", 401);
+        // History is only kept for authenticated, registered devices (never for
+        // an unregistered MAC) — see lib/battery-history.ts.
+        if (!Number.isNaN(battery)) {
+          c.executionCtx.waitUntil(recordBatterySample(c.env, mac, battery, Math.floor(Date.now() / 1000)));
+        }
       }
 
       // Fire-and-forget: last-seen/battery tracking must never delay the response.
