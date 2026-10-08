@@ -55,8 +55,12 @@ export const DEFAULT_BOARD_ID: BoardId = "ee02-13in3";
  *   2 - stores each board's undithered cropped source
  *       (migrations/0028_image_cropped_source.sql) and aspect-correct
  *       thumbnails.
+ *   3 - photo-driven tone stage (lib/tone.ts: levels/brighten/contrast as
+ *       needed, fit into the panel's range) and dithering against the
+ *       measured Spectra 6 inks in OKLab, replacing fixed contrast 1.2 and
+ *       pure-RGB targets.
  */
-export const IMAGE_PIPELINE_VERSION = 2;
+export const IMAGE_PIPELINE_VERSION = 3;
 
 export type DitherAlgorithm = "floyd_steinberg" | "atkinson" | "ordered";
 export const DITHER_ALGORITHMS: DitherAlgorithm[] = ["floyd_steinberg", "atkinson", "ordered"];

@@ -337,8 +337,9 @@ variants; the client sends it as `pipeline_version` on upload and
 reencrypt-image (absent = 1). The gallery shows a small yellow ↻ badge on
 any tile below the current version (`outdatedPipelineBadge`). Bump the
 constant whenever a pipeline change alters output (tone curve, palette,
-dither), and every older photo gets flagged. Currently 2; everything
-uploaded before cropped sources is 1. A key rotation re-renders, so it
+dither), and every older photo gets flagged. Currently 3; everything
+uploaded before cropped sources is 1, and 2 is cropped sources with the old
+color pipeline. A key rotation re-renders, so it
 brings images up to the rotating client's version. A bucket with outdated
 photos also shows "Re-render them…" (writers only): `rerenderOutdatedImages`
 re-runs the current pipeline per image from its cropped source (raw original
@@ -348,19 +349,37 @@ untouched. It shares `renderStoredImageVariants` with rotation. The route
 409s on a `key_version` that isn't current or while a rotation is in
 progress. Narrow race left open: a rotation started between that check and
 the KV writes could get one image overwritten with old-key blobs; rotation's
-finalize doesn't detect it.
+finalize doesn't detect it. Image transfers (upload, raw/cropped fetches,
+rerender, reencrypt-image) count against their own per-user rate-limit
+bucket, `RATE_LIMITS.adminImages` (1,200 per 150 s, vs 300 for the rest of
+`/admin`; `adminRateLimitBucket` in `lib/rate-limit.ts`), since a bulk job
+costs 3-4 requests per photo. If a job still hits a 429, the client waits
+out `Retry-After` and continues (`withRateLimitRetry`) instead of failing.
+
+**Color pipeline (v3)** (`lib/dither.ts`'s `enhanceAndDither`, shared by
+every upload path): `lib/tone.ts`'s `prepareForPanel` analyzes each photo's
+luma histogram and applies only what it needs (auto-levels capped at ~1.5x
+stretch, an always-slight midtone brighten that pulls dark photos further,
+an S-curve only for flat photos), a 1.2x saturation boost, then maps every
+channel linearly into the panel's measured black..white so photo-white lands
+on paper-white. It then error-diffuses against the measured inks
+(`PANEL_APPEARANCE`, not ideal RGB) with OKLab nearest-color, hue terms
+weighted 3x (`PANEL_MATCHER`; plain OKLab drifted bright reds orange). The
+ideal-RGB `PALETTE`/`nearestPaletteIndex` remain for the QR-registration
+screen. The old fixed contrast-1.2-around-the-mean step is gone.
 
 **Display preview** (`worker/src/client/display-preview.ts`): the upload
 modal's "Preview on display" toggle runs the real pipeline (same
 `enhanceAndDither()` in `lib/dither.ts` the upload uses, on the same
 board-oriented buffer) for the current crop/dither, then paints each palette
 index in `PANEL_APPEARANCE` (`lib/palette.ts`) — what that ink looks like on
-the panel (gray paper white, muted inks) rather than the pure RGB the
-ditherer targets — and shows it over the crop box, debounced on every crop or
+the panel (gray paper white, muted inks), the same colors the ditherer
+targets — and shows it over the crop box, debounced on every crop or
 dither change. Previews the reference board (EE02), whose 3:4 shape the crop
-box uses. `PANEL_APPEARANCE` is eyeballed, not measured on our hardware;
-calibrating it (instructions in its comment) makes the preview trustworthy
-and is the input the planned color fixes need anyway.
+box uses. `PANEL_APPEARANCE` is epdoptimize's published, measured
+`spectra6` profile (Apache-2.0, credited in the comment), not a measurement
+of our own panels; calibrating on our hardware (instructions in its comment)
+would make the preview exact and is the input the planned color fixes need.
 
 **Duplicate detection** (`migrations/0020_image_content_hash.sql`): uploads
 may carry a `content_hash` — a bucket-key-keyed HMAC-SHA256 over the default

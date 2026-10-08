@@ -16,25 +16,33 @@ export const PALETTE: Rgb[] = [
 ];
 
 /**
- * What each PALETTE entry actually looks like on a Spectra 6 panel under
- * ordinary indoor light, index-aligned with PALETTE. Used only by the
- * dashboard's display preview (client/display-preview.ts) to show how a
- * dithered image will read on the wall: the panel's "white" is a light gray
- * paper, its black isn't fully black, and its inks are far less saturated
- * than pure RGB. Dithering itself still targets PALETTE.
+ * What each PALETTE entry actually looks like on a Spectra 6 panel,
+ * index-aligned with PALETTE: the panel's "white" is a light gray paper,
+ * its black isn't fully black, and its inks are far darker and less
+ * saturated than pure RGB. Since IMAGE_PIPELINE_VERSION 3 these are what
+ * photos are dithered against (dither.ts's PANEL_MATCHER, after tone.ts fits
+ * the photo into this black..white range), and the display preview
+ * (client/display-preview.ts) paints them to show the result. PALETTE stays
+ * the ideal-RGB set for the QR-registration screen.
  *
- * APPROXIMATE: eyeballed from published photos of Spectra 6 panels, not
- * measured on our hardware. To calibrate, photograph a panel showing six
- * solid swatches next to a gray card under neutral light, white-balance on
- * the card, and sample the swatch centers.
+ * Source: the measured `spectra6` profile in epdoptimize 1.3.0
+ * (https://github.com/Utzel-Butzel/epdoptimize, Apache-2.0; same values in
+ * its src/dither/data/default-palettes.json). Measured on Spectra 6 panels
+ * in general, not on ours. The same package also ships an older
+ * `spectra6legacy` profile and aitjcize's esp32-photoframe measurements
+ * (`aitjcize-spectra6`), which differ noticeably (e.g. white #BEC8C8 vs
+ * #B9C7C9, red #871300 vs #62201E) - panels, lighting and cameras vary. To
+ * calibrate for our own hardware, photograph a panel showing six solid
+ * swatches next to a gray card under neutral light, white-balance on the
+ * card, and sample the swatch centers.
  */
 export const PANEL_APPEARANCE: Rgb[] = [
-  { r: 38, g: 38, b: 44 }, // 0: Black
-  { r: 190, g: 190, b: 182 }, // 1: White
-  { r: 196, g: 182, b: 40 }, // 2: Yellow
-  { r: 152, g: 38, b: 32 }, // 3: Red
-  { r: 40, g: 64, b: 142 }, // 4: Blue
-  { r: 60, g: 100, b: 66 }, // 5: Green
+  { r: 0x1f, g: 0x22, b: 0x26 }, // 0: Black  #1F2226
+  { r: 0xb9, g: 0xc7, b: 0xc9 }, // 1: White  #B9C7C9
+  { r: 0xc1, g: 0xbb, b: 0x1e }, // 2: Yellow #C1BB1E
+  { r: 0x62, g: 0x20, b: 0x1e }, // 3: Red    #62201E
+  { r: 0x23, g: 0x3f, b: 0x8e }, // 4: Blue   #233F8E
+  { r: 0x35, g: 0x56, b: 0x3a }, // 5: Green  #35563A
 ];
 
 /** palette index -> hardware nibble. 0x4 skipped, matches firmware's display controller. */

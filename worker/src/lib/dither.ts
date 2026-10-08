@@ -1,5 +1,6 @@
 import type { DitherAlgorithm } from "./media-constants";
-import { NIBBLE_MAP, PALETTE, nearestPaletteIndex } from "./palette";
+import { NIBBLE_MAP, PALETTE, PANEL_APPEARANCE, nearestPaletteIndex, type Rgb } from "./palette";
+import { prepareForPanel } from "./tone";
 
 function clamp255(v: number): number {
   return v < 0 ? 0 : v > 255 ? 255 : v;
@@ -23,14 +24,90 @@ export interface QuantizeResult {
  * large flat-color regions). Clamping first guarantees dr/dg/db can never
  * exceed +/-255, however far `r/g/b` have drifted.
  */
-export function quantizeWithResidual(r: number, g: number, b: number): QuantizeResult {
+export function quantizeWithResidual(r: number, g: number, b: number, matcher: PaletteMatcher = IDEAL_RGB_MATCHER): QuantizeResult {
   const cr = clamp255(r);
   const cg = clamp255(g);
   const cb = clamp255(b);
-  const index = nearestPaletteIndex(cr, cg, cb);
-  const p = PALETTE[index]!;
+  const index = matcher.nearest(cr, cg, cb);
+  const p = matcher.colors[index]!;
   return { index, dr: cr - p.r, dg: cg - p.g, db: cb - p.b };
 }
+
+/**
+ * What the ditherers quantize against: the target color for each palette
+ * index (index-aligned with PALETTE, so NIBBLE_MAP still applies) and how
+ * "nearest" is judged. Error is always diffused in the same sRGB space as
+ * `colors`.
+ */
+export interface PaletteMatcher {
+  colors: Rgb[];
+  /** Index of the nearest color to an in-range (0-255) r/g/b. */
+  nearest(r: number, g: number, b: number): number;
+}
+
+/** Pure-RGB targets with plain RGB distance — the pre-v3 pipeline's
+ *  behavior, still the default for any caller that doesn't pass a matcher. */
+export const IDEAL_RGB_MATCHER: PaletteMatcher = { colors: PALETTE, nearest: nearestPaletteIndex };
+
+// sRGB 8-bit -> linear light.
+const SRGB_TO_LINEAR = new Float32Array(256);
+for (let i = 0; i < 256; i++) {
+  const c = i / 255;
+  SRGB_TO_LINEAR[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/** sRGB (0-255) -> OKLab (Björn Ottosson's matrices). */
+export function srgbToOklab(r: number, g: number, b: number): [number, number, number] {
+  const lr = SRGB_TO_LINEAR[Math.round(r)]!;
+  const lg = SRGB_TO_LINEAR[Math.round(g)]!;
+  const lb = SRGB_TO_LINEAR[Math.round(b)]!;
+  const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+  const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+  const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+
+/** Nearest color judged in OKLab (perceptual), so dark and muted inks are
+ *  picked the way they look rather than by raw RGB distance. `chromaWeight`
+ *  scales the a/b (hue) terms against lightness: the measured red is far
+ *  darker than a photo's reds, so with plain OKLab (1) bright reds match
+ *  yellow-ish mixes and drift orange; weighting hue errors more keeps them
+ *  red at the cost of a little lightness accuracy. */
+export function makeOklabMatcher(colors: Rgb[], chromaWeight = 1): PaletteMatcher {
+  const labs = colors.map((c) => srgbToOklab(c.r, c.g, c.b));
+  return {
+    colors,
+    nearest(r, g, b) {
+      const [L, A, B] = srgbToOklab(r, g, b);
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < labs.length; i++) {
+        const lab = labs[i]!;
+        const dL = L - lab[0];
+        const dA = A - lab[1];
+        const dB = B - lab[2];
+        const dist = dL * dL + chromaWeight * (dA * dA + dB * dB);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      }
+      return best;
+    },
+  };
+}
+
+// Chosen by comparing 1 and 3 on synthetic test scenes in the display
+// preview: at 1 a saturated red shirt rendered orange; at 3 reds and skin
+// kept their hue. Not tuned further — worth revisiting on real photos.
+const PANEL_CHROMA_WEIGHT = 3;
+
+/** The measured Spectra 6 inks (palette.ts's PANEL_APPEARANCE), matched in OKLab. */
+export const PANEL_MATCHER: PaletteMatcher = makeOklabMatcher(PANEL_APPEARANCE, PANEL_CHROMA_WEIGHT);
 
 function luma(r: number, g: number, b: number): number {
   return 0.299 * r + 0.587 * g + 0.114 * b;
@@ -90,7 +167,7 @@ export function enhance(
 }
 
 /** Standard Floyd-Steinberg: 7/16 right, 3/16 below-left, 5/16 below, 1/16 below-right. */
-function ditherFloydSteinberg(rgba: Uint8ClampedArray, width: number, height: number): Uint8Array {
+function ditherFloydSteinberg(rgba: Uint8ClampedArray, width: number, height: number, matcher: PaletteMatcher): Uint8Array {
   const work = new Float32Array(width * height * 3);
   for (let i = 0, p = 0; i < width * height; i++, p += 4) {
     work[i * 3] = rgba[p]!;
@@ -111,7 +188,7 @@ function ditherFloydSteinberg(rgba: Uint8ClampedArray, width: number, height: nu
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
-      const { index, dr, dg, db } = quantizeWithResidual(work[i * 3]!, work[i * 3 + 1]!, work[i * 3 + 2]!);
+      const { index, dr, dg, db } = quantizeWithResidual(work[i * 3]!, work[i * 3 + 1]!, work[i * 3 + 2]!, matcher);
       indices[i] = index;
 
       addError(x + 1, y, dr, dg, db, 7 / 16);
@@ -126,7 +203,7 @@ function ditherFloydSteinberg(rgba: Uint8ClampedArray, width: number, height: nu
 
 /** Atkinson: diffuses only 6/8 of the error (1/8 each to 6 neighbors), discarding the
  *  rest — produces a lighter, higher-contrast look than Floyd-Steinberg. */
-function ditherAtkinson(rgba: Uint8ClampedArray, width: number, height: number): Uint8Array {
+function ditherAtkinson(rgba: Uint8ClampedArray, width: number, height: number, matcher: PaletteMatcher): Uint8Array {
   const work = new Float32Array(width * height * 3);
   for (let i = 0, p = 0; i < width * height; i++, p += 4) {
     work[i * 3] = rgba[p]!;
@@ -147,7 +224,7 @@ function ditherAtkinson(rgba: Uint8ClampedArray, width: number, height: number):
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
-      const { index, dr, dg, db } = quantizeWithResidual(work[i * 3]!, work[i * 3 + 1]!, work[i * 3 + 2]!);
+      const { index, dr, dg, db } = quantizeWithResidual(work[i * 3]!, work[i * 3 + 1]!, work[i * 3 + 2]!, matcher);
       indices[i] = index;
 
       addError(x + 1, y, dr, dg, db);
@@ -184,7 +261,7 @@ const BAYER_8X8 = [
  * (the interface — a WxH threshold matrix in [0,64) — is what a blue-noise
  * tile would plug into; Bayer is the practical stand-in shipped today).
  */
-function ditherOrdered(rgba: Uint8ClampedArray, width: number, height: number): Uint8Array {
+function ditherOrdered(rgba: Uint8ClampedArray, width: number, height: number, matcher: PaletteMatcher): Uint8Array {
   const indices = new Uint8Array(width * height);
   const strength = 48; // +/- half-strength added per channel; tuned for a 6-color palette
 
@@ -197,7 +274,7 @@ function ditherOrdered(rgba: Uint8ClampedArray, width: number, height: number): 
       const r = clamp255(rgba[p]! + offset);
       const g = clamp255(rgba[p + 1]! + offset);
       const b = clamp255(rgba[p + 2]! + offset);
-      indices[i] = nearestPaletteIndex(r, g, b);
+      indices[i] = matcher.nearest(r, g, b);
     }
   }
 
@@ -208,31 +285,31 @@ export function ditherImage(
   rgba: Uint8ClampedArray,
   width: number,
   height: number,
-  algorithm: DitherAlgorithm
+  algorithm: DitherAlgorithm,
+  matcher: PaletteMatcher = IDEAL_RGB_MATCHER
 ): Uint8Array {
   switch (algorithm) {
     case "floyd_steinberg":
-      return ditherFloydSteinberg(rgba, width, height);
+      return ditherFloydSteinberg(rgba, width, height, matcher);
     case "atkinson":
-      return ditherAtkinson(rgba, width, height);
+      return ditherAtkinson(rgba, width, height, matcher);
     case "ordered":
-      return ditherOrdered(rgba, width, height);
+      return ditherOrdered(rgba, width, height, matcher);
   }
 }
 
-// The enhance factors every upload path applies before dithering — the
-// dashboard's upload, re-render and key rotation, its display preview, and
-// scripts/upload-images.ts all go through enhanceAndDither() below.
-export const DEFAULT_BRIGHTNESS = 1.0;
-export const DEFAULT_CONTRAST = 1.2;
-export const DEFAULT_SATURATION = 1.2;
-
-/** The color half of the image pipeline: enhance() in place with the default
- *  factors, then dither to palette indices. `rgba` is the board-oriented
- *  (landscape) buffer and is modified. */
+/**
+ * The color half of the image pipeline, shared by every upload path (the
+ * dashboard's upload, re-render and key rotation, its display preview, and
+ * scripts/upload-images.ts). `rgba` is the board-oriented (landscape)
+ * buffer and is modified. Since IMAGE_PIPELINE_VERSION 3: the photo-driven
+ * tone stage in tone.ts (levels/brighten/contrast as needed, saturation,
+ * then fit into the panel's measured black..white range), then dithering
+ * against the measured inks with perceptual (OKLab) matching.
+ */
 export function enhanceAndDither(rgba: Uint8ClampedArray, width: number, height: number, algorithm: DitherAlgorithm): Uint8Array {
-  enhance(rgba, width, height, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_SATURATION);
-  return ditherImage(rgba, width, height, algorithm);
+  prepareForPanel(rgba, width, height, PANEL_APPEARANCE[0]!, PANEL_APPEARANCE[1]!);
+  return ditherImage(rgba, width, height, algorithm, PANEL_MATCHER);
 }
 
 /** 2 pixels/byte, big-nibble-first, using the exact hardware nibble map. */

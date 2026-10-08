@@ -2311,7 +2311,7 @@ async function fetchCroppedSource(imageId: string, board: BoardId, key: CryptoKe
     headers: { Authorization: "Bearer " + getApiKey() },
   });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  if (!res.ok) throw httpError(res);
   return aesGcmDecryptBlob(key, new Uint8Array(await res.arrayBuffer()));
 }
 
@@ -2355,8 +2355,40 @@ async function fetchRawOriginal(imageId: string, key: CryptoKey): Promise<Uint8A
   const res = await fetch("/admin/images/" + encodeURIComponent(imageId) + "/raw", {
     headers: { Authorization: "Bearer " + getApiKey() },
   });
-  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  if (!res.ok) throw httpError(res);
   return aesGcmDecryptBlob(key, new Uint8Array(await res.arrayBuffer()));
+}
+
+/** Same error shape apiFetch throws (status, and the rate-limit message),
+ *  for the raw fetch() calls that download binary blobs. */
+function httpError(res: Response): Error & { status: number } {
+  const retryAfter = res.headers.get("Retry-After");
+  const message =
+    res.status === 429 ? "rate limited" + (retryAfter ? ` — retry in ${retryAfter}s` : "") : res.status + " " + res.statusText;
+  const err = new Error(message) as Error & { status: number };
+  err.status = res.status;
+  return err;
+}
+
+/**
+ * Runs one step of a bulk job (re-rendering or re-encrypting one photo),
+ * waiting out a 429 and retrying instead of failing the whole job. Safe
+ * because the rate limiter rejects before a route writes anything, and both
+ * steps are idempotent anyway. The wait comes from the error's "retry in
+ * Ns" (Retry-After); `onWait` lets the caller show it in the progress modal.
+ */
+async function withRateLimitRetry<T>(step: () => Promise<T>, onWait: (seconds: number) => void): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await step();
+    } catch (err: any) {
+      if (err?.status !== 429 || attempt >= 10) throw err;
+      const match = /retry in (\d+)s/.exec(String(err.message));
+      const seconds = Math.min(300, Math.max(1, match ? Number(match[1]) : 30)) + 1;
+      onWait(seconds);
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+    }
+  }
 }
 
 /**
@@ -2493,7 +2525,10 @@ async function rerenderOutdatedImages(bucketId: string) {
     const img = outdated[i];
     progressModalUpdate(i, total, "Re-rendering " + img.filename + "…");
     try {
-      await rerenderOneImage(img.id, img.dither_algorithm, bucketKey, bucket.key_version ?? 1);
+      await withRateLimitRetry(
+        () => rerenderOneImage(img.id, img.dither_algorithm, bucketKey, bucket.key_version ?? 1),
+        (seconds) => progressModalUpdate(i, total, "Server busy — continuing with " + img.filename + " in " + seconds + "s…")
+      );
     } catch (err: any) {
       progressModalUpdate(i, total, "Failed on " + img.filename + ": " + err.message);
       showMessage(
@@ -2613,7 +2648,10 @@ async function runBucketRotation(bucketId: string) {
     if (!meta) { migrated++; continue; } // deleted mid-rotation — nothing left to migrate
     rotateModalUpdate(migrated, total, "Re-encrypting " + meta.filename + "…");
     try {
-      await reencryptOneImage(bucketId, rotationId, imageId, meta.dither_algorithm, oldBucketKey, newKey);
+      await withRateLimitRetry(
+        () => reencryptOneImage(bucketId, rotationId, imageId, meta.dither_algorithm, oldBucketKey, newKey),
+        (seconds) => rotateModalUpdate(migrated, total, "Server busy — continuing with " + meta.filename + " in " + seconds + "s…")
+      );
     } catch (err: any) {
       rotateModalUpdate(migrated, total, "Failed on " + meta.filename + ": " + err.message);
       showMessage(

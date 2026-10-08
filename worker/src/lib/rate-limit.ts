@@ -39,6 +39,13 @@ export const RATE_LIMITS = {
    *  of heavy dashboard calls must never be able to lock an account out of
    *  checking its own session or logging in. */
   adminMe: { limit: 300, windowSeconds: 150 },
+  /** Image transfer endpoints (adminRateLimitBucket below): upload, fetching
+   *  an image's raw original or cropped source, re-render, and rotation's
+   *  reencrypt-image. Bulk jobs (re-render a bucket, rotate its key) cost 3-4
+   *  of these per photo, which would exhaust `admin` partway through a large
+   *  bucket - so they get their own, much bigger budget (~8/s) that also
+   *  leaves the rest of the dashboard untouched while a job runs. Per user. */
+  adminImages: { limit: 1200, windowSeconds: 150 },
   /** "Send test" on an alert webhook — each one is an outbound POST to a URL
    *  of the caller's choosing, so bound it well below the admin budget.
    *  Per user, 1-hour window. */
@@ -103,4 +110,15 @@ export function rateLimitedResponse(windowSeconds: number): Response {
     status: 429,
     headers: { "Retry-After": String(retryAfter) },
   });
+}
+
+/** Which per-user bucket an authenticated /admin request counts against —
+ *  see RATE_LIMITS.adminMe and RATE_LIMITS.adminImages for why each exists. */
+export function adminRateLimitBucket(method: string, path: string): "admin" | "adminMe" | "adminImages" {
+  if (path === "/admin/me" || path.startsWith("/admin/me/")) return "adminMe";
+  if (method === "POST" && path === "/admin/images/upload") return "adminImages";
+  if (method === "GET" && /^\/admin\/images\/[^/]+\/(raw|cropped\/[^/]+)$/.test(path)) return "adminImages";
+  if (method === "POST" && /^\/admin\/images\/[^/]+\/rerender$/.test(path)) return "adminImages";
+  if (method === "POST" && /^\/admin\/buckets\/[^/]+\/rotate\/[^/]+\/reencrypt-image\/[^/]+$/.test(path)) return "adminImages";
+  return "admin";
 }

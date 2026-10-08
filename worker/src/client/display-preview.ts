@@ -9,8 +9,8 @@ import { PANEL_APPEARANCE } from "../lib/palette";
  * rotate -> enhance -> dither, the same enhanceAndDither() the upload uses,
  * on the same board-oriented buffer, so error diffusion runs in the same
  * direction) and then paints each pixel's palette index in PANEL_APPEARANCE,
- * i.e. what that ink looks like on the panel rather than the pure RGB the
- * ditherer targets. Returned upright, at the board's full resolution — shown
+ * i.e. what that ink looks like on the panel (the same measured colors the
+ * ditherer now targets) rather than the nibble's nominal pure RGB. Returned upright, at the board's full resolution — shown
  * scaled down, the browser's averaging approximates the dots blending at
  * viewing distance.
  */
